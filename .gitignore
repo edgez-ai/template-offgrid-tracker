@@ -1,0 +1,11 @@
+.DS_Store
+node_modules/
+.expo/
+dist/
+.env
+.env*.local
+app/android/
+app/signing/
+infra/appwrite.config.json
+site/.next
+site/out

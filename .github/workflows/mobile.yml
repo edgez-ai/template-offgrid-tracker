@@ -1,0 +1,137 @@
+name: Build mobile app
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to receive the mobile artifacts (empty uses latest)
+        required: false
+        type: string
+      source_ref:
+        description: Git ref containing the app code to build
+        required: true
+        default: main
+        type: string
+      build_apk:
+        description: Also build and attach signed and unsigned APKs
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mobile-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    env:
+      DOMAIN_SUFFIX: edgez.biz
+      APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
+      APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID || secrets.APPWRITE_PROJECT_ID }}
+      APPWRITE_PROJECT_NAME: ${{ vars.APPWRITE_PROJECT_NAME }}
+      APPWRITE_TEAM_INVITE_URL: ${{ vars.APPWRITE_TEAM_INVITE_URL }}
+      EDGEZ_BUNDLE_RUNTIME_VERSION: offgrid-tracker-android-2
+      CI: "1"
+      NODE_ENV: production
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || github.ref }}
+      - name: Select existing release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+        run: |
+          tag="$REQUESTED_TAG"
+          if [[ -z "$tag" ]]; then
+            tag="$(gh release view --json tagName --jq .tagName)"
+          fi
+          gh release view "$tag" >/dev/null
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Check Appwrite project ID
+        run: |
+          if [[ -z "$APPWRITE_PROJECT_ID" ]]; then
+            echo 'Set the repository Actions variable or secret APPWRITE_PROJECT_ID to the deployed Appwrite project ID.' >&2
+            exit 1
+          fi
+      - name: Check Android signing credentials
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: |
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" ]]; then
+            echo 'Set ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets and the ANDROID_KEY_ALIAS variable.' >&2
+            exit 1
+          fi
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install mobile dependencies
+        working-directory: app
+        run: npm ci
+      - name: Generate Android project
+        working-directory: app
+        run: npx expo prebuild --platform android --clean --no-install
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - name: Build React Native release bundle
+        working-directory: app/android
+        run: ./gradlew createBundleReleaseJsAndAssets --no-daemon
+      - name: Package React Native bundle update
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p dist/mobile
+          cp app/android/app/build/generated/assets/react/release/index.android.bundle dist/mobile/offgrid-tracker.android.bundle
+          node app/scripts/create-app-bundle-manifest.mjs \
+            dist/mobile/offgrid-tracker.android.bundle \
+            dist/mobile/offgrid-tracker-update.payload \
+            "$RELEASE_TAG" \
+            "$(git rev-parse HEAD)" \
+            "$EDGEZ_BUNDLE_RUNTIME_VERSION"
+      - name: Sign React Native bundle manifest
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: bash app/scripts/sign-app-bundle-manifest.sh
+      - name: Build unsigned APK
+        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
+        working-directory: app/android
+        run: ./gradlew assembleRelease --no-daemon
+      - name: Sign release APK
+        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+        run: bash app/scripts/sign-android-release.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: offgrid-tracker-mobile
+          path: dist/mobile/*
+      - name: Attach mobile builds to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=(
+            dist/mobile/offgrid-tracker.android.bundle
+            dist/mobile/offgrid-tracker-update.json
+          )
+          if [[ -f dist/mobile/offgrid-tracker-signed.apk ]]; then
+            files+=(dist/mobile/offgrid-tracker-signed.apk dist/mobile/offgrid-tracker-unsigned.apk)
+          fi
+          gh release upload "${{ steps.release.outputs.tag }}" "${files[@]}" --clobber

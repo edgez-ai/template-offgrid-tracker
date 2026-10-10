@@ -1,0 +1,121 @@
+# Mobile companion
+
+The Expo app supplies the customizable onboarding UI while
+`@edgez/react-native-sdk` owns device discovery, BLE and SoftAP transport,
+protocol details, payload normalization, and native provisioning dependencies.
+It scans `PROV_` ESP32 and nRF54 BLE advertisements plus `PROV_` H7608 SoftAPs
+and derives the serial. The nRF54 advertises service
+`FFF0` so the app can route it to the direct `mqtt-config` endpoint. For ESP32, after the operator selects a device,
+the example proof of possession (PoP) `abcd1234` is prefilled to match the
+firmware and the value shown on its OLED. The app establishes an ESP-IDF
+Security 1 session. The operator chooses whether the device has regular Wi-Fi
+as its upstream connection. If so, the app uses the ESP32's built-in Wi-Fi scan
+and provisioning flow. It creates or reuses the Appwrite Device, sends its
+one-time MQTT credential, selected farm's country, HaLow channel, mesh ID,
+passphrase, and optional device location together to `mqtt-config`. It also uses Appwrite Auth and
+reads permitted telemetry directly from TablesDB.
+
+The first signed-in session opens Settings to create a farm and its Appwrite
+team. Each farm has a row in the `farms` table, and its creator owns the team.
+Settings can create and edit farms through one form opened by the Create farm
+or Edit farm button, switch the active farm, and manage its team. Farm owners
+can invite members by email, optionally enter their names, and remove them.
+The team list shows email and also shows a name when available. Invitees accept
+through the web site's `/invite.html` page. New invitees set a password before
+signing in to the mobile app. The invitation URL is calculated from `APP_NAME`,
+the first eight characters of `APPWRITE_PROJECT_ID`, and `DOMAIN_SUFFIX`.
+`APPWRITE_TEAM_INVITE_URL` can override the complete URL. Restart Metro after
+changing these variables so its JavaScript bundle gets the new URL. Farm fields are
+name, country, location, HaLow channel, mesh ID, and passphrase. The selected
+farm ID is saved in Appwrite account preferences and restored on the next app
+launch. The map and list show devices assigned to that farm; the list heading
+uses its name. New devices receive the farm ID in their metadata and team-based
+permissions. Existing devices without a farm ID remain unassigned.
+
+The `+ ADD` button opens a four-step ESP32 flow: choose the BLE device, confirm its
+name and PoP, choose whether to use upstream Wi-Fi, then confirm the farm mesh
+settings. The Wi-Fi branch scans nearby networks and accepts SSID/password.
+Provisioning sends optional device coordinates through the existing BLE
+`mqtt-config` endpoint and stores the selected point in the Device's native
+`location` field. Later GPS sensor readings update that same field through the
+application Function, and the app uses it for map markers.
+For nRF54 the flow has three steps. The app connects over BLE without a PoP or
+pairing code, skips upstream Wi-Fi selection, and writes the same configuration
+to its encrypted `mqtt-config` GATT characteristic. Device GPS is an additional
+location choice for nRF54; it uses fixes from the GPS attached to the device.
+Each request carries a unique confirmation ID. The app waits up to ten seconds
+for the nRF54 to report that both MQTT and HaLow settings were saved and read
+back from NVS; a missing or stale confirmation fails provisioning. Success,
+failure, and cancel paths all disconnect BLE. After a successful confirmation,
+the nRF54 waits for that disconnect and then reboots into the saved profile.
+The nRF54 stores the MQTT credential and HaLow profile. Its HaLow beacon uses
+the MQTT client ID (the Appwrite Device ID) as its user ID and includes GPS and
+IMU sensor data when available. MQTT telemetry publishing is not yet implemented
+on that target.
+
+The signed-in home screen opens with a full-screen Organic Maps view from
+`@edgez/react-native-sdk`. The top-right menu switches between map and list
+views or signs out; `+ ADD` remains beside it. Operators can download the
+current map region once and continue viewing it offline; cached farms, geofence
+areas and rules, devices, and latest telemetry provide the map state. Devices
+are displayed as map nodes when latitude and longitude are present. List view
+shows the selected farm name and each device as a card with its connectivity
+status and latest battery voltage. Selecting a card opens the full-screen device
+history view, where the battery voltage line chart can show the last 30 minutes,
+1 hour, 6 hours, or 24 hours. The detail view also lists direct HaLow peers from
+the Devices API topology projection, including radio MAC, RSSI when
+available, and last-seen time. It hides links whose gateway report is more than
+two minutes old.
+The detail view can also delete the Device after native destructive
+confirmation. Appwrite removes its MQTT credential and route with the Device;
+existing telemetry rows are retained.
+
+H7608 onboarding lets the operator choose Wi-Fi, Ethernet, or no upstream
+connection. Ethernet and no-upstream choices bypass the Wi-Fi scan immediately.
+The SDK uses `@orbital-systems/react-native-esp-idf-provisioning` for both the
+ESP32 BLE and H7608 SoftAP transports. Android discovers the gateway's
+`PROV_<serial>` Wi-Fi network and the operator approves the Wi-Fi connection.
+The app sends the Appwrite credential and farm's HaLow mesh settings through
+the SDK's UI-independent provisioning API. The
+name entered in the device-details screen becomes the H7608's post-provisioning
+Wi-Fi AP SSID. The Expo config lists only `@edgez/react-native-sdk` for
+provisioning; its config plugin installs and configures the BLE and ESP-IDF
+BLE/SoftAP native capabilities.
+For HT-HC33 devices it also shows the running firmware version and can publish
+an MQTT OTA command for `offgrid-tracker-ota.bin` from the latest release of the
+repository that built the app. The action is available only while online.
+
+On Android, **Menu → Flash ESP32** provides recovery and factory flashing over
+USB-C. Choose the exact ESP32 variant, download and verify
+`offgrid-tracker-flash.bin` from this deployment repository's latest GitHub
+release, allow USB access, and select the connected board. The app creates a
+short-lived Appwrite JWT and organization-scoped flash session, then sends the
+release asset URL and GitHub-published SHA-256 to the runtime. The runtime
+downloads and verifies the image; the phone carries only control and USB/IP
+traffic. The server writes the merged image at address `0x0`; the OTA-only
+`offgrid-tracker-ota.bin` is never used by this flow. Flashing requires an active
+network connection and membership in the selected farm's Appwrite team.
+Choose 115200, 230400, 460800, or 921600 baud per flash. The default 460800
+setting is the recommended balance; use 115200 when a phone, cable, or USB
+adapter is unreliable.
+
+New Devices grant read access to farm team members and update/delete access to
+farm team owners. Telemetry inherits the Device read permission.
+Its Expo deep-link scheme is `edgez-devtools`, so application links begin with
+`edgez-devtools://`.
+
+BLE provisioning and Organic Maps use native modules and do not run in stock
+Expo Go. A development client must be rebuilt after adding these modules.
+Copy `.env.example` to `.env` and set the local Appwrite project and domain
+values. `npm run android:debug` builds, installs, and launches the debug app on
+a connected device; `npm run android:debug:build` builds the debug APK without
+installing it.
+`npm run android` starts Metro, forwards its port, and opens the project through
+`edgez-devtools://` in EdgeZ Android DevTools on `127.0.0.1:5555`. It does not
+run Gradle or build an APK. Override `ANDROID_SERIAL` or `EXPO_PORT` when needed.
+
+### Devices service migration
+
+Deploy Appwrite and run its schema migration before deploying this Function/client/firmware update. Firmware publishes system reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite owns status and topology, stores RF samples as history, and dispatches only sensor data to the application Function under the logical `telemetry/sensors` event topic. Reconnect devices after the Appwrite upgrade to refresh their MQTT ACL.
+
+Clients read native Device status, firmware version, HaLow MAC, and topology projection. Map configuration uses native `markerType`, `markerColor`, and `location`. The installer no longer creates `topology-links`; old remote rows are left untouched. Application sensor history, geofences, OTA tracking, and application downlink tracking remain in Offgrid Tracker.

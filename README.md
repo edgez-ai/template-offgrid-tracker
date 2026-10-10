@@ -1,0 +1,331 @@
+# Offgrid Tracker
+
+An Appwrite + Next.js + React Native starter for authenticated device
+onboarding, offline device mapping, Wi-Fi HaLow provisioning, and MQTT telemetry.
+It mirrors the four-part structure of Hello Channels while giving each folder a
+provisioning-specific responsibility.
+
+[![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-offgrid-tracker&template_owner=edgez-ai)
+[![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-offgrid-tracker)
+
+## Product tour
+
+Offgrid Tracker gives operators a shared view of livestock trackers from the web
+and an Android companion for field work, provisioning, and maintenance.
+
+### Monitor device telemetry
+
+The web portal lists every device in the selected farm, shows whether it is
+online, identifies the gateway carrying its telemetry, and highlights its latest
+sensor reading. Operators can select a 30-minute, 1-hour, 6-hour, or 24-hour
+history window to inspect battery voltage and other numeric sensor fields.
+
+![Web portal showing a provisioned device, its battery voltage, telemetry route, and sensor history](docs/screenshots/web-device-telemetry.png)
+
+### Inspect the HaLow mesh
+
+The interactive topology view turns recent gateway reports into a live network
+graph. Summary cards show visible and online devices, gateways, active links,
+and average signal strength. Link colors make excellent, good, and weak RSSI
+paths easy to compare, while selecting a node reveals its identity, gateway
+state, HaLow MAC address, and direct RF links.
+
+![Web portal showing the live Wi-Fi HaLow network topology and RSSI-labelled links](docs/screenshots/web-network-topology.png)
+
+### Operate in the field
+
+The Android app centers field work on an offline-capable map. It plots devices
+using their latest reported coordinates, overlays configured farm areas, and
+keeps key farm, device, telemetry, area, and rule data available when the
+network is unavailable.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-farm-map.jpg" width="360" alt="Android farm map showing livestock device markers and a configured farm area">
+</p>
+
+Each device has a detailed operational view. It shows the current telemetry
+route and gateway availability, lets the operator choose the animal icon and
+marker color used on the map, and presents the latest battery voltage together
+with selectable history ranges.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-device-details.jpg" width="360" alt="Android device details showing telemetry route, map appearance, battery voltage, and history controls">
+</p>
+
+### Provision every supported platform through one flow
+
+The app presents one **Add device** experience for OpenWrt gateways such as the
+H7608, the ESP32 series, and nRF54L15 devices. The first step scans Bluetooth
+for ESP32 and nRF54 advertisements while also scanning nearby provisioning
+Wi-Fi for an unconfigured OpenWrt gateway.
+
+<table>
+  <tr>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-1-discovery.jpg" width="220" alt="Step 1 scans Bluetooth and provisioning Wi-Fi for ESP32, nRF54, and H7608 devices">
+      <br><strong>1. Discover</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-2-device-details.jpg" width="220" alt="Step 2 configures the device name, map icon, marker color, location, and proof of possession">
+      <br><strong>2. Describe</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-3-upstream.jpg" width="220" alt="Step 3 selects an upstream Wi-Fi network or a HaLow-only configuration">
+      <br><strong>3. Connect</strong>
+    </td>
+    <td width="25%" align="center">
+      <img src="docs/screenshots/mobile-provision-4-confirm.jpg" width="220" alt="Step 4 confirms the farm, HaLow mesh, device location, and upstream network before provisioning">
+      <br><strong>4. Provision</strong>
+    </td>
+  </tr>
+</table>
+
+The shared details step assigns the device name, map icon, marker color, and
+optional location. An ESP32 can also request its proof of possession. The
+connection step then adapts to the detected platform: ESP32 supports upstream
+Wi-Fi or HaLow-only operation; an OpenWrt H7608 supports Wi-Fi, Ethernet, or no
+upstream connection; and an nRF54L15 uses the farm's HaLow profile and skips
+upstream selection.
+
+On confirmation, the app creates or reuses the Appwrite Device and sends its
+MQTT credential, farm country and channel, mesh credentials, and optional
+location through the platform's provisioning transport. The SDK handles the
+different BLE and provisioning Wi-Fi protocols behind the same operator flow.
+
+### Manage farms and access
+
+Farm settings bring the operational boundary into one place. Owners can manage
+farm details, team membership, geofence areas, and rules. Team members receive
+access to the farm and the device readings permitted through its Appwrite team.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-farm-settings.jpg" width="360" alt="Android farm settings showing farm details and team management">
+</p>
+
+### Flash supported hardware from Android
+
+The USB-C firmware workflow lets an authorized operator select the exact board
+profile and flash a release image through the connected Android phone. The
+organization runtime downloads the matching asset from the deployment's latest
+GitHub release, verifies it, and performs the board-specific flashing flow; the
+phone carries the control and USB traffic.
+
+<p align="center">
+  <img src="docs/screenshots/mobile-flash-hardware.jpg" width="360" alt="Android USB-C firmware workflow with supported hardware profiles and flash timeout settings">
+</p>
+
+## Hardware used in this example
+
+The example deployment combines a HaLow gateway with two supported tracker
+platforms. Select a product image or product name to open the manufacturer's
+official page.
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <a href="https://heltec.org/project/ht-h7608/">
+        <img src="docs/hardware/heltec-ht-h7608.png" width="240" alt="Heltec HT-H7608 Wi-Fi HaLow router and gateway">
+      </a>
+      <br>
+      <strong><a href="https://heltec.org/project/ht-h7608/">Heltec HT-H7608</a></strong>
+    </td>
+    <td width="33%" align="center">
+      <a href="https://heltec.org/project/ht-hc33/">
+        <img src="docs/hardware/heltec-ht-hc33.png" width="240" alt="Heltec HT-HC33 ESP32-S3 Wi-Fi HaLow development board">
+      </a>
+      <br>
+      <strong><a href="https://heltec.org/project/ht-hc33/">Heltec HT-HC33</a></strong>
+    </td>
+    <td width="34%" align="center">
+      <a href="https://www.seeedstudio.com/XIAO-nRF54L15-Sense-p-6494.html">
+        <img src="docs/hardware/seeed-xiao-nrf54l15-sense.jpg" width="150" alt="Seeed Studio XIAO nRF54L15 Sense development board">
+      </a>
+      <a href="https://www.seeedstudio.com/Wio-WM6180-Wi-Fi-HaLow-Module-for-XIAO-p-6395.html">
+        <img src="docs/hardware/seeed-wio-wm6180-halow.jpg" width="150" alt="Seeed Studio Wio-WM6180 Wi-Fi HaLow transceiver for XIAO">
+      </a>
+      <br>
+      <strong><a href="https://www.seeedstudio.com/XIAO-nRF54L15-Sense-p-6494.html">Seeed Studio XIAO nRF54L15 Sense</a> + <a href="https://www.seeedstudio.com/Wio-WM6180-Wi-Fi-HaLow-Module-for-XIAO-p-6395.html">Wi-Fi HaLow transceiver</a></strong>
+    </td>
+  </tr>
+  <tr>
+    <td valign="top">
+      The farm gateway connects the HaLow network to Ethernet or 2.4 GHz Wi-Fi
+      and provides the upstream path used by MQTT telemetry.
+    </td>
+    <td valign="top">
+      This ESP32-S3 board integrates an HT-HC01/MM6108 HaLow radio. The example
+      firmware reads its battery ADC, publishes status telemetry, and can relay
+      traffic for HaLow-only leaf devices.
+    </td>
+    <td valign="top">
+      The nRF54L15 Sense provides the low-power MCU, Bluetooth provisioning,
+      microphone, and IMU. This example pairs it with Seeed's FGH100M-H-based
+      Wio-WM6180 transceiver for Wi-Fi HaLow connectivity.
+    </td>
+  </tr>
+</table>
+
+Product images are from the linked Heltec and Seeed Studio product pages.
+
+## Repository layout
+
+| Folder | Purpose |
+| --- | --- |
+| `site/` | Read-only Next.js portal for sign-in, devices, and telemetry |
+| `app/` | Expo app with an offline Organic Maps dashboard and BLE HaLow provisioning |
+| `function/` | Trusted MQTT webhook that writes history to Time Series and the latest state to TablesDB |
+| `infra/` | Rerunnable Appwrite CLI installer |
+
+The root `edgez.json` selects `appwrite.config.json` as the complete,
+version-controlled solution plan. **Deploy on EdgeZ** applies the auth methods,
+web and Android platforms, project Time Series Store, latest-state database and
+indexes, MQTT Function, Site, variables, domains, and both source deployments
+after project selection.
+Its `buildInstance` accepts `tiny`, `small`, `medium`, or `large`; this template
+defaults to `tiny` for both Site and Function builds.
+
+Open `offgrid-tracker.code-workspace` in VS Code to work on all four folders.
+
+Device firmware source is intentionally not included. Provisioning, OTA, and
+USB flashing remain available in the mobile app for firmware assets published
+separately to a deployment repository release.
+
+## Provisioning flow
+
+1. The ESP32 derives the serial as the 12 uppercase hexadecimal characters of
+   its Wi-Fi MAC and advertises `PROV_<serial>` over BLE.
+2. An operator signs in and creates a farm and Appwrite team. Farm settings include
+   a map location, a Morse Micro country and 1 MHz HaLow channel, and mesh credentials.
+3. The mobile app strips the `PROV_` prefix, creates an Appwrite Device with that
+   project-unique serial and farm ID, and creates its one-time MQTT credential
+   through the Devices API. The operator can leave device location unset, use the
+   phone's current location, or choose coordinates on the offline map. Selected
+   coordinates are stored in the Device's native `location` field and shown on
+   the farm map.
+4. The operator chooses whether the ESP32 has upstream Wi-Fi. The app sends the
+   farm's mesh settings, device location, and MQTT credential together through
+   the `mqtt-config` BLE endpoint, then provisions upstream Wi-Fi when selected.
+   Firmware connects to `mqtts://mqtt.edgez.ai:8883`, verifying the Let's Encrypt
+   chain with ESP-IDF's trusted root bundle.
+5. The device publishes application sensor JSON to
+   `projects/<projectId>/devices/<serial>/telemetry/sensors` and nanopb system
+   reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite's EMQX
+   ACL allows that serial to publish only beneath its own telemetry/events
+   topics and subscribe only beneath its own commands topic.
+   A HaLow-only leaf prefixes the opaque BATMAN-adv-lite body with `0` for
+   system data or `1` for application telemetry. The upstream gateway removes
+   that byte and publishes the remaining bytes unchanged to the matching topic.
+   Commands take the reverse path under the gateway's own authorized namespace:
+   Application commands use `commands/proxy/<leafSerial>/<command>` and system
+   commands use `system/commands/proxy/<leafHaLowMac>`. The gateway forwards a
+   leading `1` or `0` respectively, followed by the unchanged command body.
+   The payload's Appwrite `clientId` assigns each sensor report and its read
+   permissions to the originating leaf device. System status uses protobuf and
+   Appwrite records device presence, gateway routing, topology, and HaLow RF
+   metrics before dispatching application sensor telemetry to the Function.
+6. Appwrite resolves the MQTT client and emits
+   `devices.<deviceId>.mqtt.message.publish` to the Function.
+7. The Function verifies the topic project and serial against the built-in
+   device, writes the complete reading to the project's Time Series Store, and
+   upserts one latest `telemetry` row per device carrying that device's read
+   permissions. When GPS sensor values are present, it also updates the native
+   Device `location` field using `[longitude, latitude]`.
+8. Web and mobile read current state from TablesDB and request Devices with
+   `includeTopology=true`, then query
+   historical sensor fields from Time Series with an Appwrite JWT. Each device
+   uses the deterministic `device_<deviceId>` measurement. Numeric sensor type
+   indexes are stored under text fields such as `sensor_temperature` and
+   `sensor_battery_voltage`; GPS is stored as numeric `lat` and `lon` fields so
+   Flux's built-in `experimental/geo` package can shape and range-filter it.
+   The latest TablesDB telemetry row also stores the same fix in a spatially
+   indexed `location` point using `[longitude, latitude]`, allowing queries such
+   as `Query.distanceLessThan("location", [longitude, latitude], radiusMeters)`.
+   Its `icon` and `markerColor` fields mirror native Device marker fields so a spatial query
+   returns everything needed to draw the device marker.
+   They display only active links reported within the last two minutes, so an
+   offline gateway cannot leave stale topology visible.
+
+Web and mobile can request an HT-HC33 firmware update. The repository is taken
+from Appwrite's deployment-provided `APPWRITE_VCS_REPOSITORY_URL` (or GitHub
+Actions' `GITHUB_REPOSITORY` for mobile), so **Deploy on EdgeZ** installations
+use their own latest release instead of a fixed template repository. Only users
+with update permission on the Device can publish its MQTT OTA command.
+
+The mobile app caches each signed-in user's farms, geofence areas and rules,
+devices, latest telemetry, and mobile GPS trace points for offline map rendering.
+The **Trace** menu can opt into background movement tracking, choose a one-, five-,
+or fifteen-minute save interval, and preview one hour through seven days as a
+route on the offline map. Trace points are timestamped locally first, uploaded to
+the private row-secured `mobile-trace-points` table when Appwrite is reachable,
+and retained in the local queue while offline. Farm mesh passphrases and MQTT
+credentials are not stored in this offline cache; provisioning and edits require
+a connection.
+
+## Environment
+
+The managed workspace injects:
+
+```sh
+APP_NAME=<workspace-name>
+DOMAIN_SUFFIX=edgez.biz
+APPWRITE_ENDPOINT=<appwrite-endpoint>
+APPWRITE_PUBLIC_ENDPOINT=<optional-browser-safe-appwrite-endpoint>
+APPWRITE_PROJECT_ID=<project-id>
+APPWRITE_PROJECT_NAME=<dns-safe-project-name>
+APPWRITE_API_KEY=<server-api-key>
+```
+
+Stable database and table IDs come directly from `appwrite.config.json`; the
+template does not require a committed `.env.local` file.
+
+`APPWRITE_ENDPOINT` configures the server-side CLI. Browser and mobile builds
+use `APPWRITE_PUBLIC_ENDPOINT` when provided; otherwise a non-local HTTP
+endpoint is automatically upgraded to HTTPS to prevent mixed-content errors.
+
+For GitHub Actions mobile builds, set the repository Actions variable or secret
+`APPWRITE_PROJECT_ID` to the deployed Appwrite project ID. The build embeds this
+ID in the Android app's Appwrite client configuration.
+
+All clients derive the Function URL as
+`https://${APPWRITE_PROJECT_NAME}-${APP_NAME}.functions.${DOMAIN_SUFFIX}`.
+The web/mobile clients also receive the public Appwrite endpoint, project ID,
+and non-secret table IDs. The API key is used by `infra/` only. Appwrite's
+server-level EMQX secret remains outside this application repository.
+
+## Local validation
+
+Install dependencies in `site/`, `app/`, `function/`, and `infra/`, then run:
+
+```sh
+(cd site && npm run typecheck && npm run build)
+(cd app && npm run typecheck)
+(cd function && npm run check)
+(cd infra && npm run check)
+```
+
+Remote installation is intentionally separate: run `cd infra && npm run deploy`
+only when you intend to provision or update Appwrite resources.
+Run `cd infra && npm run clean` to remove this template's Site, Function,
+database, Time Series Store, proxy rule, and auth platforms. Cleanup preserves
+project users, Devices, and project-wide authentication settings.
+
+## Release builds
+
+The `Build mobile app` GitHub Actions workflow runs when a GitHub Release is
+published and can also be started manually with **Run workflow**. It produces
+`offgrid-tracker-signed.apk`, `offgrid-tracker-unsigned.apk`, and signed React
+Native bundle-update assets. Firmware binaries are not built by this template;
+attach separately produced, board-specific firmware assets to releases when
+the mobile flashing and OTA controls should be enabled.
+
+The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
+and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
+The upload keystore and password have an ignored local backup in `app/signing/`;
+back them up securely before deleting that directory. The unsigned APK is for
+separate signing and cannot be installed as-is.
+
+### Devices service migration
+
+Deploy Appwrite and run its schema migration before deploying this Function/client/firmware update. Firmware publishes system reports to `projects/<projectId>/devices/<serial>/system/status`. Appwrite owns status and topology, stores RF samples as history, and dispatches only sensor data to the application Function under the logical `telemetry/sensors` event topic. Reconnect devices after the Appwrite upgrade to refresh their MQTT ACL.
+
+Clients read native Device status, firmware version, HaLow MAC, and topology projection. Map configuration uses native `markerType`, `markerColor`, and `location`. The installer no longer creates `topology-links`; old remote rows are left untouched. Application sensor history, geofences, OTA tracking, and application downlink tracking remain in Offgrid Tracker.

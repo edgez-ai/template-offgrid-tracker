@@ -1,0 +1,13 @@
+{
+  "name": "offgrid-tracker-function",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "check": "node --check src/main.js && node --test src/main.test.js"
+  },
+  "dependencies": {
+    "node-appwrite": "^20.0.0"
+  }
+}

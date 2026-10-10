@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "name": "offgrid-tracker",
+  "buildInstance": "small",
+  "appwriteConfig": "appwrite.config.json",
+  "deploymentEngine": {
+    "name": "appwrite-cli",
+    "schemaVersion": 1,
+    "directory": "infra",
+    "install": "npm run install:solution",
+    "uninstall": "npm run uninstall:solution"
+  },
+  "deployments": [
+    {
+      "id": "mqtt-ingest",
+      "type": "function",
+      "name": "Offgrid Tracker MQTT ingest",
+      "rootDirectory": "function",
+      "runtime": "node-24",
+      "entrypoint": "src/main.js",
+      "installCommand": "npm ci"
+    },
+    {
+      "id": "web",
+      "type": "site",
+      "name": "Offgrid Tracker",
+      "rootDirectory": "site",
+      "framework": "nextjs",
+      "installCommand": "npm ci",
+      "buildCommand": "npm run build",
+      "outputDirectory": "out"
+    }
+  ],
+  "workspace": {
+    "mobile": {
+      "rootDirectory": "app",
+      "framework": "expo"
+    }
+  }
+}
