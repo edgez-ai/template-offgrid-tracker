@@ -1,0 +1,115 @@
+name: Build firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: PlatformIO environment to build
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - waveshare-esp32-p4
+          - esp32-s3-pawr
+          - heltec-hc33
+          - seeed-xiao-nrf54l15-sense
+          - seeed-xiao-nrf54l15-hc01
+          - edgez-nrf54l15-fgh200m
+
+# Firmware is intentionally an Actions artifact, never a GitHub Release asset.
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-${{ github.ref }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Check licensing, release policy, and RF boundaries
+        run: python3 .github/scripts/check-firmware-compliance.py
+      - name: Select build matrix
+        id: build-matrix
+        shell: bash
+        env:
+          SELECTED_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          if [[ "$SELECTED_ENVIRONMENT" == "all" ]]; then
+            matrix='{"environment":["waveshare-esp32-p4","esp32-s3-pawr","heltec-hc33","seeed-xiao-nrf54l15-sense","seeed-xiao-nrf54l15-hc01","edgez-nrf54l15-fgh200m"]}'
+          else
+            matrix="$(jq -cn --arg environment "$SELECTED_ENVIRONMENT" \
+              '{environment: [$environment]}')"
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: compliance
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compliance.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install PlatformIO
+        run: python -m pip install platformio==6.1.18
+      - name: Build ${{ matrix.environment }}
+        run: >-
+          pio run
+          --project-dir firmware
+          --environment "${{ matrix.environment }}"
+      - name: Package Actions artifact with licensing and source manifest
+        shell: bash
+        env:
+          PIO_ENV: ${{ matrix.environment }}
+        run: |
+          set -euo pipefail
+          build_dir="firmware/.pio/build/$PIO_ENV"
+          artifact_dir="dist/firmware/$PIO_ENV"
+          test -d "$build_dir"
+          mkdir -p "$artifact_dir/licenses"
+
+          find "$build_dir" -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.hex' -o -name '*.uf2' \) \
+            -exec cp '{}' "$artifact_dir/" ';'
+          test "$(find "$artifact_dir" -maxdepth 1 -type f | wc -l)" -gt 0
+
+          cp FIRMWARE-LICENSING.md "$artifact_dir/"
+          cp LICENSE "$artifact_dir/licenses/OFFGRID-TRACKER-APACHE-2.0"
+          cp firmware/modules/mm-iot-zephyr/submodules/mm-iot-sdk/LICENSES/* \
+            "$artifact_dir/licenses/"
+          cp \
+            firmware/modules/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt/licenses/* \
+            "$artifact_dir/licenses/"
+          cp \
+            firmware/modules/mm-iot-zephyr/submodules/morse-firmware/firmware/LICENSE \
+            "$artifact_dir/licenses/MORSE-MICRO-FIRMWARE-BDL"
+          cp \
+            firmware/modules/mm-iot-zephyr/submodules/morse-firmware/bcf/morsemicro/LICENSE \
+            "$artifact_dir/licenses/MORSE-MICRO-BCF-BDL"
+
+          {
+            echo "platformio_environment=$PIO_ENV"
+            echo "repository_commit=$(git rev-parse HEAD)"
+            git submodule status --recursive
+          } > "$artifact_dir/SOURCE-MANIFEST.txt"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: offgrid-tracker-${{ matrix.environment }}
+          path: dist/firmware/${{ matrix.environment }}/
+          if-no-files-found: error
+          retention-days: 7

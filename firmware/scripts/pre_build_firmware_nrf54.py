@@ -72,14 +72,15 @@ if not is_complete_morse_module(mm_root):
     env.Exit(1)
 
 edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
-edgez_source_root = Path(edgez_source_option).expanduser().resolve()
-if not (
-    edgez_source_option
-    and (edgez_source_root / "ports" / "zephyr" / "component.cmake").is_file()
-    and (edgez_source_root / "include" / "edgez_diagnostics.h").is_file()
-):
-    print(f"ERROR: EdgeZ HaLow mesh source checkout not found at {edgez_source_root}")
-    env.Exit(1)
+edgez_source_root = None
+if edgez_source_option:
+    edgez_source_root = Path(edgez_source_option).expanduser().resolve()
+    if not (
+        (edgez_source_root / "ports" / "zephyr" / "component.cmake").is_file()
+        and (edgez_source_root / "include" / "edgez_diagnostics.h").is_file()
+    ):
+        print(f"ERROR: EdgeZ HaLow mesh source checkout not found at {edgez_source_root}")
+        env.Exit(1)
 
 
 def first_existing(paths):
@@ -111,8 +112,15 @@ env["ENV"]["EDGE_DEVICE_ENABLE_HALOW"] = "1"
 env["ENV"]["MORSE_ZEPHYR_MODULE"] = str(mm_root)
 os.environ["EDGE_DEVICE_ENABLE_HALOW"] = "1"
 os.environ["MORSE_ZEPHYR_MODULE"] = str(mm_root)
-env["ENV"]["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
-os.environ["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
+if edgez_source_root is not None:
+    env["ENV"]["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
+    os.environ["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
+else:
+    env["ENV"].pop("EDGEZ_HALOW_MESH_SOURCE_ROOT", None)
+    os.environ.pop("EDGEZ_HALOW_MESH_SOURCE_ROOT", None)
+    # PlatformIO recompiles application sources outside Zephyr's CMake target
+    # graph, so mirror the release-archive definition into its SCons flags.
+    env.AppendUnique(CPPDEFINES=[("EDGEZ_PLATFORM_ARCHIVE_BUILD", 1)])
 
 pio_env = env.get("PIOENV", "")
 if MORSE_CHIP == "mm8108":
@@ -136,8 +144,6 @@ if extra_conf:
 if Path(bcf_filename).name != bcf_filename:
     print(f"ERROR: Morse BCF must contain a filename, got: {bcf_filename}")
     env.Exit(1)
-project_bcf = PROJECT_DIR / bcf_filename
-
 source_roots = [mm_root]
 if fallback_root != mm_root:
     source_roots.append(fallback_root)
@@ -162,9 +168,7 @@ staged_files = [
     ),
     (
         first_existing(
-            [project_bcf]
-            + [root / "zephyr" / "blobs" / "firmware" / bcf_filename for root in source_roots]
-            + [root / "submodules" / "mm-iot-sdk" / "framework" / "morsefirmware" / MORSE_CHIP / "bcfs" / bcf_filename for root in source_roots]
+            [root / "submodules" / "mm-iot-sdk" / "framework" / "morsefirmware" / MORSE_CHIP / "bcfs" / bcf_filename for root in source_roots]
         ),
         blob_dir / "firmware" / bcf_filename,
         bcf_filename,
@@ -180,16 +184,11 @@ for src, dst, label in staged_files:
         shutil.copyfile(src, dst)
         print(f"Staged {label}: {dst}")
 
-sdk_bcf = mm_root / "submodules" / "mm-iot-sdk" / "framework" / "morsefirmware" / MORSE_CHIP / "bcfs" / bcf_filename
-staged_bcf = blob_dir / "firmware" / bcf_filename
-if staged_bcf.exists():
-    sdk_bcf.parent.mkdir(parents=True, exist_ok=True)
-    if not sdk_bcf.exists() or staged_bcf.read_bytes() != sdk_bcf.read_bytes():
-        shutil.copyfile(staged_bcf, sdk_bcf)
-        print(f"Staged {bcf_filename} for SDK path: {sdk_bcf}")
-
 env["ENV"]["MORSE_SM_USE_APP_BINARIES"] = "1"
 os.environ["MORSE_SM_USE_APP_BINARIES"] = "1"
 
 print(f"Using Morse Zephyr source module: {mm_root} ({MORSE_CHIP}, BCF {bcf_filename})")
-print(f"Using EdgeZ HaLow mesh source with diagnostics: {edgez_source_root}")
+if edgez_source_root is not None:
+    print(f"Using EdgeZ HaLow mesh source with diagnostics: {edgez_source_root}")
+else:
+    print("Using EdgeZ HaLow mesh release prebuilt")

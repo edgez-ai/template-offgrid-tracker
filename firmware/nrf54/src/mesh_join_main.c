@@ -39,6 +39,7 @@ static uint32_t previous_handler_failures;
 
 extern bool edgez_halow_power_is_ready(void);
 
+#if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 static void join_diagnostic_sink(void *ctx,
 				 enum edgez_diagnostic_level level,
 				 const char *component,
@@ -64,6 +65,7 @@ static void join_diagnostic_sink(void *ctx,
 		break;
 	}
 }
+#endif
 
 void edgez_request_reboot(uint32_t reason)
 {
@@ -305,8 +307,10 @@ static int start_join_only_mesh(void)
 
 int main(void)
 {
+#if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 	edgez_diagnostics_set_sink(join_diagnostic_sink, NULL);
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
+#endif
 	LOG_INF("EdgeZ nRF54 join-only image; extender/IP services disabled");
 	if (!edgez_halow_power_is_ready()) {
 		LOG_ERR("HC01 power was not initialized before Morse device startup");

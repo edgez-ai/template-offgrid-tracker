@@ -431,15 +431,16 @@ static bool encode_local_topology(uint8_t *output,
     edgez_batadv_route_snapshot_t routes[EDGEZ_BATADV_MAX_ROUTES];
     const size_t route_count = edgez_mesh_snapshot_routes(
         routes, sizeof(routes) / sizeof(routes[0]));
+    edgez_mesh_rf_metrics_t rf_metrics = {0};
+    const bool rssi_valid = edgez_mesh_snapshot_rf_metrics(&rf_metrics) &&
+                            rf_metrics.signal_valid;
+    const int16_t rssi_dbm = rf_metrics.average_signal_dbm;
     size_t length = 0;
     size_t included = 0;
     for (size_t index = 0; index < route_count; ++index) {
         if (routes[index].age_ms > TOPOLOGY_MAX_AGE_MS) continue;
         uint8_t link[24];
         size_t link_length = 0;
-        int16_t rssi_dbm = 0;
-        const bool rssi_valid = mmwlan_get_mesh_peer_rssi(
-            routes[index].originator, &rssi_dbm) == MMWLAN_SUCCESS;
         if (!protobuf_put_bytes(link, sizeof(link), &link_length, 1,
                                 routes[index].originator,
                                 sizeof(routes[index].originator)) ||

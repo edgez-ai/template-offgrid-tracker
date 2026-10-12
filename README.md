@@ -105,10 +105,11 @@ access to the farm and the device readings permitted through its Appwrite team.
 ### Flash supported hardware from Android
 
 The USB-C firmware workflow lets an authorized operator select the exact board
-profile and flash a release image through the connected Android phone. The
-organization runtime downloads the matching asset from the deployment's latest
-GitHub release, verifies it, and performs the board-specific flashing flow; the
-phone carries the control and USB traffic.
+profile and flash an image through the connected Android phone. This template
+does not publish firmware binaries in its GitHub Releases. A licensed product
+deployment may point the organization runtime at a separate firmware release
+repository; the runtime verifies the selected asset and the phone carries the
+control and USB traffic.
 
 <p align="center">
   <img src="docs/screenshots/mobile-flash-hardware.jpg" width="360" alt="Android USB-C firmware workflow with supported hardware profiles and flash timeout settings">
@@ -188,8 +189,9 @@ defaults to `tiny` for both Site and Function builds.
 Open `offgrid-tracker.code-workspace` in VS Code to work across the complete solution.
 
 Device firmware source is included in `firmware/`. Provisioning, OTA, and USB
-flashing remain available in the mobile app for board-specific assets published
-to a deployment repository release.
+flashing remain available in the mobile app, but distributable board images
+must come from a separately licensed deployment repository. See
+[`FIRMWARE-LICENSING.md`](FIRMWARE-LICENSING.md) before sharing any firmware.
 
 ## Provisioning flow
 
@@ -316,9 +318,14 @@ project users, Devices, and project-wide authentication settings.
 The `Build mobile app` GitHub Actions workflow runs when a GitHub Release is
 published and can also be started manually with **Run workflow**. It produces
 `offgrid-tracker-signed.apk`, `offgrid-tracker-unsigned.apk`, and signed React
-Native bundle-update assets. Board-specific firmware can be built from the
-included PlatformIO project and attached to releases for mobile flashing and
-OTA.
+Native bundle-update assets.
+
+Firmware is intentionally separate. Run the manual **Build firmware** workflow
+to compile one or all PlatformIO targets as short-lived Actions artifacts.
+Those artifacts are never attached to this repository's GitHub Releases. Read
+[`FIRMWARE-LICENSING.md`](FIRMWARE-LICENSING.md) before downloading or sharing
+them; distribution requires compliance with the applicable EdgeZ Mesh and
+Morse Micro license terms.
 
 The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
 and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
