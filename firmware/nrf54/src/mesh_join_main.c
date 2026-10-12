@@ -19,6 +19,16 @@
 #include "edgez_umac_mesh_runtime.h"
 #include "edgez_reboot.h"
 
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+#include "mmhal_wlan.h"
+#include "mmwlan.h"
+
+extern enum mmwlan_status mmdrv_set_wake_enabled(bool enabled);
+extern enum mmwlan_status mmdrv_set_chip_power_save_enabled(uint16_t vif_id,
+							     bool enabled);
+extern enum mmwlan_status mmdrv_set_dynamic_ps_timeout(uint32_t timeout_ms);
+#endif
+
 LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 
 #define EDGEZ_MESH_ID "edgez"
@@ -30,12 +40,35 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
 
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+#define EDGEZ_PS_BASELINE_MS 30000U
+#define EDGEZ_PS_REPORT_MS 30000U
+#define EDGEZ_PS_SETTLE_MS 2000U
+#define EDGEZ_PS_SAMPLE_MS 10U
+#define EDGEZ_PS_DYNAMIC_TIMEOUT_MS 100U
+#endif
+
 static struct edgez_umac_mesh_runtime mesh_runtime;
 static struct edgez_mesh_sae_provider sae_provider;
 static uint32_t tx_status_count;
 static uint32_t tx_failure_count;
 static uint32_t previous_operation_failures;
 static uint32_t previous_handler_failures;
+
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+enum mesh_ps_phase {
+	MESH_PS_WAITING,
+	MESH_PS_SETTLING,
+	MESH_PS_BASELINE,
+	MESH_PS_ENABLED,
+};
+
+static enum mesh_ps_phase mesh_ps_phase = MESH_PS_WAITING;
+static uint32_t mesh_ps_phase_started;
+static uint32_t mesh_ps_busy_samples;
+static uint32_t mesh_ps_total_samples;
+static uint32_t mesh_ps_baseline_x10;
+#endif
 
 extern bool edgez_halow_power_is_ready(void);
 
@@ -154,6 +187,146 @@ static const char *peering_state_name(enum edgez_mesh_peering_state state)
 	default: return "unknown";
 	}
 }
+
+static bool has_established_peer(void)
+{
+	for (size_t i = 0; i < EDGEZ_UMAC_MAX_PEERS; ++i) {
+		const struct edgez_mesh_peering_slot *slot =
+			&mesh_runtime.peering_manager.slots[i];
+		if (slot->in_use &&
+		    slot->peering.state == EDGEZ_PEERING_ESTABLISHED) {
+			return true;
+		}
+	}
+	return false;
+}
+
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+static uint32_t busy_percent_x10(void)
+{
+	if (mesh_ps_total_samples == 0U) {
+		return 0U;
+	}
+	return (uint32_t)(((uint64_t)mesh_ps_busy_samples * 1000U) /
+			  mesh_ps_total_samples);
+}
+
+static void reset_samples(uint32_t now)
+{
+	mesh_ps_phase_started = now;
+	mesh_ps_busy_samples = 0U;
+	mesh_ps_total_samples = 0U;
+}
+
+static bool set_mesh_power_save(bool enabled)
+{
+	enum mmwlan_status status;
+
+	if (enabled) {
+		status = mmdrv_set_wake_enabled(false);
+		if (status == MMWLAN_SUCCESS) {
+			status = mmdrv_set_chip_power_save_enabled(
+				mesh_runtime.umac.vif_id, true);
+		}
+		if (status != MMWLAN_SUCCESS) {
+			(void)mmdrv_set_wake_enabled(true);
+		}
+	} else {
+		status = mmdrv_set_wake_enabled(true);
+		if (status == MMWLAN_SUCCESS) {
+			status = mmdrv_set_chip_power_save_enabled(
+				mesh_runtime.umac.vif_id, false);
+		}
+	}
+
+	if (status != MMWLAN_SUCCESS) {
+		LOG_ERR("could not %s mesh power save: status=%d vif=%u",
+			enabled ? "enable" : "disable", status,
+			mesh_runtime.umac.vif_id);
+		return false;
+	}
+	return true;
+}
+
+static void sample_busy(void)
+{
+	if (mmhal_wlan_busy_is_asserted()) {
+		mesh_ps_busy_samples++;
+	}
+	mesh_ps_total_samples++;
+}
+
+static void mesh_power_save_tick(uint32_t now)
+{
+	const bool connected = has_established_peer();
+
+	if (!connected) {
+		if (mesh_ps_phase == MESH_PS_ENABLED) {
+			LOG_WRN("peer lost during power save; disabling PS");
+			(void)set_mesh_power_save(false);
+		} else if (mesh_ps_phase != MESH_PS_WAITING) {
+			LOG_WRN("peer lost before power-save measurement completed");
+		}
+		mesh_ps_phase = MESH_PS_WAITING;
+		return;
+	}
+
+	switch (mesh_ps_phase) {
+	case MESH_PS_WAITING:
+		LOG_INF("peer established; starting nRF54/MM6108 power-save A/B cycle");
+		if (set_mesh_power_save(false)) {
+			mesh_ps_phase = MESH_PS_SETTLING;
+			mesh_ps_phase_started = now;
+		}
+		break;
+	case MESH_PS_SETTLING:
+		if ((uint32_t)(now - mesh_ps_phase_started) >= EDGEZ_PS_SETTLE_MS) {
+			LOG_INF("BASELINE START: PS disabled for 30 seconds");
+			reset_samples(now);
+			mesh_ps_phase = MESH_PS_BASELINE;
+		}
+		break;
+	case MESH_PS_BASELINE:
+		sample_busy();
+		if ((uint32_t)(now - mesh_ps_phase_started) >= EDGEZ_PS_BASELINE_MS) {
+			mesh_ps_baseline_x10 = busy_percent_x10();
+			LOG_INF("BASELINE END: MM_BUSY %u/%u samples (%u.%u%%), link=up",
+				mesh_ps_busy_samples, mesh_ps_total_samples,
+				mesh_ps_baseline_x10 / 10U,
+				mesh_ps_baseline_x10 % 10U);
+			enum mmwlan_status status = mmdrv_set_dynamic_ps_timeout(
+				EDGEZ_PS_DYNAMIC_TIMEOUT_MS);
+			if (status != MMWLAN_SUCCESS || !set_mesh_power_save(true)) {
+				LOG_ERR("power-save transition failed: timeout_status=%d",
+					status);
+				mesh_ps_phase = MESH_PS_WAITING;
+				break;
+			}
+			LOG_INF("POWER SAVE ENABLED: timeout=100 ms; reporting every 30 seconds");
+			reset_samples(now);
+			mesh_ps_phase = MESH_PS_ENABLED;
+		}
+		break;
+	case MESH_PS_ENABLED:
+		sample_busy();
+		if ((uint32_t)(now - mesh_ps_phase_started) >= EDGEZ_PS_REPORT_MS) {
+			const uint32_t power_save_x10 = busy_percent_x10();
+			const int32_t change_x10 =
+				(int32_t)power_save_x10 - (int32_t)mesh_ps_baseline_x10;
+			const uint32_t magnitude_x10 =
+				(uint32_t)(change_x10 < 0 ? -change_x10 : change_x10);
+			LOG_INF("POWER SAVE: MM_BUSY %u/%u samples (%u.%u%%), link=up",
+				mesh_ps_busy_samples, mesh_ps_total_samples,
+				power_save_x10 / 10U, power_save_x10 % 10U);
+			LOG_INF("BUSY duty change from baseline: %c%u.%u percentage points",
+				change_x10 < 0 ? '-' : '+', magnitude_x10 / 10U,
+				magnitude_x10 % 10U);
+			reset_samples(now);
+		}
+		break;
+	}
+}
+#endif
 
 static void report_peers(void)
 {
@@ -321,14 +494,27 @@ int main(void)
 	}
 
 	uint32_t next_report = k_uptime_get_32();
+	uint32_t next_mesh_tick = next_report;
 	while (true) {
 		const uint32_t now = k_uptime_get_32();
-		edgez_umac_mesh_runtime_tick(&mesh_runtime, now);
+		if ((int32_t)(now - next_mesh_tick) >= 0) {
+			edgez_umac_mesh_runtime_tick(&mesh_runtime, now);
+			next_mesh_tick = now + EDGEZ_MESH_TICK_MS;
+		}
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+		mesh_power_save_tick(now);
+#endif
 		if ((int32_t)(now - next_report) >= 0) {
 			report_peers();
 			next_report = now + EDGEZ_MESH_REPORT_MS;
 		}
-		k_msleep(EDGEZ_MESH_TICK_MS);
+		k_msleep(
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+			EDGEZ_PS_SAMPLE_MS
+#else
+			EDGEZ_MESH_TICK_MS
+#endif
+		);
 	}
 }
 

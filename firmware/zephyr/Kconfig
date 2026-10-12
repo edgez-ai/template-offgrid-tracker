@@ -21,3 +21,13 @@ config MQTT_BROKER_ADDR
 config MQTT_BROKER_PORT
     int "Port the MQTT broker is running on"
     default 1883
+
+config OFFGRID_NRF54_MESH_PS_TEST
+    bool "Run the nRF54L15 mesh power-save experiment after peering"
+    depends on WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY
+    depends on WIFI_MORSEMICRO_POWERSAVE
+    default n
+    help
+      Wait for an established 802.11s peer, sample a power-save-off
+      baseline, then enable MM6108 dynamic power saving and report MM_BUSY
+      duty while the mesh runtime continues to run.
