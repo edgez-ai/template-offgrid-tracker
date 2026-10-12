@@ -16,6 +16,7 @@ under Appwrite permissions. The Function writes application sensor telemetry. Ap
 | `site/` | Read-only Next.js telemetry portal. Never create Devices here. |
 | `app/` | Expo + React Native BLE provisioning client; the only Device creator. |
 | `function/` | Appwrite Function; the only MQTT-to-TablesDB writer. |
+| `firmware/` | PlatformIO ESP-IDF and Zephyr firmware for ESP32 and nRF54L15 targets. |
 | `edgez.json` | EdgeZ solution and workspace manifest. |
 | `appwrite.config.json` | Declarative auth, platform, database, Function, and Site plan. |
 | `infra/` | Reproducible Appwrite CLI installer. |
@@ -32,9 +33,8 @@ Time Series Store with the active Appwrite session. Serial is the MQTT username
 and is unique within the Appwrite project.
 MQTT telemetry inherits only the built-in device's read permissions.
 
-Firmware source is intentionally outside this repository. The mobile client
-retains provisioning, OTA, and USB flashing integrations for separately
-published device release assets.
+Firmware source lives in `firmware/`. The mobile client retains provisioning,
+OTA, and USB flashing integrations for its published device release assets.
 
 ## Environment
 
@@ -51,6 +51,7 @@ server-side endpoint.
 - Mobile: `cd app && npm run typecheck`
 - Function: `cd function && npm run check`
 - Infrastructure: `cd infra && npm run check`
+- Firmware: `cd firmware && pio run`
 
 `cd app && npm run android` must start Metro and open the project in the remote
 EdgeZ Android DevTools client at `127.0.0.1:5555`. Do not run a local Gradle or

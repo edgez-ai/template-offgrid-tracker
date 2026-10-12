@@ -1,0 +1,8 @@
+[submodule "firmware/third_party/esp-halow"]
+	path = firmware/third_party/esp-halow
+	url = https://github.com/edgez-ai/esp-halow.git
+	branch = edgez
+[submodule "firmware/modules/mm-iot-zephyr"]
+	path = firmware/modules/mm-iot-zephyr
+	url = https://github.com/edgez-ai/mm-iot-zephyr.git
+	branch = edgez

@@ -1,0 +1,229 @@
+menu "HaLow initialization"
+
+    config DAB_RAW_RF_TEST
+        bool "Build the isolated EdgeZ raw-RF test image"
+        default n
+        help
+            Replace the normal DAB application with a fixed-channel raw 802.11
+            management-frame test. The image links the Morse RF/driver boundary
+            but does not link the reference Morse UMAC or hostap implementation.
+
+    config DAB_RAW_RF_TEST_FREQUENCY_KHZ
+        int "Raw-RF center frequency (kHz)"
+        depends on DAB_RAW_RF_TEST
+        default 866500
+        range 1 1000000
+
+    config DAB_RAW_RF_TEST_BANDWIDTH_MHZ
+        int "Raw-RF bandwidth (MHz)"
+        depends on DAB_RAW_RF_TEST
+        default 1
+        range 1 8
+
+    config DAB_RAW_RF_TEST_INTERVAL_MS
+        int "Raw-RF transmit interval (ms)"
+        depends on DAB_RAW_RF_TEST
+        default 2000
+        range 100 60000
+
+    config DAB_RAW_RF_TEST_MCS
+        int "Raw-RF transmit MCS"
+        depends on DAB_RAW_RF_TEST
+        default 0
+        range 0 10
+
+    config DAB_RAW_RF_TEST_USB_TIMEOUT_MS
+        int "MM8108 USB enumeration timeout (ms)"
+        depends on DAB_RAW_RF_TEST && HALOW_TRANSPORT_USB
+        default 15000
+        range 1000 120000
+
+    config HALOW_INIT_TASK_STACK_SIZE
+        int "Morse HaLow initialization task stack size"
+        default 16384
+        range 8192 32768
+
+    config HALOW_INIT_TASK_PRIORITY
+        int "Morse HaLow initialization task priority"
+        default 7
+        range 1 24
+
+    config HALOW_MESH_AUTO_JOIN
+        bool "Join an 802.11s HaLow mesh after initialization"
+        depends on HALOW_MESH_MODE && !DAB_RAW_RF_TEST
+        default y
+
+    config HALOW_MESH_ID
+        string "802.11s mesh ID"
+        depends on HALOW_MESH_AUTO_JOIN || DAB_RAW_RF_TEST
+        default "halow-mesh"
+
+    config HALOW_MESH_PASSPHRASE
+        string "802.11s SAE passphrase (empty for open mesh)"
+        depends on HALOW_MESH_AUTO_JOIN || DAB_RAW_RF_TEST
+        default "12345678"
+
+    config HALOW_MESH_FREQUENCY_KHZ
+        int "Mesh center frequency (kHz)"
+        depends on HALOW_MESH_AUTO_JOIN
+        default 866500
+        range 1 1000000
+
+    config HALOW_MESH_BANDWIDTH_MHZ
+        int "Mesh bandwidth (MHz)"
+        depends on HALOW_MESH_AUTO_JOIN
+        default 1
+        range 1 8
+
+    config HALOW_MESH_SCAN_DWELL_MS
+        int "Mesh peer discovery scan dwell time (ms)"
+        depends on HALOW_MESH_AUTO_JOIN
+        default 120
+        range 15 1000
+        help
+            Time spent listening on the provisioned HaLow channel during a
+            peer-discovery scan. The 120 ms default matches the full-mesh
+            profile in edge-device-esp32-internal and is more reliable with
+            sparse OpenWrt mesh beacons than the morselib 30 ms default.
+
+    config HALOW_MESH_SCAN_INTERVAL_BASE_S
+        int "Mesh peer discovery initial interval (seconds)"
+        depends on HALOW_MESH_AUTO_JOIN
+        default 1
+        range 1 60
+
+    config HALOW_MESH_SCAN_INTERVAL_LIMIT_S
+        int "Mesh peer discovery maximum interval (seconds)"
+        depends on HALOW_MESH_AUTO_JOIN
+        default 8
+        range 1 300
+
+    config DAB_START_BATMAN
+        bool "Start BATMAN-IV after the HaLow mesh"
+        depends on (HALOW_MESH_AUTO_JOIN || DAB_RAW_RF_TEST) && HALOW_EDGEZ_BATMAN
+        default y
+        help
+            Application policy switch. Disable it to run only the underlying
+            802.11s HaLow mesh and peer discovery.
+
+    config DAB_START_MQTT_RELAY
+        bool "Start the MQTT relay over BATMAN-IV"
+        depends on DAB_START_BATMAN && HALOW_EDGEZ_MQTT_RELAY
+        default y
+        help
+            Start the EdgeZ MQTT relay transport over BATMAN-IV. This is
+            independent of a direct ESP MQTT client over upstream Wi-Fi.
+
+    config DAB_WIFI_EXTENDER
+        bool "Enable Wi-Fi extender mode"
+        depends on DAB_START_BATMAN
+        depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
+        select LWIP_IP_FORWARD
+        select LWIP_IPV4_NAPT
+        default n
+        help
+            Route downstream Wi-Fi clients through a HaLow BATMAN gateway,
+            with DHCP, DNS relay and EdgeZ Mesh Network gateway/subnet advertisements.
+            A provisioned wifiUpstream=true profile instead connects to saved
+            Wi-Fi credentials and provides a NAT/DHCP gateway to the mesh.
+
+    config DAB_MESH_IPERF
+        bool "Enable HaLow/Wi-Fi iperf2 TCP receive test endpoint"
+        depends on DAB_WIFI_EXTENDER
+        default n
+        help
+            Diagnostic TCP receiver on port 5001 of the mesh IPv4 address,
+            plus native Wi-Fi STA in gateway mode. Use iperf2 -C with one
+            connection. UDP, iperf3 and reverse tests are not supported.
+            Disable this unauthenticated endpoint when not testing.
+
+    config DAB_WIFI_EXTENDER_PASSWORD
+        string "Downstream Wi-Fi WPA2 password"
+        depends on DAB_WIFI_EXTENDER
+        default "edgez123"
+        help
+            Password for the EZ-<MAC> access point (8 to 63 characters).
+            This is independent of the provisioned HaLow mesh passphrase.
+
+    config DAB_PUBLISH_SYSTEM_STATUS
+        bool "Publish periodic system/status"
+        default y
+        help
+            Application policy switch for the system/status producer. The
+            selected MQTT publisher may be a direct Wi-Fi client or the
+            optional BATMAN relay transport.
+
+    config HALOW_PAWR_ENABLE
+        bool "Enable Wi-Fi HaLow PAwR sleepy-device bridge"
+        depends on HALOW_MESH_AUTO_JOIN
+        default y if IDF_TARGET_ESP32S3
+        default n
+        help
+            Receive EdgeZ PAwR beacon requests over HaLow vendor action
+            frames and return the compatible beacon hash acknowledgement.
+
+    config HALOW_BLE_PROVISIONING
+        bool "Provision the HaLow mesh over ESP32 BLE"
+        depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
+        default y
+        help
+            Use the same ESP network-provisioning BLE service and mqtt-config
+            endpoint as edge-device-esp32-internal. The service advertises as
+            PROV_<MAC> with proof-of-possession abcd1234, stores the HaLow mesh
+            profile in NVS, then reboots into the provisioned network. ESP32-S3
+            uses its local BLE controller. ESP32-P4 uses the onboard ESP32-C6
+            Bluetooth controller over the Waveshare board's SDIO connection.
+
+    config DAB_FACTORY_RESET_BUTTON
+        bool "Enable long-press button factory reset"
+        depends on IDF_TARGET_ESP32P4
+        default n
+        help
+            Hold a configured GPIO button, then release it, to restart and
+            erase the default NVS partition. The erase clears saved HaLow,
+            MQTT, Wi-Fi, and provisioning data. This must not be enabled on a
+            pin used by another active peripheral.
+
+    config DAB_FACTORY_RESET_BUTTON_GPIO
+        int "Factory-reset button GPIO"
+        depends on DAB_FACTORY_RESET_BUTTON
+        range 0 54
+        default 35
+
+    choice DAB_FACTORY_RESET_BUTTON_ACTIVE_LEVEL
+        prompt "Factory-reset button active level"
+        depends on DAB_FACTORY_RESET_BUTTON
+        default DAB_FACTORY_RESET_BUTTON_ACTIVE_LOW
+
+        config DAB_FACTORY_RESET_BUTTON_ACTIVE_LOW
+            bool "Active low"
+
+        config DAB_FACTORY_RESET_BUTTON_ACTIVE_HIGH
+            bool "Active high"
+    endchoice
+
+    config DAB_FACTORY_RESET_BUTTON_HOLD_MS
+        int "Factory-reset hold duration (ms)"
+        depends on DAB_FACTORY_RESET_BUTTON
+        range 1000 30000
+        default 5000
+
+    config DAB_FACTORY_RESET_BUTTON_POLL_MS
+        int "Factory-reset button polling interval (ms)"
+        depends on DAB_FACTORY_RESET_BUTTON
+        range 10 500
+        default 50
+
+    config DAB_FACTORY_RESET_BUTTON_TASK_STACK_SIZE
+        int "Factory-reset monitor task stack size"
+        depends on DAB_FACTORY_RESET_BUTTON
+        range 2048 8192
+        default 3072
+
+    config DAB_FACTORY_RESET_BUTTON_TASK_PRIORITY
+        int "Factory-reset monitor task priority"
+        depends on DAB_FACTORY_RESET_BUTTON
+        range 1 24
+        default 5
+
+endmenu

@@ -1,0 +1,18 @@
+dependencies:
+  idf:
+    version: '>=5.5'
+  espressif/network_provisioning:
+    version: '^1.2.4'
+    rules:
+      - if: 'target in [esp32s3, esp32p4]'
+  espressif/esp_wifi_remote:
+    # ESP-IDF 5.5 must use the legacy host line shipped for the Waveshare
+    # board's factory ESP32-C6 firmware. ESP-Hosted 2.x sends newer feature
+    # control RPCs which that image does not implement.
+    version: '0.14.*'
+    rules:
+      - if: 'target == esp32p4'
+  espressif/esp_hosted:
+    version: '1.4.*'
+    rules:
+      - if: 'target == esp32p4'

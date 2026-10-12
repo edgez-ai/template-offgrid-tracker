@@ -4,7 +4,8 @@
     { "name": "site", "path": "site" },
     { "name": "app", "path": "app" },
     { "name": "function", "path": "function" },
-    { "name": "infra", "path": "infra" }
+    { "name": "infra", "path": "infra" },
+    { "name": "firmware", "path": "firmware" }
   ],
   "settings": {
     "files.exclude": {

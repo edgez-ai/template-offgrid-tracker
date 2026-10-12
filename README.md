@@ -175,6 +175,7 @@ Product images are from the linked Heltec and Seeed Studio product pages.
 | `app/` | Expo app with an offline Organic Maps dashboard and BLE HaLow provisioning |
 | `function/` | Trusted MQTT webhook that writes history to Time Series and the latest state to TablesDB |
 | `infra/` | Rerunnable Appwrite CLI installer |
+| `firmware/` | PlatformIO firmware for ESP32-P4, ESP32-S3, EdgeZ nRF54L15/FGH200M, and XIAO nRF54L15 Sense |
 
 The root `edgez.json` selects `appwrite.config.json` as the complete,
 version-controlled solution plan. **Deploy on EdgeZ** applies the auth methods,
@@ -184,11 +185,11 @@ after project selection.
 Its `buildInstance` accepts `tiny`, `small`, `medium`, or `large`; this template
 defaults to `tiny` for both Site and Function builds.
 
-Open `offgrid-tracker.code-workspace` in VS Code to work on all four folders.
+Open `offgrid-tracker.code-workspace` in VS Code to work across the complete solution.
 
-Device firmware source is intentionally not included. Provisioning, OTA, and
-USB flashing remain available in the mobile app for firmware assets published
-separately to a deployment repository release.
+Device firmware source is included in `firmware/`. Provisioning, OTA, and USB
+flashing remain available in the mobile app for board-specific assets published
+to a deployment repository release.
 
 ## Provisioning flow
 
@@ -301,6 +302,7 @@ Install dependencies in `site/`, `app/`, `function/`, and `infra/`, then run:
 (cd app && npm run typecheck)
 (cd function && npm run check)
 (cd infra && npm run check)
+(cd firmware && pio run)
 ```
 
 Remote installation is intentionally separate: run `cd infra && npm run deploy`
@@ -314,9 +316,9 @@ project users, Devices, and project-wide authentication settings.
 The `Build mobile app` GitHub Actions workflow runs when a GitHub Release is
 published and can also be started manually with **Run workflow**. It produces
 `offgrid-tracker-signed.apk`, `offgrid-tracker-unsigned.apk`, and signed React
-Native bundle-update assets. Firmware binaries are not built by this template;
-attach separately produced, board-specific firmware assets to releases when
-the mobile flashing and OTA controls should be enabled.
+Native bundle-update assets. Board-specific firmware can be built from the
+included PlatformIO project and attached to releases for mobile flashing and
+OTA.
 
 The signed APK uses the repository Actions secrets `ANDROID_KEYSTORE_BASE64`
 and `ANDROID_KEYSTORE_PASSWORD`, and the Actions variable `ANDROID_KEY_ALIAS`.
