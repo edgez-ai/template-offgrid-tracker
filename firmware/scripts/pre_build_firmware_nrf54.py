@@ -18,7 +18,7 @@ if MORSE_CHIP not in ("mm6108", "mm8108"):
     env.Exit(1)
 MORSE_FIRMWARE = "mm8108b2-rl.mbin" if MORSE_CHIP == "mm8108" else "mm6108.mbin"
 
-module_root = (PROJECT_DIR / "modules" / "mm-iot-zephyr").resolve()
+module_root = (PROJECT_DIR / "platforms" / "mm-iot-zephyr").resolve()
 fallback_root = Path(os.environ.get("MMIOT_ZEPHYR_ROOT", PROJECT_DIR / ".." / "mm-iot-zephyr")).expanduser().resolve()
 
 

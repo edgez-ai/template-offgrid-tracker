@@ -90,16 +90,16 @@ jobs:
 
           cp FIRMWARE-LICENSING.md "$artifact_dir/"
           cp LICENSE "$artifact_dir/licenses/OFFGRID-TRACKER-APACHE-2.0"
-          cp firmware/modules/mm-iot-zephyr/submodules/mm-iot-sdk/LICENSES/* \
+          cp firmware/platforms/mm-iot-zephyr/submodules/mm-iot-sdk/LICENSES/* \
             "$artifact_dir/licenses/"
           cp \
-            firmware/modules/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt/licenses/* \
+            firmware/platforms/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt/licenses/* \
             "$artifact_dir/licenses/"
           cp \
-            firmware/modules/mm-iot-zephyr/submodules/morse-firmware/firmware/LICENSE \
+            firmware/platforms/mm-iot-zephyr/submodules/morse-firmware/firmware/LICENSE \
             "$artifact_dir/licenses/MORSE-MICRO-FIRMWARE-BDL"
           cp \
-            firmware/modules/mm-iot-zephyr/submodules/morse-firmware/bcf/morsemicro/LICENSE \
+            firmware/platforms/mm-iot-zephyr/submodules/morse-firmware/bcf/morsemicro/LICENSE \
             "$artifact_dir/licenses/MORSE-MICRO-BCF-BDL"
 
           {

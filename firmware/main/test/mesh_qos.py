@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[2]
 app = (root / 'main/edgez_mesh_internet.c').read_text()
-mesh = (root / 'third_party/esp-halow/halow/components/mm-iot-edgez/ports/'
+mesh = (root / 'platforms/esp-halow/halow/components/mm-iot-edgez/ports/'
                'esp_idf/src/edgez_mesh.c').read_text()
 
 def function(source, name):

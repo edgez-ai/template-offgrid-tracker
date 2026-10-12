@@ -69,8 +69,8 @@ def validate_license_files() -> None:
     require_file(ROOT / "LICENSE")
 
     sdk_roots = (
-        FIRMWARE / "third_party/esp-halow/halow/components/mm-iot-sdk",
-        FIRMWARE / "modules/mm-iot-zephyr/submodules/mm-iot-sdk",
+        FIRMWARE / "platforms/esp-halow/halow/components/mm-iot-sdk",
+        FIRMWARE / "platforms/mm-iot-zephyr/submodules/mm-iot-sdk",
     )
     for sdk_root in sdk_roots:
         gpl = sdk_root / "LICENSES/GPL-3.0-or-later.txt"
@@ -85,9 +85,9 @@ def validate_license_files() -> None:
 
     prebuilt_roots = (
         FIRMWARE
-        / "third_party/esp-halow/halow/components/edgez-halow-mesh-prebuilt",
+        / "platforms/esp-halow/halow/components/edgez-halow-mesh-prebuilt",
         FIRMWARE
-        / "modules/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt",
+        / "platforms/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt",
     )
     legal_files = (
         "EDGEZERON-COMMERCIAL-LICENSE",
@@ -115,12 +115,12 @@ def iter_source_files(root: Path):
 
 def validate_rf_repositories() -> None:
     api_roots = (
-        FIRMWARE / "third_party/esp-halow/halow/components/edgez-rf-api",
-        FIRMWARE / "modules/mm-iot-zephyr/submodules/edgez-rf-api",
+        FIRMWARE / "platforms/esp-halow/halow/components/edgez-rf-api",
+        FIRMWARE / "platforms/mm-iot-zephyr/submodules/edgez-rf-api",
     )
     adapter_roots = (
-        FIRMWARE / "third_party/esp-halow/halow/components/edgez-rf-morsemicro",
-        FIRMWARE / "modules/mm-iot-zephyr/submodules/edgez-rf-morsemicro",
+        FIRMWARE / "platforms/esp-halow/halow/components/edgez-rf-morsemicro",
+        FIRMWARE / "platforms/mm-iot-zephyr/submodules/edgez-rf-morsemicro",
     )
 
     for api_root in api_roots:
@@ -152,14 +152,14 @@ def validate_rf_repositories() -> None:
 
 
 def validate_mesh_consumer_boundary() -> None:
-    esp_cmake = read(FIRMWARE / "third_party/esp-halow/halow/CMakeLists.txt")
+    esp_cmake = read(FIRMWARE / "platforms/esp-halow/halow/CMakeLists.txt")
     for dependency in ("edgez-rf-api/component.cmake", "edgez-rf-morsemicro/component.cmake"):
         if dependency not in esp_cmake:
             fail(f"esp-halow does not require {dependency}")
 
     zephyr_cmake = read(
         FIRMWARE
-        / "modules/mm-iot-zephyr/components/morsemicro/libmorse/edgez_join_only.cmake"
+        / "platforms/mm-iot-zephyr/components/morsemicro/libmorse/edgez_join_only.cmake"
     )
     for dependency in ("edgez-rf-api", "edgez-rf-morsemicro"):
         if dependency not in zephyr_cmake:
@@ -167,9 +167,9 @@ def validate_mesh_consumer_boundary() -> None:
 
     prebuilt_roots = (
         FIRMWARE
-        / "third_party/esp-halow/halow/components/edgez-halow-mesh-prebuilt",
+        / "platforms/esp-halow/halow/components/edgez-halow-mesh-prebuilt",
         FIRMWARE
-        / "modules/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt",
+        / "platforms/mm-iot-zephyr/submodules/edgez-halow-mesh-prebuilt",
     )
     for prebuilt_root in prebuilt_roots:
         include_root = prebuilt_root / "include"

@@ -2,7 +2,7 @@
 
 This branch runs Morse Micro's official ESP-IDF HaLow stack on an MM8108 USB
 adapter connected to ESP32-P4. It includes the public `edgez-ai/esp-halow`
-fork's `edgez` branch as the `third_party/esp-halow` Git submodule. That component provides
+fork's `edgez` branch as the `platforms/esp-halow` Git submodule. That component provides
 a native MM8108 USB transport based on the protocol used by Morse Micro's
 OpenWrt driver. DAB only selects the USB transport and calls the public
 `mmhalow_init()` API. The repository pins the component, SDK, and firmware

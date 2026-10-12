@@ -4,7 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 root = Path(__file__).resolve().parents[3]
-source = (root / 'third_party/esp-halow/halow/components/mm-iot-sdk/framework/morselib/src/umac/datapath/umac_datapath.c').read_text()
+source = (root / 'platforms/esp-halow/halow/components/mm-iot-sdk/framework/morselib/src/umac/datapath/umac_datapath.c').read_text()
 start = source.index('static bool mesh_sw_ccmp_decrypt_mgmt(')
 end = source.index('\n/**', start)
 with tempfile.TemporaryDirectory() as tmp:
@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory() as tmp:
         '-L/usr/local/opt/openssl@3/lib', '-lcrypto', '-o', tmp+'/test'], check=True)
     subprocess.run([tmp+'/test'], check=True)
 
-source = (root / 'third_party/esp-halow/halow/components/mm-iot-sdk/framework/morselib/src/umac/ba/umac_ba.c').read_text()
+source = (root / 'platforms/esp-halow/halow/components/mm-iot-sdk/framework/morselib/src/umac/ba/umac_ba.c').read_text()
 def function(name):
     marker = ({'umac_ba_calculate_addba_attempt_backoff': 'static uint32_t ',
                'umac_ba_select_addba_dialog_token': 'static uint8_t '}.get(name, 'static void '))
