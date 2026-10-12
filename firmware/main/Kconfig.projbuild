@@ -106,6 +106,60 @@ menu "HaLow initialization"
             Application policy switch. Disable it to run only the underlying
             802.11s HaLow mesh and peer discovery.
 
+    config OFFGRID_MESH_PS_TEST
+        bool "Run the HT-HC33 mesh power-save experiment after peering"
+        depends on HALOW_MESH_AUTO_JOIN && IDF_TARGET_ESP32S3
+        depends on HALOW_TRANSPORT_SPI && MM_WAKE >= 0 && MM_BUSY >= 0
+        select HALOW_PS_MODE
+        default n
+        help
+            Wait for an established 802.11s peer, record a power-save-off
+            baseline, then enable MM6108 power save and report MM_BUSY duty.
+            If the peer drops, disable power save and repeat after re-peering.
+
+    config OFFGRID_MESH_PS_BASELINE_SECONDS
+        int "Power-save-off baseline duration (seconds)"
+        depends on OFFGRID_MESH_PS_TEST
+        range 5 3600
+        default 30
+
+    config OFFGRID_MESH_PS_REPORT_SECONDS
+        int "Power-save reporting interval (seconds)"
+        depends on OFFGRID_MESH_PS_TEST
+        range 5 3600
+        default 30
+
+    config OFFGRID_MESH_PS_SETTLE_MS
+        int "Delay after each power mode change (ms)"
+        depends on OFFGRID_MESH_PS_TEST
+        range 0 60000
+        default 2000
+
+    config OFFGRID_MESH_PS_SAMPLE_INTERVAL_MS
+        int "MM_BUSY sampling interval (ms)"
+        depends on OFFGRID_MESH_PS_TEST
+        range 1 1000
+        default 10
+
+    config OFFGRID_MESH_PS_DYNAMIC_TIMEOUT_MS
+        int "Idle time before permitting MM6108 sleep (ms)"
+        depends on OFFGRID_MESH_PS_TEST
+        range 0 60000
+        default 100
+        help
+            Lower values sleep more aggressively, but can increase latency or
+            packet loss. This is the mm-iot-sdk dynamic PS timeout.
+
+    config OFFGRID_MESH_PS_VIF_ID
+        int "MM6108 mesh VIF ID"
+        depends on OFFGRID_MESH_PS_TEST
+        range 0 65534
+        default 0
+        help
+            VIF passed to the MM6108 chip power-save command. The test profile
+            creates only the mesh interface, which is normally VIF 0. Confirm
+            this against the "Private EdgeZ UMAC started ... vif=N" boot log.
+
     config DAB_START_MQTT_RELAY
         bool "Start the MQTT relay over BATMAN-IV"
         depends on DAB_START_BATMAN && HALOW_EDGEZ_MQTT_RELAY

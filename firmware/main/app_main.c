@@ -7,6 +7,9 @@
 #include "edgez_halow_mesh_service.h"
 #include "halow_pawr.h"
 #include "halow_provisioning.h"
+#if CONFIG_OFFGRID_MESH_PS_TEST
+#include "mesh_ps_test.h"
+#endif
 #if CONFIG_DAB_WIFI_EXTENDER
 #include "wifi_extender.h"
 #endif
@@ -74,6 +77,9 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
 #if CONFIG_HALOW_MESH_AUTO_JOIN
 static void mesh_status_callback(edgez_halow_link_state_t state)
 {
+#if CONFIG_OFFGRID_MESH_PS_TEST
+    mesh_ps_test_notify_link(state == EDGEZ_HALOW_LINK_CONNECTED);
+#endif
     switch (state) {
         case EDGEZ_HALOW_LINK_DISABLED:
             ESP_LOGW(TAG, "HaLow mesh interface disabled");
@@ -159,6 +165,12 @@ static esp_err_t start_mesh(void)
     service_config.enable_batman = true;
     service_config.batman_originator_interval_ms =
         CONFIG_HALOW_EDGEZ_BATMAN_INTERVAL_MS;
+#elif CONFIG_OFFGRID_MESH_PS_TEST
+    /* Peers may send BATMAN frames even though this test does not exercise the
+     * routed data plane. Initialize its RX queues to consume those frames, but
+     * minimize locally generated traffic during the power measurement. */
+    service_config.enable_batman = true;
+    service_config.batman_originator_interval_ms = 60000U;
 #endif
 
     edgez_halow_mesh_service_info_t service_info = {0};
@@ -166,6 +178,15 @@ static esp_err_t start_mesh(void)
     if (err != ESP_OK) {
         return err;
     }
+
+#if CONFIG_OFFGRID_MESH_PS_TEST
+    err = mesh_ps_test_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start HT-HC33 mesh power test: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+#endif
 
 #if CONFIG_DAB_START_MQTT_RELAY
     char device_serial[13] = {0};

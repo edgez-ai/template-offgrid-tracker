@@ -115,10 +115,47 @@ Other environments in the same project are:
 
 ```sh
 pio run -e esp32-s3-pawr
+pio run -e heltec-hc33
+pio run -e heltec-hc33-mesh-ps
 pio run -e edgez-nrf54l15-fgh200m
 pio run -e seeed-xiao-nrf54l15-hc01
 pio run -e seeed-xiao-nrf54l15-sense
 ```
+
+### HT-HC33 mesh power-save experiment
+
+The `heltec-hc33-mesh-ps` environment waits until the HT-HC33 has established
+an 802.11s peer link. It then measures 30 seconds with MM6108 power save
+disabled, enables power save with a 100 ms dynamic timeout, and reports the
+MM6108 `BUSY` duty cycle every 30 seconds:
+
+```sh
+cd firmware
+export EDGEZ_HALOW_MESH_SOURCE_ROOT=/absolute/path/to/edgez-halow-mesh
+pio run -e heltec-hc33-mesh-ps
+pio run -e heltec-hc33-mesh-ps -t upload
+pio device monitor -b 115200
+```
+
+The ESP32-S3 test must use a source checkout because the bundled protected
+mesh archives target ESP32-P4. At boot, verify that the log says
+`Private EdgeZ UMAC started ... vif=0`. If it reports another VIF, set
+`CONFIG_OFFGRID_MESH_PS_VIF_ID` to that value in the test defaults before
+building.
+
+The test profile uses mesh `edgez` on the US 915 MHz / 2 MHz channel. Change
+the profile to a channel and country code legal at the test location. It
+disables BLE, PAwR, BATMAN, MQTT, and the Wi-Fi extender so application traffic
+does not obscure the result. If the peer link drops, the test logs the failure,
+disables power save, waits for re-peering, and starts a new baseline.
+
+`MM_BUSY` duty is an MM6108 activity proxy, not a power measurement. Put a
+current meter in the HT-HC33 supply path and compare the log-marked `BASELINE`
+and `POWER SAVE` periods. A lower `BUSY` duty or supply current only establishes
+the power effect; it does not by itself prove reliable buffered message delivery
+through an 802.11s peer. This test uses the MM6108 chip-level dynamic power-save
+controls; the EdgeZ mesh UMAC does not currently advertise or negotiate the
+802.11s mesh power-save protocol.
 
 The nRF54 debug build compiles `edgez-halow-mesh` from source and requires its
 checkout to be selected globally rather than encoded in this repository:

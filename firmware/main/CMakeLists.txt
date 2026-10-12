@@ -28,6 +28,10 @@ else()
         "app_main.c"
     )
 
+    if(CONFIG_OFFGRID_MESH_PS_TEST)
+        list(APPEND component_sources "mesh_ps_test.c")
+    endif()
+
     if(CONFIG_HALOW_PAWR_ENABLE)
         list(APPEND component_sources "halow_pawr.c")
     endif()
@@ -85,6 +89,17 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_REQUIRES ${component_private_dependencies}
 )
+
+if(CONFIG_OFFGRID_MESH_PS_TEST)
+    # Software reset can leave an MM6108 GPIO interrupt pending on ESP32-S3.
+    # Replace the upstream HAL init with the hardened test-local variant so the
+    # GPIO ISR service cannot start while IRQ/BUSY still have stale status.
+    get_target_property(shims_sources shims SOURCES)
+    list(FILTER shims_sources EXCLUDE REGEX "mmhal_os\\.c$")
+    set_property(TARGET shims PROPERTY SOURCES "${shims_sources}")
+    target_sources(shims PRIVATE
+        "${CMAKE_CURRENT_LIST_DIR}/mmhal_os_ps_override.c")
+endif()
 
 if(IDF_TARGET STREQUAL "esp32p4" AND NOT CONFIG_DAB_RAW_RF_TEST)
     # ESP-Hosted 1.4 starts SDIO unconditionally from a constructor. Keep the
