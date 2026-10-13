@@ -16,6 +16,11 @@ void edgez_ble_control_set_radio_profile(const char *country_code,
                                          uint8_t bandwidth_mhz);
 void edgez_ble_control_note_mesh_started(const uint8_t mac[6]);
 void edgez_ble_control_note_mesh_link(int state);
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
+                                            size_t length,
+                                            void *arg);
+#endif
 esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
                                                char mesh_id[33],
                                                char passphrase[65],
@@ -33,8 +38,10 @@ esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
 #include "factory_reset_button.h"
 #endif
 
-#if CONFIG_HALOW_EDGEZ_MQTT_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_START_NETWORK_PACKET_RELAY
 #include "edgez_mqtt.hpp"
+#endif
+#if CONFIG_DAB_START_MQTT_RELAY
 #include "halow_telemetry.h"
 #endif
 
@@ -237,7 +244,7 @@ static esp_err_t start_mesh(void)
     }
 #endif
 
-#if CONFIG_DAB_START_MQTT_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_START_NETWORK_PACKET_RELAY
     char device_serial[13] = {0};
     snprintf(device_serial, sizeof(device_serial),
              "%02x%02x%02x%02x%02x%02x",
@@ -255,6 +262,13 @@ static esp_err_t start_mesh(void)
         return err;
     }
     edgez_mqtt_set_local_mac(service_info.mac);
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    edgez_mqtt_register_network_packet_cb(
+        edgez_ble_control_receive_mesh_packet, NULL);
+    ESP_LOGI(TAG,
+             "Unified NetworkPacket L2 relay ready (kind=2, broadcast/unicast)");
+#endif
+#if CONFIG_DAB_START_MQTT_RELAY
     if (mqtt_gateway) {
         ESP_LOGI(TAG,
                  "BATMAN-IV + MQTT relay ready as gateway; advertisement starts when MQTT is online");
@@ -262,7 +276,8 @@ static esp_err_t start_mesh(void)
         ESP_LOGI(TAG,
                  "BATMAN-IV + MQTT relay ready as leaf; waiting for gateway advertisement");
     }
-#if CONFIG_HALOW_BLE_PROVISIONING
+#endif
+#if CONFIG_DAB_START_MQTT_RELAY && CONFIG_HALOW_BLE_PROVISIONING
     if (provisioned_config.client_id[0] != '\0') {
         err = halow_telemetry_start_local(provisioned_config.client_id,
                                           service_info.mac,
@@ -283,7 +298,7 @@ static esp_err_t start_mesh(void)
         ESP_LOGW(TAG,
                  "Provisioned MQTT clientId is missing; local cloud reporting disabled until reprovisioned");
     }
-#else
+#elif CONFIG_DAB_START_MQTT_RELAY
     ESP_LOGW(TAG,
              "Local cloud reporting requires a provisioned Appwrite clientId");
 #endif

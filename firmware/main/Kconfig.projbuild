@@ -168,6 +168,16 @@ menu "HaLow initialization"
             Start the EdgeZ MQTT relay transport over BATMAN-IV. This is
             independent of a direct ESP MQTT client over upstream Wi-Fi.
 
+    config DAB_START_NETWORK_PACKET_RELAY
+        bool "Relay SDK NetworkPacket messages over BATMAN-IV"
+        depends on DAB_START_BATMAN
+        select HALOW_EDGEZ_MQTT_RELAY
+        default y if HALOW_BLE_PROVISIONING
+        help
+            Carry complete React Native SDK NetworkPacket protobuf messages
+            through the common EdgeZ L2 relay envelope. Routing may be
+            broadcast or unicast without changing the message format.
+
     config DAB_WIFI_EXTENDER
         bool "Enable Wi-Fi extender mode"
         depends on DAB_START_BATMAN

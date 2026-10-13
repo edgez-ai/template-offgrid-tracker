@@ -1,18 +1,19 @@
 import "react-native-get-random-values";
-import { EdgezOrganicMap, EdgezProvisioningManager, edgezBleDeviceLabel, useEdgezMeshSession } from "@edgez/react-native-sdk";
+import { EdgezOrganicMap, EdgezProvisioningManager, edgezBleDeviceLabel, edgezNodeDisplayName, edgezNodeId, edgezNodeOpensConversation, isEdgezPublicChannel, useEdgezMeshSession } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import type { EdgezBleDevice, EdgezMapDownloadUpdate, EdgezMeshSession, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
+import type { EdgezBleDevice, EdgezMapDownloadUpdate, EdgezMeshNode, EdgezMeshSession, EdgezMeshState, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Animated, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { bandwidthForChannel, bandwidthsForCountry, channelsForCountry, halowCountries } from "./halowChannels";
 import {
   activeProfile,
   createProfileIdentity,
   createProfile,
+  deleteProfileDevice,
   deleteProfile,
   initializeProfileStore,
   listProfileDevices,
@@ -27,6 +28,8 @@ import type { ProfileDetails, StoredDevice, StoredProfile } from "./profile-stor
 
 type ProfileDraft = Omit<ProfileDetails, "halowChannel"> & { halowChannel: string; halowBandwidthMHz: string };
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
+
+const nodeSwipeActionWidth = 92;
 
 const profileStorageKey = "offgrid-tracker.profile.v1";
 const provisioningPop = "abcd1234";
@@ -53,6 +56,10 @@ function coordinatesFromLocation(location: string) {
     : null;
 }
 
+function normalizedDeviceSerial(value: string) {
+  return value.replace(/[^0-9a-f]/gi, "").toUpperCase();
+}
+
 type BleLinkStatus = {
   phase: "not-selected" | "preparing" | "disconnected" | "connecting" | "connected" | "ready" | "error";
   label: string;
@@ -64,9 +71,11 @@ type BleLinkStatus = {
 function ActiveProfileBleLink({
   profile,
   onStatusChange,
+  onMeshChange,
 }: {
   profile: StoredProfile;
   onStatusChange: (status: BleLinkStatus) => void;
+  onMeshChange: (value: { session: EdgezMeshSession; state: EdgezMeshState }) => void;
 }) {
   const sessionRef = useRef<EdgezMeshSession | null>(null);
   const retryDelayMs = useRef(500);
@@ -78,6 +87,10 @@ function ActiveProfileBleLink({
     },
   });
   sessionRef.current = session;
+
+  useEffect(() => {
+    onMeshChange({ session, state });
+  }, [onMeshChange, session, state]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1238,17 +1251,189 @@ function SettingsPage({
   );
 }
 
+function MeshMessages({
+  visible,
+  session,
+  meshState,
+  onClose,
+}: {
+  visible: boolean;
+  session: EdgezMeshSession | null;
+  meshState: EdgezMeshState | null;
+  onClose: () => void;
+}) {
+  const peers = [...(meshState?.nodes.values() ?? [])].filter(edgezNodeOpensConversation);
+  const [selectedNode, setSelectedNode] = useState<bigint | null>(null);
+  const [message, setMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const selected = peers.find(({ nodeNum }) => nodeNum === selectedNode) ?? peers[0] ?? null;
+  const conversation = selected ? meshState?.conversations.get(selected.nodeNum) ?? [] : [];
+
+  const send = async () => {
+    const text = message.trim();
+    if (!session || !selected || !text || sending) return;
+    setSending(true);
+    setError("");
+    try {
+      await session.sendTextMessage(selected.nodeNum, text);
+      setMessage("");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not send the mesh message.");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.messagesPage}>
+        <View style={styles.settingsHeader}>
+          <View>
+            <Text style={styles.settingsEyebrow}>OFFGRID MESSAGES</Text>
+            <Text style={styles.settingsTitle}>Mesh messages</Text>
+          </View>
+          <Pressable onPress={onClose} accessibilityRole="button">
+            <Text style={styles.settingsClose}>CLOSE</Text>
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.messagesContent}>
+          {!peers.length ? (
+            <View style={styles.messageEmptyCard}>
+              <Text style={styles.messageEmptyTitle}>Waiting for another profile</Text>
+              <Text style={styles.settingsMuted}>Peers appear here after their periodic beacon reaches this device over BATMAN.</Text>
+            </View>
+          ) : (
+            <>
+              <Text style={styles.settingsSectionLabel}>RECIPIENT</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.messagePeerList}>
+                {peers.map((peer) => (
+                  <Pressable
+                    key={peer.nodeNum.toString()}
+                    style={[styles.messagePeer, selected?.nodeNum === peer.nodeNum && styles.messagePeerSelected]}
+                    onPress={() => setSelectedNode(peer.nodeNum)}
+                    accessibilityRole="button"
+                  >
+                    <Text style={[styles.messagePeerName, selected?.nodeNum === peer.nodeNum && styles.messagePeerNameSelected]}>{edgezNodeDisplayName(peer)}</Text>
+                    <Text style={styles.messagePeerId}>{peer.nodeNum.toString(16).padStart(12, "0").toUpperCase()}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <View style={styles.conversationCard}>
+                {!conversation.length ? <Text style={styles.settingsMuted}>No messages yet.</Text> : conversation.map((item) => (
+                  <View key={item.messageUuid} style={[styles.messageBubble, item.mine ? styles.messageBubbleMine : styles.messageBubblePeer]}>
+                    <Text style={styles.messageText}>{item.text}</Text>
+                    <Text style={styles.messageStatus}>{item.mine ? item.status || "Sending" : edgezNodeDisplayName(selected as EdgezMeshNode)}</Text>
+                  </View>
+                ))}
+              </View>
+              <TextInput
+                style={styles.messageInput}
+                value={message}
+                onChangeText={setMessage}
+                placeholder="Message over HaLow mesh"
+                placeholderTextColor="#718783"
+                multiline
+              />
+              <Pressable
+                style={[styles.messageSendButton, (!message.trim() || sending || !meshState?.bleReady) && styles.disabledButton]}
+                disabled={!message.trim() || sending || !meshState?.bleReady}
+                onPress={() => void send()}
+                accessibilityRole="button"
+              >
+                {sending ? <ActivityIndicator color="white" /> : <Text style={styles.profileSaveText}>SEND OVER MESH</Text>}
+              </Pressable>
+              {!meshState?.bleReady ? <Text style={styles.settingsError}>BLE control channel is not ready.</Text> : null}
+              {error ? <Text style={styles.settingsError}>{error}</Text> : null}
+            </>
+          )}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
+function SwipeableDeviceRow({
+  device,
+  onRemove,
+}: {
+  device: StoredDevice;
+  onRemove: (device: StoredDevice) => void;
+}) {
+  const translateX = useRef(new Animated.Value(0)).current;
+  const open = useRef(false);
+  const settle = (showActions: boolean) => {
+    open.current = showActions;
+    Animated.spring(translateX, {
+      toValue: showActions ? -nodeSwipeActionWidth : 0,
+      useNativeDriver: true,
+      bounciness: 0,
+    }).start();
+  };
+  const panResponder = useRef(PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) =>
+      Math.abs(gesture.dx) > 8 && Math.abs(gesture.dx) > Math.abs(gesture.dy),
+    onPanResponderMove: (_, gesture) => {
+      const start = open.current ? -nodeSwipeActionWidth : 0;
+      translateX.setValue(Math.max(-nodeSwipeActionWidth, Math.min(0, start + gesture.dx)));
+    },
+    onPanResponderRelease: (_, gesture) => {
+      const shouldOpen = open.current
+        ? gesture.dx < nodeSwipeActionWidth / 3
+        : gesture.dx < -nodeSwipeActionWidth / 3;
+      settle(shouldOpen);
+    },
+    onPanResponderTerminate: () => settle(open.current),
+  })).current;
+
+  return (
+    <View style={styles.nodeSwipeContainer}>
+      <Pressable
+        style={styles.nodeRemoveAction}
+        onPress={() => onRemove(device)}
+        accessibilityRole="button"
+        accessibilityLabel={`Remove ${device.name}`}
+      >
+        <Ionicons name="trash-outline" size={21} color="white" />
+        <Text style={styles.nodeRemoveText}>REMOVE</Text>
+      </Pressable>
+      <Animated.View
+        style={[styles.nodeCard, { transform: [{ translateX }] }]}
+        {...panResponder.panHandlers}
+      >
+        <View style={styles.nodeIcon}>
+          <Ionicons name={device.kind === "h7608" ? "git-network-outline" : "radio-outline"} size={21} color="#0a8c87" />
+        </View>
+        <View style={styles.nodeBody}>
+          <Text style={styles.nodeName}>{device.name}</Text>
+          <Text style={styles.nodeSerial}>{device.serial}</Text>
+          <Text style={styles.nodeMeta}>
+            {device.latitude !== null && device.longitude !== null
+              ? `${device.latitude.toFixed(5)}, ${device.longitude.toFixed(5)}`
+              : "Location not shared"}
+          </Text>
+        </View>
+        <Text style={styles.nodeKind}>{device.kind.toUpperCase()}</Text>
+      </Animated.View>
+    </View>
+  );
+}
+
 function HomeMap({
   profile,
   devices,
   bleStatus,
+  meshLink,
   onAddDevice,
+  onRemoveDevice,
   onOpenSettings,
 }: {
   profile: StoredProfile;
   devices: StoredDevice[];
   bleStatus: BleLinkStatus;
+  meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;
   onAddDevice: () => void;
+  onRemoveDevice: (device: StoredDevice) => void;
   onOpenSettings: () => void;
 }) {
   const map = useRef<EdgezOrganicMapRef>(null);
@@ -1260,7 +1445,9 @@ function HomeMap({
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
   const [mapTheme, setMapTheme] = useState<"day" | "night">("day");
+  const [viewMode, setViewMode] = useState<"map" | "list">("map");
   const [debugOpen, setDebugOpen] = useState(false);
+  const [messagesOpen, setMessagesOpen] = useState(false);
   const [locating, setLocating] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
@@ -1279,10 +1466,12 @@ function HomeMap({
     const nextTheme = mapTheme === "day" ? "night" : "day";
     map.current?.setMapTheme(nextTheme);
     setMapTheme(nextTheme);
+    setViewMode("map");
   };
 
   const centerOnCurrentLocation = async () => {
     if (locating) return;
+    setViewMode("map");
     setLocating(true);
     setMapError("");
     try {
@@ -1332,8 +1521,22 @@ function HomeMap({
           }}
           onMapError={setMapError}
         />
+        {viewMode === "list" ? (
+          <ScrollView style={styles.nodeList} contentContainerStyle={styles.nodeListContent}>
+            <Text style={styles.nodeListEyebrow}>OFFGRID NODES</Text>
+            <Text style={styles.nodeListTitle}>Devices in {profile.name}</Text>
+            {!devices.length ? (
+              <View style={styles.nodeEmptyCard}>
+                <Text style={styles.nodeName}>No devices discovered yet</Text>
+                <Text style={styles.nodeMeta}>Devices appear after a beacon is received over the HaLow mesh.</Text>
+              </View>
+            ) : devices.map((device) => (
+              <SwipeableDeviceRow key={device.id} device={device} onRemove={onRemoveDevice} />
+            ))}
+          </ScrollView>
+        ) : null}
 
-        {region ? (
+        {viewMode === "map" && region ? (
           <View style={styles.mapPrompt}>
             <Text style={styles.mapPromptTitle}>Save {region} offline?</Text>
             <Text style={styles.mapPromptText}>
@@ -1364,7 +1567,7 @@ function HomeMap({
           </View>
         ) : null}
 
-        {download && !download.finished ? (
+        {viewMode === "map" && download && !download.finished ? (
           <View style={styles.mapNotice}>
             <Text style={styles.mapNoticeText}>
               {download.status}
@@ -1379,7 +1582,16 @@ function HomeMap({
           </Pressable>
         ) : null}
 
-        <View style={[styles.mapControls, region && styles.mapControlsRaised]}>
+        <View style={[styles.mapControls, viewMode === "map" && region && styles.mapControlsRaised]}>
+          <Pressable
+            style={styles.mapControlButton}
+            onPress={() => setMessagesOpen(true)}
+            accessibilityRole="button"
+            accessibilityLabel="Open mesh messages"
+          >
+            <Ionicons name="chatbubble-ellipses-outline" size={22} color="white" />
+            {meshLink?.state.nodes.size ? <View style={styles.messageAvailableDot} /> : null}
+          </Pressable>
           <Pressable
             style={styles.mapControlButton}
             onPress={() => setDebugOpen(true)}
@@ -1427,7 +1639,7 @@ function HomeMap({
           </Pressable>
         </View>
 
-        <Text style={styles.mapAttribution}>{locatedDevices.length} located devices · © OpenStreetMap contributors</Text>
+        {viewMode === "map" ? <Text style={styles.mapAttribution}>{locatedDevices.length} located devices · © OpenStreetMap contributors</Text> : null}
       </View>
 
       {menuOpen ? (
@@ -1462,11 +1674,17 @@ function HomeMap({
 
         {menuOpen ? (
           <View style={styles.dropdownMenu} accessibilityRole="menu">
-            <Pressable style={styles.menuItem} onPress={() => setMenuOpen(false)} accessibilityRole="menuitem">
-              <Text style={[styles.menuItemText, styles.menuItemActive]}>Map view</Text>
+            <Pressable style={styles.menuItem} onPress={() => { setViewMode("map"); setMenuOpen(false); }} accessibilityRole="menuitem">
+              <Text style={[styles.menuItemText, viewMode === "map" && styles.menuItemActive]}>Map view</Text>
+            </Pressable>
+            <Pressable style={styles.menuItem} onPress={() => { setViewMode("list"); setMenuOpen(false); }} accessibilityRole="menuitem">
+              <Text style={[styles.menuItemText, viewMode === "list" && styles.menuItemActive]}>Nodes list</Text>
             </Pressable>
             <Pressable style={styles.menuItem} onPress={showOfflineMapHelp} accessibilityRole="menuitem">
               <Text style={styles.menuItemText}>Offline maps</Text>
+            </Pressable>
+            <Pressable style={styles.menuItem} onPress={() => { setMenuOpen(false); setMessagesOpen(true); }} accessibilityRole="menuitem">
+              <Text style={styles.menuItemText}>Messages</Text>
             </Pressable>
             <Pressable
               style={styles.menuItem}
@@ -1497,6 +1715,12 @@ function HomeMap({
         status={bleStatus}
         onClose={() => setDebugOpen(false)}
       />
+      <MeshMessages
+        visible={messagesOpen}
+        session={meshLink?.session ?? null}
+        meshState={meshLink?.state ?? null}
+        onClose={() => setMessagesOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -1519,6 +1743,8 @@ export default function App() {
     halowLinkUp: null,
     updatedAt: Date.now(),
   });
+  const [meshLink, setMeshLink] = useState<{ session: EdgezMeshSession; state: EdgezMeshState } | null>(null);
+  const persistedNodeFingerprint = useRef("");
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
@@ -1553,6 +1779,45 @@ export default function App() {
       .catch((caught) => setSettingsError(caught instanceof Error ? caught.message : "Could not open the local profile database."))
       .finally(() => setProfileLoaded(true));
   }, []);
+
+  useEffect(() => {
+    if (!profile || !meshLink) return;
+    const discovered = [...meshLink.state.nodes.values()]
+      .filter((node) => !isEdgezPublicChannel(node.nodeNum) && node.lastSeenMs > 0);
+    if (!discovered.length) return;
+    const fingerprint = `${profile.id}:` + discovered
+      .map((node) => `${node.nodeNum}:${node.lastSeenMs}:${node.latitude ?? ""}:${node.longitude ?? ""}`)
+      .sort()
+      .join("|");
+    if (persistedNodeFingerprint.current === fingerprint) return;
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const existingDevices = await listProfileDevices(profile.id);
+        for (const node of discovered) {
+          const serial = edgezNodeId(node.nodeNum).toUpperCase();
+          const existing = existingDevices.find((device) =>
+            normalizedDeviceSerial(device.serial) === normalizedDeviceSerial(serial));
+          const hasLocation = node.latitude !== undefined && node.longitude !== undefined;
+          await saveProfileDevice({
+            profileId: profile.id,
+            serial,
+            name: edgezNodeDisplayName(node),
+            kind: node.deviceType.toLowerCase() === "gateway" ? "h7608" : existing?.kind ?? "esp32",
+            firmwareTarget: existing?.firmwareTarget || `mesh-${node.deviceType.toLowerCase() || "node"}`,
+            locationSource: hasLocation ? "gps" : existing?.locationSource ?? "none",
+            latitude: hasLocation ? node.latitude as number : existing?.latitude ?? null,
+            longitude: hasLocation ? node.longitude as number : existing?.longitude ?? null,
+          }, existing?.id);
+        }
+        persistedNodeFingerprint.current = fingerprint;
+        setProfileDevices(await listProfileDevices(profile.id));
+      })().catch((caught) => {
+        setSettingsError(caught instanceof Error ? caught.message : "Could not save discovered mesh devices.");
+      });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [meshLink?.state.nodes, profile]);
 
   const saveInitialProfile = async (details: ProfileDetails) => {
     await createProfile(details);
@@ -1614,6 +1879,29 @@ export default function App() {
     );
   };
 
+  const requestRemoveDevice = (device: StoredDevice) => {
+    if (!profile) return;
+    Alert.alert(
+      "Remove device?",
+      `${device.name} will be removed from this profile. It can appear again when a new beacon is received.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              await deleteProfileDevice(profile.id, device.id);
+              setProfileDevices(await listProfileDevices(profile.id));
+            })().catch((caught) => {
+              setSettingsError(caught instanceof Error ? caught.message : "Could not remove the device.");
+            });
+          },
+        },
+      ],
+    );
+  };
+
   return (
     <SafeAreaProvider>
       {!profileLoaded ? (
@@ -1628,6 +1916,7 @@ export default function App() {
               key={`${profile.id}:${profile.bleDeviceId}`}
               profile={profile}
               onStatusChange={setBleStatus}
+              onMeshChange={setMeshLink}
             />
           ) : null}
           <HomeMap
@@ -1635,7 +1924,9 @@ export default function App() {
             profile={profile}
             devices={profileDevices}
             bleStatus={bleStatus}
+            meshLink={meshLink}
             onAddDevice={() => setProvisioningOpen(true)}
+            onRemoveDevice={requestRemoveDevice}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
@@ -1812,6 +2103,21 @@ const styles = StyleSheet.create({
   settingsError: { color: "#b9472f", fontSize: 11, textAlign: "center", marginTop: 4 },
   mapCard: { flex: 1, overflow: "hidden", backgroundColor: "#dce8e5" },
   map: { ...StyleSheet.absoluteFill },
+  nodeList: { ...StyleSheet.absoluteFill, backgroundColor: "#f7faf9" },
+  nodeListContent: { paddingHorizontal: 20, paddingTop: 88, paddingBottom: 92, gap: 11 },
+  nodeListEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1.1 },
+  nodeListTitle: { color: "#0a3037", fontSize: 26, fontWeight: "900", marginBottom: 8 },
+  nodeSwipeContainer: { borderRadius: 14, overflow: "hidden", backgroundColor: "#b9472f" },
+  nodeRemoveAction: { position: "absolute", top: 0, right: 0, bottom: 0, width: nodeSwipeActionWidth, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: "#b9472f" },
+  nodeRemoveText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
+  nodeCard: { minHeight: 86, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 14, backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 12 },
+  nodeEmptyCard: { padding: 20, borderRadius: 14, backgroundColor: "#e9f7f5", gap: 5 },
+  nodeIcon: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#e9f7f5" },
+  nodeBody: { flex: 1, gap: 3 },
+  nodeName: { color: "#0a3037", fontSize: 15, fontWeight: "900" },
+  nodeSerial: { color: "#385753", fontSize: 10, fontWeight: "700", letterSpacing: 0.4 },
+  nodeMeta: { color: "#718783", fontSize: 10, lineHeight: 15 },
+  nodeKind: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 0.7 },
   dashboardHeader: {
     position: "absolute",
     top: 0,
@@ -1904,6 +2210,25 @@ const styles = StyleSheet.create({
   bleStatusDotReady: { backgroundColor: "#69cfc7" },
   bleStatusDotConnected: { backgroundColor: "#f2c96d" },
   bleStatusDotError: { backgroundColor: "#ff826f" },
+  messageAvailableDot: { position: "absolute", right: 7, top: 7, width: 8, height: 8, borderRadius: 4, backgroundColor: "#69cfc7", borderWidth: 1, borderColor: "#092e35" },
+  messagesPage: { flex: 1, backgroundColor: "#f7faf9" },
+  messagesContent: { padding: 22, paddingBottom: 42, gap: 12 },
+  messageEmptyCard: { padding: 20, borderRadius: 16, backgroundColor: "#e9f7f5", gap: 6 },
+  messageEmptyTitle: { color: "#0a3037", fontSize: 18, fontWeight: "900" },
+  messagePeerList: { gap: 9, paddingVertical: 2 },
+  messagePeer: { minWidth: 142, padding: 12, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", gap: 3 },
+  messagePeerSelected: { borderColor: "#0a8c87", backgroundColor: "#e9f7f5" },
+  messagePeerName: { color: "#385753", fontSize: 13, fontWeight: "900" },
+  messagePeerNameSelected: { color: "#0a8c87" },
+  messagePeerId: { color: "#718783", fontSize: 9 },
+  conversationCard: { minHeight: 220, padding: 12, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 8 },
+  messageBubble: { maxWidth: "86%", paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12, gap: 3 },
+  messageBubbleMine: { alignSelf: "flex-end", backgroundColor: "#ccefeb" },
+  messageBubblePeer: { alignSelf: "flex-start", backgroundColor: "#edf3f2" },
+  messageText: { color: "#0a3037", fontSize: 14, lineHeight: 19 },
+  messageStatus: { color: "#718783", fontSize: 8, textTransform: "uppercase" },
+  messageInput: { minHeight: 72, maxHeight: 140, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, color: "#0a3037", backgroundColor: "white", textAlignVertical: "top" },
+  messageSendButton: { minHeight: 52, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
   mapAttribution: {
     position: "absolute",
     left: 10,

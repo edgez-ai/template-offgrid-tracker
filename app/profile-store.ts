@@ -353,19 +353,32 @@ export async function listProfileDevices(profileId: string): Promise<StoredDevic
   return rows.map(deviceFromRow);
 }
 
+export async function deleteProfileDevice(profileId: string, deviceId: string): Promise<void> {
+  const db = await database();
+  await db.runAsync("DELETE FROM devices WHERE profile_id = ? AND id = ?", profileId, deviceId);
+}
+
 export async function saveProfileDevice(details: DeviceDetails, deviceId?: string): Promise<StoredDevice> {
   const db = await database();
-  const existing = await db.getFirstAsync<DeviceRow>(
-    "SELECT * FROM devices WHERE profile_id = ? AND serial = ?",
-    details.profileId,
-    details.serial,
-  );
+  const existing = deviceId
+    ? await db.getFirstAsync<DeviceRow>(
+      "SELECT * FROM devices WHERE profile_id = ? AND (id = ? OR serial = ?)",
+      details.profileId,
+      deviceId,
+      details.serial,
+    )
+    : await db.getFirstAsync<DeviceRow>(
+      "SELECT * FROM devices WHERE profile_id = ? AND serial = ?",
+      details.profileId,
+      details.serial,
+    );
   const now = new Date().toISOString();
   if (existing) {
     await db.runAsync(
       `UPDATE devices
-       SET name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?, updated_at = ?
+       SET serial = ?, name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?, updated_at = ?
        WHERE id = ?`,
+      details.serial,
       details.name,
       details.kind,
       details.firmwareTarget,

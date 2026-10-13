@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "host/ble_att.h"
 #include "host/ble_gap.h"
 #include "host/ble_hs.h"
 #include "host/ble_hs_id.h"
@@ -22,6 +23,9 @@
 #include "pb_decode.h"
 #include "pb_encode.h"
 #include "usb_control.pb.h"
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+#include "edgez_mqtt.hpp"
+#endif
 
 #define EDGEZ_CONTROL_SERVICE_UUID 0xfff0
 #define EDGEZ_CONTROL_RX_UUID 0xfff1
@@ -112,6 +116,47 @@ static ai_edgez_halow_MarkerColor marker_from_name(const char *name)
     return ai_edgez_halow_MarkerColor_MARKER_BLUE;
 }
 
+static esp_err_t notify_raw_packet(const uint8_t *payload, size_t length)
+{
+    if (payload == NULL || length == 0 || length > EDGEZ_MAX_PACKET_SIZE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t active_connection;
+    bool can_notify;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    active_connection = connection_handle;
+    can_notify = notifications_enabled;
+    xSemaphoreGive(state_lock);
+    if (!can_notify || active_connection == EDGEZ_INVALID_CONNECTION_HANDLE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint8_t frame[EDGEZ_FRAME_HEADER_SIZE + EDGEZ_MAX_PACKET_SIZE];
+    frame[0] = 'E';
+    frame[1] = 'Z';
+    frame[2] = (uint8_t)(length & 0xffU);
+    frame[3] = (uint8_t)(length >> 8);
+    memcpy(&frame[EDGEZ_FRAME_HEADER_SIZE], payload, length);
+    const size_t frame_length = EDGEZ_FRAME_HEADER_SIZE + length;
+    const uint16_t mtu = ble_att_mtu(active_connection);
+    const size_t chunk_limit = mtu > 3U ? mtu - 3U : 20U;
+    for (size_t offset = 0; offset < frame_length; offset += chunk_limit) {
+        const size_t remaining = frame_length - offset;
+        const size_t chunk = remaining < chunk_limit ? remaining : chunk_limit;
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(&frame[offset], chunk);
+        if (om == NULL) return ESP_ERR_NO_MEM;
+        const int rc = ble_gatts_notify_custom(active_connection,
+                                                tx_value_handle, om);
+        if (rc != 0) {
+            ESP_LOGW(TAG, "FFF2 notify failed offset=%u: %d",
+                     (unsigned)offset, rc);
+            return ESP_FAIL;
+        }
+    }
+    return ESP_OK;
+}
+
 static void response_base(const ai_edgez_halow_NetworkPacket *request,
                           ai_edgez_halow_NetworkPacket *response)
 {
@@ -172,40 +217,102 @@ static void fill_device_settings(ai_edgez_halow_DeviceSettings *settings)
 static esp_err_t notify_packet(const ai_edgez_halow_NetworkPacket *packet)
 {
     uint8_t payload[EDGEZ_MAX_PACKET_SIZE];
-    uint8_t frame[EDGEZ_FRAME_HEADER_SIZE + EDGEZ_MAX_PACKET_SIZE];
     pb_ostream_t stream = pb_ostream_from_buffer(payload, sizeof(payload));
     if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, packet)) {
         ESP_LOGE(TAG, "NetworkPacket encode failed: %s", PB_GET_ERROR(&stream));
         return ESP_ERR_INVALID_SIZE;
     }
 
-    uint16_t active_connection;
-    bool can_notify;
+    return notify_raw_packet(payload, stream.bytes_written);
+}
+
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+static bool is_public_channel(uint64_t destination)
+{
+    return destination >= UINT64_C(38801) && destination <= UINT64_C(38809) &&
+           ((destination - UINT64_C(38801)) % 2U) == 0;
+}
+
+static void node_id_to_mac(uint64_t node_id, uint8_t mac[6])
+{
+    for (int index = 5; index >= 0; --index) {
+        mac[index] = (uint8_t)(node_id & 0xffU);
+        node_id >>= 8;
+    }
+}
+
+static esp_err_t relay_network_packet(const ai_edgez_halow_NetworkPacket *packet,
+                                      const uint8_t *payload,
+                                      size_t length)
+{
+    uint8_t destination[6];
+    const bool broadcast = packet->to == 0 || is_public_channel(packet->to) ||
+        packet->which_body == ai_edgez_halow_NetworkPacket_beacon_tag ||
+        packet->which_body == ai_edgez_halow_NetworkPacket_report_tag ||
+        packet->which_body == ai_edgez_halow_NetworkPacket_payload_tag;
+    if (!broadcast) node_id_to_mac(packet->to, destination);
+    return edgez_mqtt_send_network_packet(
+        broadcast ? NULL : destination, payload, length);
+}
+
+static esp_err_t broadcast_beacon(void)
+{
+    ai_edgez_halow_NetworkPacket *packet = calloc(1, sizeof(*packet));
+    if (packet == NULL) return ESP_ERR_NO_MEM;
+
     xSemaphoreTake(state_lock, portMAX_DELAY);
-    active_connection = connection_handle;
-    can_notify = notifications_enabled;
+    const bool ready = control_state.stack_initialized && control_state.link_up;
+    packet->from = mac_to_u64(control_state.mac);
+    packet->operation = ai_edgez_halow_Operation_BROADCAST;
+    packet->interface = ai_edgez_halow_Interface_HALOW;
+    packet->which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
+    packet->body.beacon.user_id_high = control_state.user_id_high;
+    packet->body.beacon.user_id_low = control_state.user_id_low;
+    strlcpy(packet->body.beacon.user_name, control_state.user_name,
+            sizeof(packet->body.beacon.user_name));
+    packet->body.beacon.user_public_key.size = control_state.user_public_key_len;
+    memcpy(packet->body.beacon.user_public_key.bytes,
+           control_state.user_public_key, control_state.user_public_key_len);
+    if (control_state.share_location) {
+        packet->body.beacon.latitude = control_state.latitude;
+        packet->body.beacon.longitude = control_state.longitude;
+    }
+    packet->body.beacon.marker = control_state.marker;
+    packet->body.beacon.device_type =
+        ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
     xSemaphoreGive(state_lock);
-    if (!can_notify || active_connection == EDGEZ_INVALID_CONNECTION_HANDLE) {
+
+    if (!ready) {
+        free(packet);
         return ESP_ERR_INVALID_STATE;
     }
-
-    frame[0] = 'E';
-    frame[1] = 'Z';
-    frame[2] = (uint8_t)(stream.bytes_written & 0xffU);
-    frame[3] = (uint8_t)(stream.bytes_written >> 8);
-    memcpy(&frame[EDGEZ_FRAME_HEADER_SIZE], payload, stream.bytes_written);
-    struct os_mbuf *om = ble_hs_mbuf_from_flat(
-        frame, EDGEZ_FRAME_HEADER_SIZE + stream.bytes_written);
-    if (om == NULL) {
-        return ESP_ERR_NO_MEM;
+    uint8_t encoded[EDGEZ_MAX_PACKET_SIZE];
+    pb_ostream_t stream = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, packet)) {
+        ESP_LOGW(TAG, "Beacon NetworkPacket encode failed: %s",
+                 PB_GET_ERROR(&stream));
+        free(packet);
+        return ESP_ERR_INVALID_SIZE;
     }
-    const int rc = ble_gatts_notify_custom(active_connection, tx_value_handle, om);
-    if (rc != 0) {
-        ESP_LOGW(TAG, "FFF2 notify failed: %d", rc);
-        return ESP_FAIL;
-    }
-    return ESP_OK;
+    free(packet);
+    return edgez_mqtt_send_network_packet(NULL, encoded, stream.bytes_written);
 }
+
+void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
+                                            size_t length,
+                                            void *arg)
+{
+    (void)arg;
+    const esp_err_t err = notify_raw_packet(payload, length);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Mesh NetworkPacket forwarded to BLE bytes=%u",
+                 (unsigned)length);
+    } else if (err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "Mesh NetworkPacket BLE forwarding failed: %s",
+                 esp_err_to_name(err));
+    }
+}
+#endif
 
 static esp_err_t send_status(const ai_edgez_halow_NetworkPacket *request)
 {
@@ -358,6 +465,21 @@ static esp_err_t handle_packet(const uint8_t *payload, size_t length)
     } else if (request->which_body == ai_edgez_halow_NetworkPacket_status_tag ||
                request->which_body == 0) {
         err = send_status(request);
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    } else if (request->which_body == ai_edgez_halow_NetworkPacket_msg_tag ||
+               request->which_body == ai_edgez_halow_NetworkPacket_beacon_tag ||
+               request->which_body == ai_edgez_halow_NetworkPacket_report_tag ||
+               request->which_body == ai_edgez_halow_NetworkPacket_payload_tag) {
+        err = relay_network_packet(request, payload, length);
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "BLE NetworkPacket relayed over mesh body=%u route=%s bytes=%u",
+                     request->which_body,
+                     request->to == 0 || is_public_channel(request->to)
+                         ? "broadcast" : "unicast",
+                     (unsigned)length);
+        }
+#endif
     } else {
         ESP_LOGW(TAG, "Unsupported control request body=%u", request->which_body);
         err = ESP_ERR_NOT_SUPPORTED;
@@ -398,6 +520,9 @@ static void process_rx_frames(void)
 static void status_task(void *argument)
 {
     (void)argument;
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    TickType_t last_beacon = 0;
+#endif
     while (true) {
         (void)ulTaskNotifyTake(pdTRUE,
                                pdMS_TO_TICKS(EDGEZ_STATUS_INTERVAL_MS));
@@ -413,6 +538,28 @@ static void status_task(void *argument)
             vTaskDelay(pdMS_TO_TICKS(25));
         }
         (void)send_status(NULL);
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+        uint32_t interval_seconds;
+        bool beacon_ready;
+        xSemaphoreTake(state_lock, portMAX_DELAY);
+        interval_seconds = control_state.beacon_interval_seconds;
+        beacon_ready = control_state.stack_initialized && control_state.link_up;
+        xSemaphoreGive(state_lock);
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t interval = pdMS_TO_TICKS(
+            (interval_seconds == 0 ? 30U : interval_seconds) * 1000U);
+        if (beacon_ready &&
+            (last_beacon == 0 || (now - last_beacon) >= interval)) {
+            const esp_err_t beacon_err = broadcast_beacon();
+            if (beacon_err == ESP_OK) {
+                last_beacon = now;
+                ESP_LOGI(TAG, "Periodic NetworkPacket beacon broadcast");
+            } else if (beacon_err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "Beacon broadcast failed: %s",
+                         esp_err_to_name(beacon_err));
+            }
+        }
+#endif
     }
 }
 
@@ -702,6 +849,11 @@ esp_err_t edgez_ble_control_start(void)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init failed: %s", esp_err_to_name(err));
         return err;
+    }
+
+    const int mtu_rc = ble_att_set_preferred_mtu(517);
+    if (mtu_rc != 0) {
+        ESP_LOGW(TAG, "Could not set preferred BLE MTU 517: %d", mtu_rc);
     }
 
     ble_hs_cfg.reset_cb = host_reset;
