@@ -195,7 +195,7 @@ static esp_err_t start_mesh(void)
              service_info.mac[0], service_info.mac[1], service_info.mac[2],
              service_info.mac[3], service_info.mac[4], service_info.mac[5]);
 #if CONFIG_HALOW_BLE_PROVISIONING
-    const bool mqtt_gateway = provisioned_config.wifi_upstream;
+    const bool mqtt_gateway = false;
 #else
     const bool mqtt_gateway = false;
 #endif
@@ -241,7 +241,7 @@ static esp_err_t start_mesh(void)
 #endif
 #if CONFIG_DAB_WIFI_EXTENDER
 #if CONFIG_HALOW_BLE_PROVISIONING
-    err = wifi_extender_start(service_info.mac, provisioned_config.wifi_upstream);
+    err = wifi_extender_start(service_info.mac, false);
 #else
     err = wifi_extender_start(service_info.mac, false);
 #endif

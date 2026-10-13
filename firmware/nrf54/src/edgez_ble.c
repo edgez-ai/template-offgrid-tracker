@@ -24,11 +24,11 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 #define EDGEZ_FRAME_MAX_LEN (EDGEZ_FRAME_HEADER_LEN + EDGEZ_FRAME_MAX_PAYLOAD)
 #define EDGEZ_BLE_NOTIFY_RETRY_DELAY K_MSEC(10)
 #define EDGEZ_BLE_NOTIFY_MAX_RETRIES 10
-#define MQTT_CONFIG_MAX_LEN 1024
-#define MQTT_CONFIRMATION_ID_MAX_LEN 64
+#define PROVISIONING_CONFIG_MAX_LEN 1024
+#define PROVISIONING_CONFIRMATION_ID_MAX_LEN 64
 #define PROVISIONING_NAME_PREFIX "PROV_"
 
-/* Direct nRF provisioning: service, mqtt-config write, result read. */
+/* Direct nRF54 provisioning protocol: chunked JSON write and persisted result. */
 #define LIVESTOCK_SERVICE_UUID BT_UUID_128_ENCODE(0xa3631000, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
 #define LIVESTOCK_CONFIG_UUID BT_UUID_128_ENCODE(0xa3631001, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
 #define LIVESTOCK_STATUS_UUID BT_UUID_128_ENCODE(0xa3631002, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
@@ -37,10 +37,10 @@ static struct bt_uuid_128 livestock_service_uuid = BT_UUID_INIT_128(LIVESTOCK_SE
 static struct bt_uuid_128 livestock_config_uuid = BT_UUID_INIT_128(LIVESTOCK_CONFIG_UUID);
 static struct bt_uuid_128 livestock_status_uuid = BT_UUID_INIT_128(LIVESTOCK_STATUS_UUID);
 extern const struct bt_gatt_service_static livestock_svc;
-static char mqtt_config_buffer[MQTT_CONFIG_MAX_LEN + 1];
-static size_t mqtt_config_expected;
-static size_t mqtt_config_received;
-static char mqtt_config_status[192] = "{\"pending\":true}";
+static char provisioning_config_buffer[PROVISIONING_CONFIG_MAX_LEN + 1];
+static size_t provisioning_config_expected;
+static size_t provisioning_config_received;
+static char provisioning_config_status[192] = "{\"pending\":true}";
 
 static struct bt_uuid_16 edgez_service_uuid = BT_UUID_INIT_16(0xfff0);
 static struct bt_uuid_16 edgez_rx_uuid = BT_UUID_INIT_16(0xfff1);
@@ -231,11 +231,11 @@ static ssize_t read_battery(struct bt_conn *conn, const struct bt_gatt_attr *att
 				 sizeof(battery_level));
 }
 
-static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+static ssize_t write_provisioning_config(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				 const void *buf, uint16_t len, uint16_t offset, uint8_t flags)
 {
 	const uint8_t *data = buf;
-	char confirmation_id[MQTT_CONFIRMATION_ID_MAX_LEN] = {0};
+	char confirmation_id[PROVISIONING_CONFIRMATION_ID_MAX_LEN] = {0};
 	size_t header;
 	int rc;
 
@@ -245,68 +245,68 @@ static ssize_t write_mqtt_config(struct bt_conn *conn, const struct bt_gatt_attr
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	}
 	if (data[0] == 1 && len >= 4) {
-		mqtt_config_expected = sys_get_le16(&data[1]);
-		mqtt_config_received = 0;
-		strcpy(mqtt_config_status, "{\"pending\":true}");
+		provisioning_config_expected = sys_get_le16(&data[1]);
+		provisioning_config_received = 0;
+		strcpy(provisioning_config_status, "{\"pending\":true}");
 		header = 3;
-		if (!mqtt_config_expected || mqtt_config_expected > MQTT_CONFIG_MAX_LEN) {
-			strcpy(mqtt_config_status, "{\"ok\":false,\"error\":\"Configuration too large\"}");
+		if (!provisioning_config_expected || provisioning_config_expected > PROVISIONING_CONFIG_MAX_LEN) {
+			strcpy(provisioning_config_status, "{\"ok\":false,\"error\":\"Configuration too large\"}");
 			return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 		}
-	} else if (data[0] == 2 && mqtt_config_expected) {
+	} else if (data[0] == 2 && provisioning_config_expected) {
 		header = 1;
 	} else {
 		return BT_GATT_ERR(BT_ATT_ERR_VALUE_NOT_ALLOWED);
 	}
-	if (mqtt_config_received + len - header > mqtt_config_expected) {
-		strcpy(mqtt_config_status, "{\"ok\":false,\"error\":\"Invalid configuration length\"}");
+	if (provisioning_config_received + len - header > provisioning_config_expected) {
+		strcpy(provisioning_config_status, "{\"ok\":false,\"error\":\"Invalid configuration length\"}");
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
-	memcpy(&mqtt_config_buffer[mqtt_config_received], data + header, len - header);
-	mqtt_config_received += len - header;
-	if (mqtt_config_received == mqtt_config_expected) {
-		mqtt_config_buffer[mqtt_config_received] = '\0';
-		rc = livestock_config_apply_json(mqtt_config_buffer, mqtt_config_received,
+	memcpy(&provisioning_config_buffer[provisioning_config_received], data + header, len - header);
+	provisioning_config_received += len - header;
+	if (provisioning_config_received == provisioning_config_expected) {
+		provisioning_config_buffer[provisioning_config_received] = '\0';
+		rc = livestock_config_apply_json(provisioning_config_buffer, provisioning_config_received,
 					      get_advertised_name() + sizeof(PROVISIONING_NAME_PREFIX) - 1,
 					      confirmation_id, sizeof(confirmation_id));
 		if (rc == 0) {
-			snprintk(mqtt_config_status, sizeof(mqtt_config_status),
+			snprintk(provisioning_config_status, sizeof(provisioning_config_status),
 				 "{\"ok\":true,\"persisted\":true,\"confirmationId\":\"%s\"}",
 				 confirmation_id);
 		} else {
-			snprintk(mqtt_config_status, sizeof(mqtt_config_status),
+			snprintk(provisioning_config_status, sizeof(provisioning_config_status),
 				 "{\"ok\":false,\"persisted\":false,\"confirmationId\":\"%s\",\"error\":\"Invalid configuration or NVS verification failed\"}",
 				 confirmation_id);
 		}
 		if (rc == 0) provisioning_enabled = false;
-		LOG_INF("Live Stocking mqtt-config received bytes=%u result=%d",
-			(unsigned int)mqtt_config_received, rc);
-		mqtt_config_expected = 0;
-		mqtt_config_received = 0;
+		LOG_INF("Off-grid nRF54 provisioning received bytes=%u result=%d",
+			(unsigned int)provisioning_config_received, rc);
+		provisioning_config_expected = 0;
+		provisioning_config_received = 0;
 		if (current_conn) {
 			int notify_rc = bt_gatt_notify_uuid(current_conn, &livestock_status_uuid.uuid,
-						     livestock_svc.attrs, mqtt_config_status,
-						     strlen(mqtt_config_status));
+						     livestock_svc.attrs, provisioning_config_status,
+						     strlen(provisioning_config_status));
 			if (notify_rc) LOG_WRN("Provisioning confirmation notify failed: %d", notify_rc);
 		}
 	}
 	return len;
 }
 
-static ssize_t read_mqtt_config_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
+static ssize_t read_provisioning_status(struct bt_conn *conn, const struct bt_gatt_attr *attr,
 				       void *buf, uint16_t len, uint16_t offset)
 {
-	return bt_gatt_attr_read(conn, attr, buf, len, offset, mqtt_config_status,
-				 strlen(mqtt_config_status));
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, provisioning_config_status,
+				 strlen(provisioning_config_status));
 }
 
 BT_GATT_SERVICE_DEFINE(livestock_svc,
 	BT_GATT_PRIMARY_SERVICE(&livestock_service_uuid),
 	BT_GATT_CHARACTERISTIC(&livestock_config_uuid.uuid, BT_GATT_CHRC_WRITE,
-		BT_GATT_PERM_WRITE, NULL, write_mqtt_config, NULL),
-	BT_GATT_CUD("mqtt-config", BT_GATT_PERM_READ),
+		BT_GATT_PERM_WRITE, NULL, write_provisioning_config, NULL),
+	BT_GATT_CUD("device-config", BT_GATT_PERM_READ),
 	BT_GATT_CHARACTERISTIC(&livestock_status_uuid.uuid, BT_GATT_CHRC_READ | BT_GATT_CHRC_NOTIFY,
-		BT_GATT_PERM_READ, read_mqtt_config_status, NULL, NULL),
+		BT_GATT_PERM_READ, read_provisioning_status, NULL, NULL),
 	BT_GATT_CCC(NULL, BT_GATT_PERM_READ | BT_GATT_PERM_WRITE));
 
 BT_GATT_SERVICE_DEFINE(edgez_svc,
@@ -394,9 +394,9 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	current_conn = bt_conn_ref(conn);
 	advertising = false;
 	rx_length = 0;
-	mqtt_config_expected = 0;
-	mqtt_config_received = 0;
-	strcpy(mqtt_config_status, "{\"pending\":true}");
+	provisioning_config_expected = 0;
+	provisioning_config_received = 0;
+	strcpy(provisioning_config_status, "{\"pending\":true}");
 	pending_response_len = 0;
 	tx_notify_enabled = false;
 	LOG_INF("EdgeZ BLE provisioning client connected peer=%s; no pairing required",
@@ -415,8 +415,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 		current_conn = NULL;
 	}
 	rx_length = 0;
-	mqtt_config_expected = 0;
-	mqtt_config_received = 0;
+	provisioning_config_expected = 0;
+	provisioning_config_received = 0;
 	pending_response_len = 0;
 	(void)k_work_cancel_delayable(&response_notify_work);
 	tx_notify_enabled = false;

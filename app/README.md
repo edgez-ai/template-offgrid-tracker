@@ -21,6 +21,10 @@ The `+ ADD` flow discovers supported devices locally and provisions the active
 profile's HaLow settings without cloud credentials or upstream network
 selection. Provisioned devices receive locally generated UUIDs and are stored
 per profile in SQLite; devices with saved coordinates appear on the offline map.
+The UUID is generated before provisioning and sent to the firmware, then the
+same value is committed to SQLite after the firmware confirms persistence.
+ESP32 uses secure ESP-IDF BLE provisioning; nRF54 uses its separate chunked
+GATT provisioning service.
 
 ## Configuration
 

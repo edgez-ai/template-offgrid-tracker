@@ -2037,7 +2037,7 @@ int main(void)
 	if (provisioning_complete) {
 		LOG_INF("BLE provisioning disabled after setup; press KEY to enable it");
 	} else {
-		LOG_INF("BLE provisioning enabled: MQTT or HaLow profile incomplete");
+		LOG_INF("BLE provisioning enabled: local device or HaLow profile incomplete");
 		int ble_rc = edgez_ble_start();
 		if (ble_rc) {
 			LOG_ERR("EdgeZ BLE provisioning failed to start: %d", ble_rc);

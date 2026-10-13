@@ -78,8 +78,8 @@ transport-neutral publish/readiness callback, so a direct ESP MQTT client over
 upstream Wi-Fi does not require BATMAN. `CONFIG_DAB_PUBLISH_SYSTEM_STATUS`
 independently controls the periodic `system/status` producer.
 
-The standalone ESP application also follows the internal firmware's cloud
-reporting path. It decodes PAwR Beacon protobufs into the existing
+The standalone ESP application can also run the internal firmware's optional
+relay/reporting path. It decodes PAwR Beacon protobufs into the existing
 `telemetry/sensors` JSON contract, and every 30 seconds publishes its own
 protobuf `system/status` through the configured publisher. Its protobuf uses the
 same Appwrite device status, HaLow identity, topology, RF-link, gateway-status,
@@ -88,10 +88,9 @@ authorized-peer RSSI average/minimum, last mesh scan noise floor, link quality,
 peer count, and cumulative BATMAN RX/TX/retry/failure counters. ESP32-S3 also publishes
 `telemetry/sensors` when the HT-HC33 battery ADC on the GPIO20-controlled GPIO1
 divider returns a valid sample; ESP32-P4 and failed ADC reads omit the sensor
-message instead of publishing an empty sensor array. The provisioning endpoint
-preserves the payload's Appwrite `clientId` in the internal firmware's
-`mqtt/client` NVS key. Older saved profiles without that key continue mesh
-operation but disable local cloud reporting until they are reprovisioned.
+message instead of publishing an empty sensor array. Offline provisioning
+stores the app-generated device UUID with the HaLow profile; no Appwrite or MQTT
+credentials are accepted or persisted.
 
 The fork keeps the official firmware, BCF, driver, MAC, and network layers,
 but selects USB instead of SDIO-over-SPI at component build time. USB mode does
@@ -229,29 +228,38 @@ provisioning contract as `edge-device-esp32-internal`:
 - BLE service name: `PROV_<12-character uppercase ESP32 Wi-Fi MAC>`
 - Security: `NETWORK_PROV_SECURITY_1`
 - Proof of possession: `abcd1234`
-- Custom endpoint: `mqtt-config`
+- Custom endpoint: `mqtt-config` (legacy wire name retained for SDK compatibility)
 
 The endpoint accepts the existing device payload. Its required HaLow fields
 are:
 
 ```json
 {
+  "clientId": "33c84b34-4599-4ed9-894f-b5f48df6fd8c",
   "meshId": "halow-mesh",
   "passphrase": "12345678",
   "country": "EU",
-  "halowChannel": 7,
-  "wifiUpstream": false
+  "halowChannel": 7
 }
 ```
 
 The country/channel pair is checked against the Morse regulatory database.
-The mesh values and `wifiUpstream` flag are stored under the same `halow` NVS
-namespace and key names as the internal firmware. After the endpoint responds
+The UUID is generated and retained by the mobile app per profile/device. The
+firmware stores it with the mesh values and accepts either an empty passphrase
+for an open mesh or 8–63 characters for SAE. After the endpoint responds
 successfully, BLE shuts down and the device reboots into the saved HaLow mesh.
-With Wi-Fi extender support enabled, a `wifiUpstream=true` profile waits for
-successful standard Wi-Fi credential provisioning before rebooting, regardless
-of whether the custom endpoint or Wi-Fi credentials arrive first.
+No upstream Wi-Fi scan or credential provisioning is performed.
 Erasing NVS returns it to provisioning mode.
+
+### Direct provisioning on nRF54L15
+
+nRF54 does not run ESP-IDF provisioning. It uses the dedicated EdgeZ GATT
+service `a3631000-b82e-44c2-9b1d-a790675b4ac1`, with configuration and status
+characteristics ending in `1001` and `1002`. The mobile SDK writes the same
+offline JSON in chunks and waits for a matching `confirmationId` response. The
+firmware validates and persists the device UUID, country, channel, mesh ID,
+passphrase, name, and optional location before allowing HaLow to start. MQTT,
+Appwrite, and upstream Wi-Fi fields are neither required nor stored.
 
 ESP32-S3 runs the NimBLE host against its integrated BLE controller. ESP32-P4
 has no Bluetooth radio, so the P4 profile connects the same NimBLE provisioning
@@ -282,16 +290,13 @@ modules are adapted from `edge-device-esp32-internal`'s `wifi-extender` branch
 at `3016950`, with OpenWrt `EZGW1` compatibility and proactive neighbor
 advertisement adapted from the `v2` source.
 
-- `wifiUpstream=false`: start a WPA2 `EZ-<Wi-Fi MAC>` SoftAP. Its password is
+- Offline mode starts a WPA2 `EZ-<Wi-Fi MAC>` SoftAP. Its password is
   `CONFIG_DAB_WIFI_EXTENDER_PASSWORD` (initially `edgez123`). A deterministic
   MAC-derived `10.80.0.0/12` subnet allocates a /27 per device, with the first
   host as router and 15 DHCP leases (up to 10 associated Wi-Fi clients).
   Traffic uses a DHCP-addressed BATMAN interface, MTU 1400, and a selected
   EdgeZ Mesh Network gateway. A local bounded DNS relay serves downstream clients.
-- `wifiUpstream=true`: connect using saved native Wi-Fi credentials, provide
-  DHCP and NAT on the mesh's `10.42.0.0/24` (or `10.43.0.0/24`) interface,
-  and advertise a BATMAN gateway only after Wi-Fi, DHCP, DNS and NAT are ready.
-  Disconnection withdraws the gateway advertisement and reconnects Wi-Fi.
+  The offline app never scans for or stores an upstream Wi-Fi network.
 
 As in the reference branch, downstream SoftAP traffic preserves client source
 addresses. An EdgeZ Mesh Network/OpenWrt gateway must consume the Alfred type-104
@@ -304,7 +309,8 @@ table to its radio originator. After mesh DHCP succeeds, the ESP publishes its
 /27 and DHCP next hop to each Alfred primary, with lifetime zero on withdrawal.
 A plain BATMAN gateway without that integration is insufficient for these
 routed SoftAP clients; the ESP Wi-Fi gateway role does not install those routes.
-Provisioning continues to use this project's BLE `mqtt-config` endpoint.
+ESP provisioning continues to use the legacy BLE `mqtt-config` endpoint name
+for SDK compatibility, but its payload is entirely local/offline.
 The reference firmware's web configuration UI is not included.
 
 The mesh component has a separate network receive callback so IP/ARP/Alfred
@@ -363,8 +369,7 @@ OpenSSL 3 at `/usr/local/opt/openssl@3` (adjust the runner on other hosts).
 Hardware verification: provision a mesh profile, connect to the SoftAP, verify
 the /27 DHCP lease, then check DNS and Internet access through an EdgeZ Mesh Network
 gateway with the subnet-route integration. Remove and restore the upstream
-gateway to exercise reselection. Separately provision a Wi-Fi upstream node
-and check that its gateway advertisement disappears on Wi-Fi loss. Test MQTT
+gateway to exercise reselection. Test MQTT
 telemetry concurrently to verify both mesh consumers remain active.
 
 Both board profiles use the same 8 MB dual-OTA partition layout as

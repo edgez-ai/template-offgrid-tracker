@@ -15,6 +15,7 @@ import {
   initializeProfileStore,
   listProfileDevices,
   listProfiles,
+  profileDeviceUuid,
   saveProfileDevice,
   setActiveProfile,
   updateProfile,
@@ -542,7 +543,9 @@ function ProvisioningFlow({
     setError("");
     setStatus("Saving the local HaLow configuration…");
     try {
+      const deviceId = await profileDeviceUuid(profile.id, selectedDevice.serial);
       const localInput = {
+        clientId: deviceId,
         meshId: profile.meshId,
         passphrase: profile.meshPassphrase,
         country: profile.country,
@@ -562,7 +565,7 @@ function ProvisioningFlow({
         locationSource: deviceLocationChoice,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
-      });
+      }, deviceId);
       await onProvisioned();
       await provisioningManager.disconnect(selectedDevice);
       setConnected(false);

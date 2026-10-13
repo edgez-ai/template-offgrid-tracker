@@ -99,6 +99,16 @@ function localUuid() {
   });
 }
 
+export async function profileDeviceUuid(profileId: string, serial: string): Promise<string> {
+  const db = await database();
+  const existing = await db.getFirstAsync<{ id: string }>(
+    "SELECT id FROM devices WHERE profile_id = ? AND serial = ?",
+    profileId,
+    serial,
+  );
+  return existing?.id ?? localUuid();
+}
+
 function newProfileId() {
   return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -241,7 +251,7 @@ export async function listProfileDevices(profileId: string): Promise<StoredDevic
   return rows.map(deviceFromRow);
 }
 
-export async function saveProfileDevice(details: DeviceDetails): Promise<StoredDevice> {
+export async function saveProfileDevice(details: DeviceDetails, deviceId?: string): Promise<StoredDevice> {
   const db = await database();
   const existing = await db.getFirstAsync<DeviceRow>(
     "SELECT * FROM devices WHERE profile_id = ? AND serial = ?",
@@ -265,7 +275,7 @@ export async function saveProfileDevice(details: DeviceDetails): Promise<StoredD
     );
     return { id: existing.id, ...details, createdAt: existing.created_at, updatedAt: now };
   }
-  const id = localUuid();
+  const id = deviceId ?? localUuid();
   await db.runAsync(
     `INSERT INTO devices
       (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, created_at, updated_at)

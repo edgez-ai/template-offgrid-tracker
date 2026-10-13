@@ -22,18 +22,12 @@
 #include "nvs_flash.h"
 
 #define HALOW_NVS_NAMESPACE "halow"
-#define MQTT_NVS_NAMESPACE "mqtt"
 #define HALOW_PROVISIONING_ENDPOINT "mqtt-config"
 #define HALOW_PROVISIONING_POP "abcd1234"
 
 static const char *TAG = "halow_prov";
 static bool provisioning_active;
 static bool restart_after_stop;
-#if CONFIG_DAB_WIFI_EXTENDER
-static bool upstream_credentials_ready;
-static bool waiting_for_upstream;
-static halow_provisioning_config_t pending_gateway_config;
-#endif
 
 static bool load_string(nvs_handle_t handle, const char *key, char *value, size_t capacity)
 {
@@ -59,20 +53,12 @@ static esp_err_t save_config(const halow_provisioning_config_t *config)
         err = nvs_set_u8(handle, "channel", config->channel);
     }
     if (err == ESP_OK) {
-        err = nvs_set_u8(handle, "upstream", config->wifi_upstream ? 1U : 0U);
+        err = nvs_set_str(handle, "deviceUuid", config->client_id);
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }
     nvs_close(handle);
-    if (err == ESP_OK && config->client_id[0] != '\0') {
-        err = nvs_open(MQTT_NVS_NAMESPACE, NVS_READWRITE, &handle);
-        if (err == ESP_OK) {
-            err = nvs_set_str(handle, "client", config->client_id);
-            if (err == ESP_OK) err = nvs_commit(handle);
-            nvs_close(handle);
-        }
-    }
     return err;
 }
 
@@ -87,6 +73,23 @@ static bool copy_json_string(cJSON *root, const char *key, char *value, size_t c
         return false;
     }
     memcpy(value, item->valuestring, length + 1);
+    return true;
+}
+
+static bool valid_uuid(const char *value)
+{
+    if (value == NULL || strlen(value) != 36U) {
+        return false;
+    }
+    for (size_t i = 0; i < 36U; ++i) {
+        const char c = value[i];
+        if (i == 8U || i == 13U || i == 18U || i == 23U) {
+            if (c != '-') return false;
+        } else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                     (c >= 'A' && c <= 'F'))) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -136,31 +139,23 @@ static esp_err_t config_endpoint(uint32_t session_id,
         cJSON_GetObjectItemCaseSensitive(root, "passphrase");
     const cJSON *channel = root == NULL ? NULL :
         cJSON_GetObjectItemCaseSensitive(root, "halowChannel");
-    const cJSON *wifi_upstream = root == NULL ? NULL :
-        cJSON_GetObjectItemCaseSensitive(root, "wifiUpstream");
-    const cJSON *client_id = root == NULL ? NULL :
-        cJSON_GetObjectItemCaseSensitive(root, "clientId");
     bool valid = root != NULL &&
+        copy_json_string(root, "clientId", candidate.client_id, sizeof(candidate.client_id)) &&
+        valid_uuid(candidate.client_id) &&
         copy_json_string(root, "meshId", candidate.mesh_id, sizeof(candidate.mesh_id)) &&
         copy_json_string(root, "country", candidate.country, sizeof(candidate.country)) &&
         strlen(candidate.country) == 2 && cJSON_IsString(passphrase) &&
-        passphrase->valuestring != NULL && strlen(passphrase->valuestring) >= 8 &&
+        passphrase->valuestring != NULL &&
+        (strlen(passphrase->valuestring) == 0 || strlen(passphrase->valuestring) >= 8) &&
         strlen(passphrase->valuestring) < sizeof(candidate.passphrase) &&
         cJSON_IsNumber(channel) && channel->valuedouble >= 1 &&
-        channel->valuedouble <= UINT8_MAX && channel->valuedouble == channel->valueint &&
-        cJSON_IsBool(wifi_upstream);
-
-    if (valid && client_id != NULL) {
-        valid = copy_json_string(root, "clientId", candidate.client_id,
-                                 sizeof(candidate.client_id));
-    }
+        channel->valuedouble <= UINT8_MAX && channel->valuedouble == channel->valueint;
 
     uint32_t frequency_khz = 0;
     uint8_t bandwidth_mhz = 0;
     if (valid) {
         strlcpy(candidate.passphrase, passphrase->valuestring, sizeof(candidate.passphrase));
         candidate.channel = (uint8_t)channel->valueint;
-        candidate.wifi_upstream = cJSON_IsTrue(wifi_upstream);
         valid = halow_provisioning_resolve_channel(candidate.country,
                                                    candidate.channel,
                                                    &frequency_khz,
@@ -169,17 +164,7 @@ static esp_err_t config_endpoint(uint32_t session_id,
 
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (valid) {
-#if CONFIG_DAB_WIFI_EXTENDER
-        if (candidate.wifi_upstream && !upstream_credentials_ready) {
-            /* Do not persist a bootable gateway profile before credentials:
-             * power loss during BLE setup must return to provisioning. */
-            pending_gateway_config = candidate;
-            err = ESP_OK;
-        } else
-#endif
-        {
-            err = save_config(&candidate);
-        }
+        err = save_config(&candidate);
     }
     if (err == ESP_OK) {
         ESP_LOGI(TAG,
@@ -187,13 +172,7 @@ static esp_err_t config_endpoint(uint32_t session_id,
                  candidate.mesh_id, candidate.country, candidate.channel,
                  frequency_khz, bandwidth_mhz);
         restart_after_stop = true;
-#if CONFIG_DAB_WIFI_EXTENDER
-        waiting_for_upstream = candidate.wifi_upstream && !upstream_credentials_ready;
-        if (!waiting_for_upstream &&
-            xTaskCreate(stop_and_restart_task, "prov_stop", 3072, NULL, 5, NULL) != pdPASS) {
-#else
         if (xTaskCreate(stop_and_restart_task, "prov_stop", 3072, NULL, 5, NULL) != pdPASS) {
-#endif
             err = ESP_ERR_NO_MEM;
         }
     }
@@ -231,22 +210,6 @@ static void provisioning_event(void *arg,
     }
     if (event_id == NETWORK_PROV_START) {
         ESP_LOGI(TAG, "BLE provisioning started");
-    } else if (event_id == NETWORK_PROV_WIFI_CRED_FAIL) {
-        ESP_LOGW(TAG, "BLE Wi-Fi credentials rejected; provisioning remains active");
-        network_prov_mgr_reset_wifi_sm_state_on_failure();
-#if CONFIG_DAB_WIFI_EXTENDER
-    } else if (event_id == NETWORK_PROV_WIFI_CRED_SUCCESS) {
-        upstream_credentials_ready = true;
-        if (waiting_for_upstream && restart_after_stop) {
-            const esp_err_t err = save_config(&pending_gateway_config);
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Could not save gateway profile: %s", esp_err_to_name(err));
-                return;
-            }
-            waiting_for_upstream = false;
-            network_prov_mgr_stop_provisioning();
-        }
-#endif
     } else if (event_id == NETWORK_PROV_END) {
         provisioning_active = false;
         network_prov_mgr_deinit();
@@ -287,19 +250,10 @@ esp_err_t halow_provisioning_init(halow_provisioning_config_t *config,
         load_string(handle, "passphrase", config->passphrase,
                     sizeof(config->passphrase)) &&
         load_string(handle, "country", config->country, sizeof(config->country)) &&
-        nvs_get_u8(handle, "channel", &config->channel) == ESP_OK;
-    uint8_t wifi_upstream = 0;
-    if (*provisioned) {
-        *provisioned = nvs_get_u8(handle, "upstream", &wifi_upstream) == ESP_OK;
-        config->wifi_upstream = wifi_upstream != 0;
-    }
+        nvs_get_u8(handle, "channel", &config->channel) == ESP_OK &&
+        load_string(handle, "deviceUuid", config->client_id,
+                    sizeof(config->client_id)) && valid_uuid(config->client_id);
     nvs_close(handle);
-
-    if (nvs_open(MQTT_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
-        (void)load_string(handle, "client", config->client_id,
-                          sizeof(config->client_id));
-        nvs_close(handle);
-    }
 
     uint32_t frequency_khz;
     uint8_t bandwidth_mhz;
@@ -340,11 +294,6 @@ esp_err_t halow_provisioning_start(void)
         .scheme_event_handler = NETWORK_PROV_SCHEME_BLE_EVENT_HANDLER_FREE_BTDM,
     };
     err = network_prov_mgr_init(manager_config);
-#if CONFIG_DAB_WIFI_EXTENDER
-    /* The client may send mqtt-config before or after Wi-Fi credentials.
-     * Keep BLE alive until both are present for a gateway profile. */
-    if (err == ESP_OK) err = network_prov_mgr_disable_auto_stop(1000);
-#endif
     if (err == ESP_OK) {
         err = network_prov_mgr_endpoint_create(HALOW_PROVISIONING_ENDPOINT);
     }

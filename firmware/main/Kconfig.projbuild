@@ -178,8 +178,8 @@ menu "HaLow initialization"
         help
             Route downstream Wi-Fi clients through a HaLow BATMAN gateway,
             with DHCP, DNS relay and EdgeZ Mesh Network gateway/subnet advertisements.
-            A provisioned wifiUpstream=true profile instead connects to saved
-            Wi-Fi credentials and provides a NAT/DHCP gateway to the mesh.
+            Offline provisioning always starts the downstream SoftAP role; it
+            does not collect or connect to an upstream Wi-Fi network.
 
     config DAB_MESH_IPERF
         bool "Enable HaLow/Wi-Fi iperf2 TCP receive test endpoint"
