@@ -4,10 +4,23 @@ The Expo app is a standalone, local-first companion for Offgrid Tracker. It
 opens directly to the Home page and does not require an account, an Appwrite
 project, or cloud configuration.
 
-The current Home page provides an at-a-glance local network overview and an
-empty state for devices that will be added through local provisioning. Native
-device discovery, provisioning, mapping, and firmware tooling remain available
-through `@edgez/react-native-sdk` for the next application flows.
+On first launch, the user creates an on-device profile containing its name,
+country, map location, HaLow channel, mesh ID, and optional mesh passphrase.
+After that the app opens to the full-screen offline map Home page, centered on
+the selected profile location, with the add-device button and menu available
+over the map. Lower-right controls switch between day/night map themes and
+center the map on the phone's current location. Menu → Settings opens the profile summary, and its Manage Profiles
+second-level page provides local profile selection, creation, editing, and
+deletion. Profiles and the active selection are stored in SQLite;
+they do not require a cloud account or backend. A legacy AsyncStorage profile is
+migrated automatically. Native device discovery, provisioning, mapping, and
+firmware tooling remain available through `@edgez/react-native-sdk` for the next
+application flows.
+
+The `+ ADD` flow discovers supported devices locally and provisions the active
+profile's HaLow settings without cloud credentials or upstream network
+selection. Provisioned devices receive locally generated UUIDs and are stored
+per profile in SQLite; devices with saved coordinates appear on the offline map.
 
 ## Configuration
 

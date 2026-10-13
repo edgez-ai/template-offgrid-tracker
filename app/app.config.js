@@ -22,6 +22,7 @@ module.exports = {
     userInterfaceStyle: "light",
     plugins: [
       "expo-status-bar",
+      "expo-sqlite",
       "@edgez/react-native-sdk",
       "./plugins/withOrganicMaps",
       ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
