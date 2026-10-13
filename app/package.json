@@ -5,7 +5,7 @@
   "main": "expo/AppEntry.js",
   "scripts": {
     "start": "expo start --dev-client",
-    "android": "node ./scripts/start-remote-android.mjs",
+    "android": "expo run:android",
     "android:debug": "NODE_ENV=development expo run:android --variant debug",
     "android:debug:build": "NODE_ENV=development ./android/gradlew -p android assembleDebug --console=plain",
     "typecheck": "tsc --noEmit"
@@ -22,7 +22,6 @@
     "expo-status-bar": "~57.0.1",
     "react": "19.2.3",
     "react-native": "0.86.3",
-    "react-native-appwrite": "^0.20.0",
     "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
