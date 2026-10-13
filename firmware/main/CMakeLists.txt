@@ -74,7 +74,7 @@ else()
         )
     endif()
 
-    if(IDF_TARGET STREQUAL "esp32s3")
+    if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
         list(APPEND component_sources
             "edgez_ble_control.c"
             "../nrf54/src/usb_control.pb.c")
@@ -110,9 +110,8 @@ endif()
 
 if(IDF_TARGET STREQUAL "esp32p4" AND NOT CONFIG_DAB_RAW_RF_TEST)
     # ESP-Hosted 1.4 starts SDIO unconditionally from a constructor. Keep the
-    # component linked for BLE provisioning, but let app_main initialize it
-    # only when no saved HaLow profile exists. This keeps SDIO inactive while
-    # the provisioned path enumerates the MM8108 USB adapter.
+    # component linked for realtime BLE control, but let app_main initialize
+    # it before NimBLE so the C6 VHCI transport is ready first.
     idf_component_get_property(esp_hosted_lib espressif__esp_hosted COMPONENT_LIB)
     get_target_property(esp_hosted_sources ${esp_hosted_lib} SOURCES)
     list(FILTER esp_hosted_sources EXCLUDE REGEX "esp_hosted_host_init\\.c$")

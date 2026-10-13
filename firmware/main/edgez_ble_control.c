@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "esp_mac.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -232,6 +233,14 @@ static esp_err_t send_device_settings(const ai_edgez_halow_NetworkPacket *reques
 
 static void apply_init(const ai_edgez_halow_HaLowInitConfig *init)
 {
+    ESP_LOGI(TAG,
+             "Realtime INIT decoded: country='%s' mesh='%s' passphrase_len=%u "
+             "frequency_khz=%lu bandwidth_mhz=%lu max_hop=%lu user='%s'",
+             init->country_code, init->mesh_id,
+             (unsigned)strlen(init->passphrase),
+             (unsigned long)init->mesh_frequency_khz,
+             (unsigned long)init->mesh_bandwidth_mhz,
+             (unsigned long)init->max_hop, init->user_name);
     const bool has_configuration = init->mesh_id[0] != '\0' ||
         init->passphrase[0] != '\0' || init->max_hop != 0 ||
         init->user_id_high != 0 || init->user_id_low != 0 ||
@@ -712,9 +721,17 @@ esp_err_t edgez_ble_control_start(void)
 
     uint8_t mac[6] = {0};
     char name[24] = "EZ_DEVICE";
-    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+#if CONFIG_IDF_TARGET_ESP32P4
+    const esp_err_t mac_err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+#else
+    const esp_err_t mac_err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
+#endif
+    if (mac_err == ESP_OK) {
         snprintf(name, sizeof(name), "EZ_%02X%02X%02X%02X%02X%02X",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        ESP_LOGW(TAG, "Could not read BLE identity MAC: %s",
+                 esp_err_to_name(mac_err));
     }
     rc = ble_svc_gap_device_name_set(name);
     if (rc != 0) {

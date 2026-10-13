@@ -8,7 +8,7 @@ import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
-import { channelsForCountry, halowCountries } from "./halowChannels";
+import { bandwidthForChannel, bandwidthsForCountry, channelsForCountry, halowCountries } from "./halowChannels";
 import {
   activeProfile,
   createProfileIdentity,
@@ -25,7 +25,7 @@ import {
 } from "./profile-store";
 import type { ProfileDetails, StoredDevice, StoredProfile } from "./profile-store";
 
-type ProfileDraft = Omit<ProfileDetails, "halowChannel"> & { halowChannel: string };
+type ProfileDraft = Omit<ProfileDetails, "halowChannel"> & { halowChannel: string; halowBandwidthMHz: string };
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 
 const profileStorageKey = "offgrid-tracker.profile.v1";
@@ -57,6 +57,8 @@ type BleLinkStatus = {
   phase: "not-selected" | "preparing" | "disconnected" | "connecting" | "connected" | "ready" | "error";
   label: string;
   details: string[];
+  halowLinkUp: boolean | null;
+  updatedAt: number;
 };
 
 function ActiveProfileBleLink({
@@ -90,7 +92,7 @@ function ActiveProfileBleLink({
         countryCode: profile.country,
         meshId: profile.meshId,
         passphrase: profile.meshPassphrase,
-        meshBandwidthMhz: channel ? 1 : 0,
+        meshBandwidthMhz: channel ? bandwidthForChannel(channel) : 0,
         meshFrequencyKhz: channel ? Math.round(channel.frequencyMHz * 1000) : 0,
         beacon: {
           shareLocation: Boolean(coordinates),
@@ -145,20 +147,25 @@ function ActiveProfileBleLink({
         `MAC: ${state.status.macAddress ? state.status.macAddress.toString(16).padStart(12, "0").toUpperCase() : "unknown"}`,
       ] : ["Device status: waiting"]),
     ];
+    const liveStatus = {
+      details,
+      halowLinkUp: state.status ? state.status.linkUp : null,
+      updatedAt: Date.now(),
+    };
     if (!profile.bleDeviceId) {
-      onStatusChange({ phase: "not-selected", label: "No BLE device selected", details });
+      onStatusChange({ phase: "not-selected", label: "No BLE device selected", ...liveStatus });
     } else if (setupError) {
-      onStatusChange({ phase: "error", label: setupError, details });
+      onStatusChange({ phase: "error", label: setupError, ...liveStatus });
     } else if (!configured) {
-      onStatusChange({ phase: "preparing", label: "Preparing BLE connection", details });
+      onStatusChange({ phase: "preparing", label: "Preparing BLE connection", ...liveStatus });
     } else if (state.bleReady) {
-      onStatusChange({ phase: "ready", label: "BLE control channel ready", details });
+      onStatusChange({ phase: "ready", label: "BLE control channel ready", ...liveStatus });
     } else if (state.connection === "ble") {
-      onStatusChange({ phase: "connected", label: "BLE connected", details });
+      onStatusChange({ phase: "connected", label: "BLE connected", ...liveStatus });
     } else if (state.bleConnecting) {
-      onStatusChange({ phase: "connecting", label: "Connecting to BLE device", details });
+      onStatusChange({ phase: "connecting", label: "Connecting to BLE device", ...liveStatus });
     } else {
-      onStatusChange({ phase: "disconnected", label: "BLE disconnected · retrying", details });
+      onStatusChange({ phase: "disconnected", label: "BLE disconnected · retrying", ...liveStatus });
     }
   }, [configured, onStatusChange, profile.bleDeviceId, profile.bleDeviceName, setupError, state.bleConnecting, state.bleReady, state.connection, state.status, state.statusLine]);
 
@@ -376,19 +383,31 @@ function ProfileForm({
   onSave: (profile: ProfileDetails) => Promise<void>;
 }) {
   const creating = !initialProfile;
-  const [draft, setDraft] = useState<ProfileDraft>(() => initialProfile
-    ? { ...initialProfile, halowChannel: String(initialProfile.halowChannel) }
-    : { name: "", ...createProfileIdentity(), country: "US", location: "", halowChannel: "27", meshId: "", meshPassphrase: "", bleDeviceId: "", bleDeviceName: "" });
+  const [draft, setDraft] = useState<ProfileDraft>(() => {
+    if (!initialProfile) {
+      return { name: "", ...createProfileIdentity(), country: "US", location: "", halowChannel: "27", halowBandwidthMHz: "1", meshId: "", meshPassphrase: "", bleDeviceId: "", bleDeviceName: "" };
+    }
+    const initialChannel = channelsForCountry(initialProfile.country)
+      .find(({ number }) => number === initialProfile.halowChannel);
+    return {
+      ...initialProfile,
+      halowChannel: String(initialProfile.halowChannel),
+      halowBandwidthMHz: String(initialChannel ? bandwidthForChannel(initialChannel) : 1),
+    };
+  });
   const [meshIdEdited, setMeshIdEdited] = useState(Boolean(initialProfile));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
   const [blePickerOpen, setBlePickerOpen] = useState(false);
-  const [openDropdown, setOpenDropdown] = useState<"country" | "channel" | null>(null);
+  const [openDropdown, setOpenDropdown] = useState<"country" | "bandwidth" | "channel" | null>(null);
   const [passphraseVisible, setPassphraseVisible] = useState(false);
   const set = (key: keyof ProfileDraft, value: string) => setDraft((current) => ({ ...current, [key]: value }));
   const selectedCountry = halowCountries.find(({ code }) => code === draft.country);
-  const availableChannels = channelsForCountry(draft.country);
+  const availableBandwidths = bandwidthsForCountry(draft.country);
+  const selectedBandwidth = Number(draft.halowBandwidthMHz);
+  const availableChannels = channelsForCountry(draft.country)
+    .filter((channel) => bandwidthForChannel(channel) === selectedBandwidth);
   const selectedChannel = availableChannels.find(({ number }) => String(number) === draft.halowChannel);
 
   const save = async () => {
@@ -396,10 +415,11 @@ function ProfileForm({
     const channel = Number(draft.halowChannel);
     if (!draft.name.trim() || !draft.identityName.trim() || !draft.identityId.trim() || !coordinatesFromLocation(draft.location) ||
       !halowCountries.some(({ code }) => code === country) ||
-      !draft.halowChannel.trim() || (channel !== 0 && !channelsForCountry(country).some(({ number }) => number === channel)) ||
+      !bandwidthsForCountry(country).includes(selectedBandwidth) ||
+      !draft.halowChannel.trim() || (channel !== 0 && !availableChannels.some(({ number }) => number === channel)) ||
       !draft.meshId.trim() || draft.meshId.trim().length > 32 ||
       (draft.meshPassphrase.length > 0 && (draft.meshPassphrase.length < 8 || draft.meshPassphrase.length > 63))) {
-      setError("Enter the required fields, choose a valid location and country, use Auto or an allowed 1 MHz channel, and leave the passphrase empty or use 8–63 characters.");
+      setError("Enter the required fields, choose a valid location and country, use Auto or an allowed HaLow channel, and leave the passphrase empty or use 8–63 characters.");
       return;
     }
     setSaving(true);
@@ -485,7 +505,8 @@ function ProfileForm({
                 key={country.code}
                 style={[styles.profileOption, draft.country === country.code && styles.profileOptionSelected]}
                 onPress={() => {
-                  setDraft((current) => ({ ...current, country: country.code, halowChannel: "0" }));
+                  const bandwidth = bandwidthsForCountry(country.code)[0] ?? 1;
+                  setDraft((current) => ({ ...current, country: country.code, halowBandwidthMHz: String(bandwidth), halowChannel: "0" }));
                   setOpenDropdown(null);
                 }}
                 accessibilityRole="radio"
@@ -507,7 +528,40 @@ function ProfileForm({
           <Text style={draft.location ? styles.profileSelectText : styles.profileSelectPlaceholder}>{draft.location || "Choose on offline map"}</Text>
           <Text style={styles.profileSelectText}>⌖</Text>
         </Pressable>
-        <Text style={styles.fieldLabel}>HALOW CHANNEL · 1 MHZ</Text>
+        <Text style={styles.fieldLabel}>HALOW BANDWIDTH</Text>
+        <Pressable
+          style={[styles.profileSelect, !draft.country && styles.disabledButton]}
+          onPress={() => draft.country && setOpenDropdown((current) => current === "bandwidth" ? null : "bandwidth")}
+          disabled={!draft.country}
+          accessibilityRole="button"
+          accessibilityState={{ expanded: openDropdown === "bandwidth", disabled: !draft.country }}
+        >
+          <Text style={draft.country ? styles.profileSelectText : styles.profileSelectPlaceholder}>
+            {draft.country ? `${draft.halowBandwidthMHz} MHz` : "Choose country first"}
+          </Text>
+          <Text style={styles.profileSelectText}>⌄</Text>
+        </Pressable>
+        {openDropdown === "bandwidth" ? (
+          <View style={styles.profileOptionList}>
+            {availableBandwidths.map((bandwidth) => (
+              <Pressable
+                key={bandwidth}
+                style={[styles.profileOption, selectedBandwidth === bandwidth && styles.profileOptionSelected]}
+                onPress={() => {
+                  setDraft((current) => ({ ...current, halowBandwidthMHz: String(bandwidth), halowChannel: "0" }));
+                  setOpenDropdown(null);
+                }}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: selectedBandwidth === bandwidth }}
+              >
+                <Text style={[styles.profileOptionText, selectedBandwidth === bandwidth && styles.profileOptionTextSelected]}>
+                  {bandwidth} MHz
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        ) : null}
+        <Text style={styles.fieldLabel}>HALOW CHANNEL</Text>
         <Pressable
           style={[styles.profileSelect, !draft.country && styles.disabledButton]}
           onPress={() => draft.country && setOpenDropdown((current) => current === "channel" ? null : "channel")}
@@ -988,6 +1042,61 @@ function ProvisioningFlow({
   );
 }
 
+function BleDebugModal({
+  visible,
+  status,
+  onClose,
+}: {
+  visible: boolean;
+  status: BleLinkStatus;
+  onClose: () => void;
+}) {
+  const halowLinkLabel = status.halowLinkUp === null
+    ? "WAITING"
+    : status.halowLinkUp
+      ? "UP"
+      : "DOWN";
+
+  return (
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.bleDebugBackdrop}>
+        <View style={styles.bleDebugCard}>
+          <View style={styles.bleDebugHeader}>
+            <View>
+              <Text style={styles.bleDebugEyebrow}>LIVE DEVICE STATUS</Text>
+              <Text style={styles.bleDebugTitle}>BLE debug</Text>
+            </View>
+            <Pressable onPress={onClose} accessibilityRole="button">
+              <Text style={styles.settingsClose}>CLOSE</Text>
+            </Pressable>
+          </View>
+          <View style={styles.bleDebugHalowRow}>
+            <View style={[
+              styles.bleDebugHalowDot,
+              status.halowLinkUp === true && styles.bleStatusDotReady,
+              status.halowLinkUp === false && styles.bleStatusDotError,
+            ]} />
+            <View style={styles.bleDebugHalowBody}>
+              <Text style={styles.bleDebugHalowLabel}>HALOW LINK</Text>
+              <Text style={styles.bleDebugHalowValue}>{halowLinkLabel}</Text>
+            </View>
+            <Text style={styles.bleDebugLive}>LIVE</Text>
+          </View>
+          <Text style={styles.bleDebugSummary}>{status.label}</Text>
+          <Text style={styles.bleDebugUpdated}>
+            Last update: {new Date(status.updatedAt).toLocaleTimeString()}
+          </Text>
+          <ScrollView style={styles.bleDebugDetails} contentContainerStyle={styles.bleDebugDetailsContent}>
+            {status.details.map((detail) => (
+              <Text key={detail} style={styles.bleDebugDetail}>{detail}</Text>
+            ))}
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
 function SettingsPage({
   profiles,
   currentProfile,
@@ -1017,6 +1126,8 @@ function SettingsPage({
   onEdit: () => void;
   onDelete: () => void;
 }) {
+  const [debugOpen, setDebugOpen] = useState(false);
+
   return (
     <SafeAreaView style={styles.settingsPage}>
       <StatusBar style="dark" />
@@ -1092,7 +1203,7 @@ function SettingsPage({
                 </View>
                 <Pressable
                   style={styles.profileCardDebugButton}
-                  onPress={() => Alert.alert("BLE debug", [bleStatus.label, "", ...bleStatus.details].join("\n"))}
+                  onPress={() => setDebugOpen(true)}
                   accessibilityRole="button"
                   accessibilityLabel="Show BLE debug details"
                 >
@@ -1118,6 +1229,11 @@ function SettingsPage({
         )}
         {error ? <Text style={styles.settingsError}>{error}</Text> : null}
       </ScrollView>
+      <BleDebugModal
+        visible={debugOpen}
+        status={bleStatus}
+        onClose={() => setDebugOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -1144,6 +1260,7 @@ function HomeMap({
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
   const [mapTheme, setMapTheme] = useState<"day" | "night">("day");
+  const [debugOpen, setDebugOpen] = useState(false);
   const [locating, setLocating] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
@@ -1265,9 +1382,9 @@ function HomeMap({
         <View style={[styles.mapControls, region && styles.mapControlsRaised]}>
           <Pressable
             style={styles.mapControlButton}
-            onPress={() => Alert.alert("BLE status", bleStatus.label)}
+            onPress={() => setDebugOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel={bleStatus.label}
+            accessibilityLabel={`Show BLE debug. ${bleStatus.label}`}
           >
             {bleStatus.phase === "preparing" || bleStatus.phase === "connecting"
               ? <ActivityIndicator color="#69cfc7" size="small" />
@@ -1375,6 +1492,11 @@ function HomeMap({
           </View>
         ) : null}
       </View>
+      <BleDebugModal
+        visible={debugOpen}
+        status={bleStatus}
+        onClose={() => setDebugOpen(false)}
+      />
     </SafeAreaView>
   );
 }
@@ -1390,7 +1512,13 @@ export default function App() {
   const [provisioningOpen, setProvisioningOpen] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState("");
-  const [bleStatus, setBleStatus] = useState<BleLinkStatus>({ phase: "preparing", label: "Preparing BLE connection", details: [] });
+  const [bleStatus, setBleStatus] = useState<BleLinkStatus>({
+    phase: "preparing",
+    label: "Preparing BLE connection",
+    details: [],
+    halowLinkUp: null,
+    updatedAt: Date.now(),
+  });
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
@@ -1644,6 +1772,22 @@ const styles = StyleSheet.create({
   profileCardBleDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: "#718a83" },
   profileCardBleText: { flexShrink: 1, color: "#385753", fontSize: 8, fontWeight: "900", letterSpacing: 0.6 },
   profileCardDebugButton: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "white", borderWidth: 1, borderColor: "#b9dad6" },
+  bleDebugBackdrop: { flex: 1, padding: 22, justifyContent: "center", backgroundColor: "rgba(4, 25, 30, 0.58)" },
+  bleDebugCard: { maxHeight: "82%", padding: 20, borderRadius: 18, backgroundColor: "#f7faf9" },
+  bleDebugHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  bleDebugEyebrow: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 1 },
+  bleDebugTitle: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 },
+  bleDebugHalowRow: { minHeight: 72, marginTop: 18, paddingHorizontal: 16, borderRadius: 14, flexDirection: "row", alignItems: "center", gap: 12, backgroundColor: "#e9f7f5" },
+  bleDebugHalowDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: "#718a83" },
+  bleDebugHalowBody: { flex: 1 },
+  bleDebugHalowLabel: { color: "#59716f", fontSize: 8, fontWeight: "900", letterSpacing: 0.9 },
+  bleDebugHalowValue: { color: "#0a3037", fontSize: 22, fontWeight: "900", marginTop: 2 },
+  bleDebugLive: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 1 },
+  bleDebugSummary: { color: "#385753", fontSize: 13, fontWeight: "800", marginTop: 14 },
+  bleDebugUpdated: { color: "#718783", fontSize: 10, marginTop: 4 },
+  bleDebugDetails: { marginTop: 14 },
+  bleDebugDetailsContent: { gap: 7, paddingBottom: 4 },
+  bleDebugDetail: { color: "#385753", fontSize: 12, lineHeight: 17 },
   currentProfileLabel: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 1 },
   currentProfileName: { color: "#0a3037", fontSize: 22, fontWeight: "900", marginBottom: 3 },
   manageProfilesButton: { minHeight: 48, marginTop: 10, borderWidth: 1, borderColor: "#0a8c87", borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "white" },

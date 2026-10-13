@@ -221,10 +221,8 @@ menu "HaLow initialization"
         depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4
         default y
         help
-            Use the same ESP network-provisioning BLE service and mqtt-config
-            endpoint as edge-device-esp32-internal. The service advertises as
-            PROV_<MAC> with proof-of-possession abcd1234, stores the HaLow mesh
-            profile in NVS, then reboots into the provisioned network. ESP32-S3
+            Advertise the EdgeZ FFF0 realtime control service as EZ_<MAC> and
+            accept INIT_HALOW using the same contract on both targets. ESP32-S3
             uses its local BLE controller. ESP32-P4 uses the onboard ESP32-C6
             Bluetooth controller over the Waveshare board's SDIO connection.
 
