@@ -1,12 +1,23 @@
 import * as SQLite from "expo-sqlite";
+import { EdgezIdentityStore } from "@edgez/react-native-sdk";
+import type { EdgezUserIdentity } from "@edgez/react-native-sdk";
+import { fromByteArray, toByteArray } from "base64-js";
+
+const identityFactory = new EdgezIdentityStore();
 
 export type ProfileDetails = {
   name: string;
+  identityName: string;
+  identityId: string;
+  identityPrivateKey: string;
+  identityPublicKey: string;
   country: string;
   location: string;
   halowChannel: number;
   meshId: string;
   meshPassphrase: string;
+  bleDeviceId: string;
+  bleDeviceName: string;
 };
 
 export type StoredProfile = ProfileDetails & {
@@ -35,11 +46,17 @@ export type StoredDevice = DeviceDetails & {
 type ProfileRow = {
   id: string;
   name: string;
+  identity_name: string;
+  identity_id: string;
+  identity_private_key: string;
+  identity_public_key: string;
   country: string;
   location: string;
   halow_channel: number;
   mesh_id: string;
   mesh_passphrase: string;
+  ble_device_id: string;
+  ble_device_name: string;
   created_at: string;
   updated_at: string;
 };
@@ -65,13 +82,44 @@ function profileFromRow(row: ProfileRow): StoredProfile {
   return {
     id: row.id,
     name: row.name,
+    identityName: row.identity_name,
+    identityId: row.identity_id,
+    identityPrivateKey: row.identity_private_key,
+    identityPublicKey: row.identity_public_key,
     country: row.country,
     location: row.location,
     halowChannel: row.halow_channel,
     meshId: row.mesh_id,
     meshPassphrase: row.mesh_passphrase,
+    bleDeviceId: row.ble_device_id,
+    bleDeviceName: row.ble_device_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function uuidPart(value: string, start: number): bigint {
+  return BigInt.asIntN(64, BigInt(`0x${value.replace(/-/g, "").slice(start, start + 16)}`));
+}
+
+export function createProfileIdentity(name = "EdgeZ User"): Pick<ProfileDetails, "identityName" | "identityId" | "identityPrivateKey" | "identityPublicKey"> {
+  const identity = identityFactory.createIdentity(name);
+  return {
+    identityName: identity.name,
+    identityId: identity.userUuid,
+    identityPrivateKey: fromByteArray(identity.privateKey),
+    identityPublicKey: fromByteArray(identity.publicKey),
+  };
+}
+
+export function profileIdentity(profile: ProfileDetails): EdgezUserIdentity {
+  return {
+    userUuid: profile.identityId,
+    userIdHigh: uuidPart(profile.identityId, 0),
+    userIdLow: uuidPart(profile.identityId, 16),
+    name: profile.identityName,
+    privateKey: toByteArray(profile.identityPrivateKey),
+    publicKey: toByteArray(profile.identityPublicKey),
   };
 }
 
@@ -122,11 +170,17 @@ async function database() {
         CREATE TABLE IF NOT EXISTS profiles (
           id TEXT PRIMARY KEY NOT NULL,
           name TEXT NOT NULL,
+          identity_name TEXT NOT NULL DEFAULT '',
+          identity_id TEXT NOT NULL DEFAULT '',
+          identity_private_key TEXT NOT NULL DEFAULT '',
+          identity_public_key TEXT NOT NULL DEFAULT '',
           country TEXT NOT NULL,
           location TEXT NOT NULL,
           halow_channel INTEGER NOT NULL,
           mesh_id TEXT NOT NULL,
           mesh_passphrase TEXT NOT NULL DEFAULT '',
+          ble_device_id TEXT NOT NULL DEFAULT '',
+          ble_device_name TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -150,8 +204,42 @@ async function database() {
           FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS devices_profile_id_idx ON devices(profile_id);
-        PRAGMA user_version = 2;
       `);
+      const profileColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(profiles)");
+      const profileColumnNames = new Set(profileColumns.map(({ name }) => name));
+      if (!profileColumnNames.has("identity_name")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN identity_name TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("identity_id")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN identity_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("identity_private_key")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN identity_private_key TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("identity_public_key")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN identity_public_key TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("ble_device_id")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN ble_device_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("ble_device_name")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN ble_device_name TEXT NOT NULL DEFAULT ''");
+      }
+      const profilesWithoutIdentity = await db.getAllAsync<{ id: string; name: string }>(
+        "SELECT id, name FROM profiles WHERE identity_id = '' OR identity_private_key = '' OR identity_public_key = ''",
+      );
+      for (const profile of profilesWithoutIdentity) {
+        const identity = createProfileIdentity(profile.name);
+        await db.runAsync(
+          "UPDATE profiles SET identity_name = ?, identity_id = ?, identity_private_key = ?, identity_public_key = ? WHERE id = ?",
+          identity.identityName,
+          identity.identityId,
+          identity.identityPrivateKey,
+          identity.identityPublicKey,
+          profile.id,
+        );
+      }
+      await db.execAsync("PRAGMA user_version = 4");
       return db;
     });
   }
@@ -188,15 +276,21 @@ export async function createProfile(details: ProfileDetails): Promise<StoredProf
   const now = new Date().toISOString();
   await db.runAsync(
     `INSERT INTO profiles
-      (id, name, country, location, halow_channel, mesh_id, mesh_passphrase, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, name, identity_name, identity_id, identity_private_key, identity_public_key, country, location, halow_channel, mesh_id, mesh_passphrase, ble_device_id, ble_device_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     details.name,
+    details.identityName,
+    details.identityId,
+    details.identityPrivateKey,
+    details.identityPublicKey,
     details.country,
     details.location,
     details.halowChannel,
     details.meshId,
     details.meshPassphrase,
+    details.bleDeviceId,
+    details.bleDeviceName,
     now,
     now,
   );
@@ -208,14 +302,22 @@ export async function updateProfile(id: string, details: ProfileDetails): Promis
   const db = await database();
   const result = await db.runAsync(
     `UPDATE profiles
-     SET name = ?, country = ?, location = ?, halow_channel = ?, mesh_id = ?, mesh_passphrase = ?, updated_at = ?
+     SET name = ?, identity_name = ?, identity_id = ?, identity_private_key = ?, identity_public_key = ?,
+         country = ?, location = ?, halow_channel = ?, mesh_id = ?, mesh_passphrase = ?,
+         ble_device_id = ?, ble_device_name = ?, updated_at = ?
      WHERE id = ?`,
     details.name,
+    details.identityName,
+    details.identityId,
+    details.identityPrivateKey,
+    details.identityPublicKey,
     details.country,
     details.location,
     details.halowChannel,
     details.meshId,
     details.meshPassphrase,
+    details.bleDeviceId,
+    details.bleDeviceName,
     new Date().toISOString(),
     id,
   );

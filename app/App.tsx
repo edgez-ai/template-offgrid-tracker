@@ -1,7 +1,8 @@
-import { EdgezOrganicMap, EdgezProvisioningManager } from "@edgez/react-native-sdk";
+import "react-native-get-random-values";
+import { EdgezOrganicMap, EdgezProvisioningManager, edgezBleDeviceLabel, useEdgezMeshSession } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import type { EdgezMapDownloadUpdate, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
+import type { EdgezBleDevice, EdgezMapDownloadUpdate, EdgezMeshSession, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
@@ -10,12 +11,14 @@ import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { channelsForCountry, halowCountries } from "./halowChannels";
 import {
   activeProfile,
+  createProfileIdentity,
   createProfile,
   deleteProfile,
   initializeProfileStore,
   listProfileDevices,
   listProfiles,
   profileDeviceUuid,
+  profileIdentity,
   saveProfileDevice,
   setActiveProfile,
   updateProfile,
@@ -50,9 +53,123 @@ function coordinatesFromLocation(location: string) {
     : null;
 }
 
-function validProfileDetails(value: unknown): value is ProfileDetails {
+type BleLinkStatus = {
+  phase: "not-selected" | "preparing" | "disconnected" | "connecting" | "connected" | "ready" | "error";
+  label: string;
+  details: string[];
+};
+
+function ActiveProfileBleLink({
+  profile,
+  onStatusChange,
+}: {
+  profile: StoredProfile;
+  onStatusChange: (status: BleLinkStatus) => void;
+}) {
+  const sessionRef = useRef<EdgezMeshSession | null>(null);
+  const retryDelayMs = useRef(500);
+  const [configured, setConfigured] = useState(false);
+  const [setupError, setSetupError] = useState("");
+  const [session, state] = useEdgezMeshSession({
+    onIncomingMessage: (message, sender) => {
+      void sessionRef.current?.sdk.showIncomingMessageNotification(message, sender).catch(() => undefined);
+    },
+  });
+  sessionRef.current = session;
+
+  useEffect(() => {
+    let cancelled = false;
+    setConfigured(false);
+    setSetupError("");
+    void (async () => {
+      if (!profile.bleDeviceId) return;
+      const channel = channelsForCountry(profile.country).find(({ number }) => number === profile.halowChannel);
+      const coordinates = coordinatesFromLocation(profile.location);
+      await session.initializeMesh({
+        identity: profileIdentity(profile),
+        countryCode: profile.country,
+        meshId: profile.meshId,
+        passphrase: profile.meshPassphrase,
+        meshBandwidthMhz: channel ? 1 : 0,
+        meshFrequencyKhz: channel ? Math.round(channel.frequencyMHz * 1000) : 0,
+        beacon: {
+          shareLocation: Boolean(coordinates),
+          latitude: coordinates?.latitude,
+          longitude: coordinates?.longitude,
+        },
+      });
+      await session.sdk.requestNotificationPermission().catch(() => false);
+      if (!cancelled) setConfigured(true);
+    })().catch((caught) => {
+      if (!cancelled) {
+        setConfigured(false);
+        setSetupError(caught instanceof Error ? caught.message : "BLE setup failed");
+      }
+    });
+    return () => {
+      cancelled = true;
+      void session.disconnect().catch(() => undefined);
+    };
+  }, [profile, session]);
+
+  useEffect(() => {
+    if (state.connection !== "none") {
+      retryDelayMs.current = 500;
+      return;
+    }
+    if (!configured || !profile.bleDeviceId || state.bleConnecting) return;
+    const delay = retryDelayMs.current;
+    const retry = setTimeout(() => {
+      void session.connectBle(profile.bleDeviceId).catch(() => {
+        retryDelayMs.current = Math.min(delay * 2, 30_000);
+      });
+    }, delay);
+    return () => clearTimeout(retry);
+  }, [configured, profile.bleDeviceId, session, state.bleConnecting, state.connection]);
+
+  useEffect(() => {
+    const details = [
+      `Device: ${profile.bleDeviceName || profile.bleDeviceId || "Not selected"}`,
+      `Device ID: ${profile.bleDeviceId || "Not selected"}`,
+      `Connection: ${state.connection}`,
+      `Control channel: ${state.bleReady ? "ready" : "not ready"}`,
+      `Connecting: ${state.bleConnecting ? "yes" : "no"}`,
+      `Session: ${state.statusLine}`,
+      ...(state.status ? [
+        `Firmware: ${state.status.firmwareVersion || "unknown"}`,
+        `License: ${state.status.licenseStatus}`,
+        `HaLow stack: ${state.status.stackInitialized ? "initialized" : "not initialized"}`,
+        `HaLow link: ${state.status.linkUp ? "up" : "down"}`,
+        `Route: ${state.status.routeReady ? "ready" : "not ready"}`,
+        `Mesh ID: ${state.status.meshId || "unknown"}`,
+        `MAC: ${state.status.macAddress ? state.status.macAddress.toString(16).padStart(12, "0").toUpperCase() : "unknown"}`,
+      ] : ["Device status: waiting"]),
+    ];
+    if (!profile.bleDeviceId) {
+      onStatusChange({ phase: "not-selected", label: "No BLE device selected", details });
+    } else if (setupError) {
+      onStatusChange({ phase: "error", label: setupError, details });
+    } else if (!configured) {
+      onStatusChange({ phase: "preparing", label: "Preparing BLE connection", details });
+    } else if (state.bleReady) {
+      onStatusChange({ phase: "ready", label: "BLE control channel ready", details });
+    } else if (state.connection === "ble") {
+      onStatusChange({ phase: "connected", label: "BLE connected", details });
+    } else if (state.bleConnecting) {
+      onStatusChange({ phase: "connecting", label: "Connecting to BLE device", details });
+    } else {
+      onStatusChange({ phase: "disconnected", label: "BLE disconnected · retrying", details });
+    }
+  }, [configured, onStatusChange, profile.bleDeviceId, profile.bleDeviceName, setupError, state.bleConnecting, state.bleReady, state.connection, state.status, state.statusLine]);
+
+  return null;
+}
+
+type LegacyProfileDetails = Omit<ProfileDetails, "identityName" | "identityId" | "identityPrivateKey" | "identityPublicKey" | "bleDeviceId" | "bleDeviceName">;
+
+function validProfileDetails(value: unknown): value is LegacyProfileDetails {
   if (!value || typeof value !== "object") return false;
-  const profile = value as Partial<ProfileDetails>;
+  const profile = value as Partial<LegacyProfileDetails>;
   return typeof profile.name === "string" && Boolean(profile.name.trim()) &&
     typeof profile.country === "string" && halowCountries.some(({ code }) => code === profile.country) &&
     typeof profile.location === "string" && Boolean(coordinatesFromLocation(profile.location)) &&
@@ -61,6 +178,120 @@ function validProfileDetails(value: unknown): value is ProfileDetails {
     typeof profile.meshId === "string" && Boolean(profile.meshId.trim()) && profile.meshId.trim().length <= 32 &&
     typeof profile.meshPassphrase === "string" &&
     (profile.meshPassphrase.length === 0 || (profile.meshPassphrase.length >= 8 && profile.meshPassphrase.length <= 63));
+}
+
+function ProfileBleDevicePicker({
+  selectedDeviceId,
+  onCancel,
+  onSelect,
+}: {
+  selectedDeviceId: string;
+  onCancel: () => void;
+  onSelect: (device: EdgezBleDevice) => void;
+}) {
+  const [session, state] = useEdgezMeshSession();
+  const [error, setError] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [scanActive, setScanActive] = useState(false);
+  const scanInFlight = useRef(false);
+  const scanActiveRef = useRef(false);
+
+  const scan = async () => {
+    if (scanInFlight.current || scanActiveRef.current) return;
+    scanInFlight.current = true;
+    setScanning(true);
+    setError("");
+    try {
+      await session.startBleScan();
+      scanActiveRef.current = true;
+      setScanActive(true);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not scan for BLE devices.");
+    } finally {
+      scanInFlight.current = false;
+      setScanning(false);
+    }
+  };
+
+  useEffect(() => {
+    // Delay automatic scanning by one tick so React's development-only effect
+    // replay does not start/stop Android BLE scans in rapid succession.
+    const timer = setTimeout(() => { void scan(); }, 250);
+    return () => {
+      clearTimeout(timer);
+      scanInFlight.current = false;
+      scanActiveRef.current = false;
+      void session.stopBleScan().catch(() => undefined);
+    };
+  }, [session]);
+
+  const close = async () => {
+    await session.stopBleScan().catch(() => undefined);
+    scanActiveRef.current = false;
+    setScanActive(false);
+    onCancel();
+  };
+
+  const select = async (device: EdgezBleDevice) => {
+    await session.stopBleScan().catch(() => undefined);
+    scanActiveRef.current = false;
+    setScanActive(false);
+    onSelect(device);
+  };
+
+  const devices = [...state.bleDevices.values()].sort((left, right) => right.rssi - left.rssi);
+
+  return (
+    <SafeAreaView style={styles.bleSelectionPage}>
+      <StatusBar style="dark" />
+      <View style={styles.settingsHeader}>
+        <View>
+          <Text style={styles.settingsEyebrow}>PROFILE DEVICE</Text>
+          <Text style={styles.settingsTitle}>Select BLE device</Text>
+        </View>
+        <Pressable onPress={() => void close()} accessibilityRole="button">
+          <Text style={styles.settingsClose}>BACK</Text>
+        </Pressable>
+      </View>
+      <ScrollView contentContainerStyle={styles.bleSelectionContent}>
+        <Text style={styles.provisioningHelp}>Select the nearby EdgeZ device assigned to this profile.</Text>
+        <Pressable
+          style={[styles.provisioningPrimary, (scanning || scanActive) && styles.disabledButton]}
+          onPress={() => void scan()}
+          disabled={scanning || scanActive}
+          accessibilityRole="button"
+        >
+          {scanning
+            ? <ActivityIndicator color="white" />
+            : <Text style={styles.provisioningPrimaryText}>{scanActive ? "SCANNING…" : "START SCAN"}</Text>}
+        </Pressable>
+        <Text style={styles.provisioningStatus}>{state.statusLine}</Text>
+        {error ? <Text style={styles.provisioningError}>{error}</Text> : null}
+        {!devices.length && !error ? (
+          <Text style={styles.settingsMuted}>Nearby EdgeZ BLE devices will appear here.</Text>
+        ) : devices.map((device) => {
+          const selected = device.id === selectedDeviceId;
+          return (
+            <Pressable
+              key={device.id}
+              style={[styles.bleDeviceRow, selected && styles.bleDeviceRowSelected]}
+              onPress={() => void select(device)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected }}
+            >
+              <View style={styles.profileRowBody}>
+                <Text style={styles.profileRowName}>{edgezBleDeviceLabel(device)}</Text>
+                <Text style={styles.settingsMuted}>{device.id} · RSSI {device.rssi}</Text>
+              </View>
+              <Text style={[styles.profileRowStatus, selected && styles.profileRowStatusSelected]}>
+                {selected ? "SELECTED" : "SELECT"}
+              </Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </SafeAreaView>
+  );
 }
 
 function ProfileLocationPicker({
@@ -145,13 +376,14 @@ function ProfileForm({
   onSave: (profile: ProfileDetails) => Promise<void>;
 }) {
   const creating = !initialProfile;
-  const [draft, setDraft] = useState<ProfileDraft>(initialProfile
+  const [draft, setDraft] = useState<ProfileDraft>(() => initialProfile
     ? { ...initialProfile, halowChannel: String(initialProfile.halowChannel) }
-    : { name: "", country: "US", location: "", halowChannel: "27", meshId: "", meshPassphrase: "" });
+    : { name: "", ...createProfileIdentity(), country: "US", location: "", halowChannel: "27", meshId: "", meshPassphrase: "", bleDeviceId: "", bleDeviceName: "" });
   const [meshIdEdited, setMeshIdEdited] = useState(Boolean(initialProfile));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
+  const [blePickerOpen, setBlePickerOpen] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<"country" | "channel" | null>(null);
   const [passphraseVisible, setPassphraseVisible] = useState(false);
   const set = (key: keyof ProfileDraft, value: string) => setDraft((current) => ({ ...current, [key]: value }));
@@ -162,7 +394,7 @@ function ProfileForm({
   const save = async () => {
     const country = draft.country.trim().toUpperCase();
     const channel = Number(draft.halowChannel);
-    if (!draft.name.trim() || !coordinatesFromLocation(draft.location) ||
+    if (!draft.name.trim() || !draft.identityName.trim() || !draft.identityId.trim() || !coordinatesFromLocation(draft.location) ||
       !halowCountries.some(({ code }) => code === country) ||
       !draft.halowChannel.trim() || (channel !== 0 && !channelsForCountry(country).some(({ number }) => number === channel)) ||
       !draft.meshId.trim() || draft.meshId.trim().length > 32 ||
@@ -175,11 +407,17 @@ function ProfileForm({
     try {
       await onSave({
         name: draft.name.trim(),
+        identityName: draft.identityName.trim(),
+        identityId: draft.identityId,
+        identityPrivateKey: draft.identityPrivateKey,
+        identityPublicKey: draft.identityPublicKey,
         country,
         location: draft.location.trim(),
         halowChannel: channel,
         meshId: draft.meshId.trim(),
         meshPassphrase: draft.meshPassphrase,
+        bleDeviceId: draft.bleDeviceId,
+        bleDeviceName: draft.bleDeviceName,
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not save the profile.");
@@ -212,6 +450,22 @@ function ProfileForm({
           autoCorrect={false}
           accessibilityLabel="Profile name"
         />
+        <Text style={styles.fieldLabel}>USER NAME</Text>
+        <TextInput
+          style={styles.profileInput}
+          value={draft.identityName}
+          onChangeText={(value) => set("identityName", value)}
+          placeholder="Name shown to mesh peers"
+          placeholderTextColor="#718a83"
+          maxLength={64}
+          autoCapitalize="words"
+          autoCorrect={false}
+          accessibilityLabel="Mesh user name"
+        />
+        <Text style={styles.fieldLabel}>IDENTITY ID</Text>
+        <View style={styles.identityField}>
+          <Text style={styles.identityValue} selectable>{draft.identityId}</Text>
+        </View>
         <Text style={styles.fieldLabel}>COUNTRY</Text>
         <Pressable
           style={styles.profileSelect}
@@ -335,6 +589,29 @@ function ProfileForm({
             <Ionicons name={passphraseVisible ? "eye-outline" : "eye-off-outline"} size={24} color="#8cb0ad" />
           </Pressable>
         </View>
+        <Text style={styles.fieldLabel}>BLE DEVICE</Text>
+        <Pressable
+          style={styles.profileSelect}
+          onPress={() => { setOpenDropdown(null); setBlePickerOpen(true); }}
+          accessibilityRole="button"
+        >
+          <View style={styles.profileSelectedDeviceText}>
+            <Text style={draft.bleDeviceId ? styles.profileSelectText : styles.profileSelectPlaceholder}>
+              {draft.bleDeviceName || draft.bleDeviceId || "Select nearby device (optional)"}
+            </Text>
+            {draft.bleDeviceId ? <Text style={styles.profileSelectedDeviceId}>{draft.bleDeviceId}</Text> : null}
+          </View>
+          <Ionicons name="bluetooth-outline" size={22} color="#8cb0ad" />
+        </Pressable>
+        {draft.bleDeviceId ? (
+          <Pressable
+            style={styles.profileClearDeviceButton}
+            onPress={() => setDraft((current) => ({ ...current, bleDeviceId: "", bleDeviceName: "" }))}
+            accessibilityRole="button"
+          >
+            <Text style={styles.profileClearDeviceText}>REMOVE SELECTED DEVICE</Text>
+          </Pressable>
+        ) : null}
         {error ? <Text style={styles.profileError}>{error}</Text> : null}
         <Pressable
           style={[styles.profileSaveButton, saving && styles.disabledButton]}
@@ -358,6 +635,18 @@ function ProfileForm({
           onSelect={(location) => { set("location", location); setLocationPickerOpen(false); }}
         />
       </Modal>
+      {blePickerOpen ? (
+        <Modal visible animationType="slide" onRequestClose={() => setBlePickerOpen(false)}>
+          <ProfileBleDevicePicker
+            selectedDeviceId={draft.bleDeviceId}
+            onCancel={() => setBlePickerOpen(false)}
+            onSelect={(device) => {
+              setDraft((current) => ({ ...current, bleDeviceId: device.id, bleDeviceName: device.name }));
+              setBlePickerOpen(false);
+            }}
+          />
+        </Modal>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -443,7 +732,7 @@ function ProvisioningFlow({
     try {
       await disconnect();
       setSelectedDevice(null);
-      const result = await provisioningManager.scan();
+      const result = await provisioningManager.scan({ esp32BlePrefix: "EZ_" });
       setDevices(result.devices);
       setStatus(result.devices.length
         ? "Select a device to provision."
@@ -702,6 +991,7 @@ function ProvisioningFlow({
 function SettingsPage({
   profiles,
   currentProfile,
+  bleStatus,
   managerOpen,
   busy,
   error,
@@ -715,6 +1005,7 @@ function SettingsPage({
 }: {
   profiles: StoredProfile[];
   currentProfile: StoredProfile;
+  bleStatus: BleLinkStatus;
   managerOpen: boolean;
   busy: boolean;
   error: string;
@@ -785,13 +1076,41 @@ function SettingsPage({
           </>
         ) : (
           <View style={styles.currentProfileCard}>
-            <Text style={styles.currentProfileLabel}>CURRENT PROFILE</Text>
+            <View style={styles.profileCardHeader}>
+              <Text style={styles.currentProfileLabel}>CURRENT PROFILE</Text>
+              <View style={styles.profileCardBleActions}>
+                <View style={styles.profileCardBleStatus}>
+                  <View style={[
+                    styles.profileCardBleDot,
+                    bleStatus.phase === "ready" && styles.bleStatusDotReady,
+                    bleStatus.phase === "connected" && styles.bleStatusDotConnected,
+                    bleStatus.phase === "error" && styles.bleStatusDotError,
+                  ]} />
+                  <Text style={styles.profileCardBleText} numberOfLines={1}>
+                    {bleStatus.phase === "ready" ? "READY" : bleStatus.phase.replace("-", " ").toUpperCase()}
+                  </Text>
+                </View>
+                <Pressable
+                  style={styles.profileCardDebugButton}
+                  onPress={() => Alert.alert("BLE debug", [bleStatus.label, "", ...bleStatus.details].join("\n"))}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show BLE debug details"
+                >
+                  <Ionicons name="bug-outline" size={18} color="#0a8c87" />
+                </Pressable>
+              </View>
+            </View>
             <Text style={styles.currentProfileName}>{currentProfile.name}</Text>
             <Text style={styles.settingsMuted}>
               {currentProfile.country} · {currentProfile.halowChannel === 0 ? "Auto channel" : `Channel ${currentProfile.halowChannel}`}
             </Text>
             <Text style={styles.settingsMuted}>{currentProfile.location}</Text>
+            <Text style={styles.settingsMuted}>User: {currentProfile.identityName}</Text>
+            <Text style={styles.settingsMuted}>Identity: {currentProfile.identityId}</Text>
             <Text style={styles.settingsMuted}>Mesh ID: {currentProfile.meshId}</Text>
+            <Text style={styles.settingsMuted}>
+              BLE device: {currentProfile.bleDeviceName || currentProfile.bleDeviceId || "Not selected"}
+            </Text>
             <Pressable style={styles.manageProfilesButton} onPress={onManage} disabled={busy} accessibilityRole="button">
               <Text style={styles.settingsOutlineText}>MANAGE PROFILES</Text>
             </Pressable>
@@ -806,11 +1125,13 @@ function SettingsPage({
 function HomeMap({
   profile,
   devices,
+  bleStatus,
   onAddDevice,
   onOpenSettings,
 }: {
   profile: StoredProfile;
   devices: StoredDevice[];
+  bleStatus: BleLinkStatus;
   onAddDevice: () => void;
   onOpenSettings: () => void;
 }) {
@@ -944,6 +1265,32 @@ function HomeMap({
         <View style={[styles.mapControls, region && styles.mapControlsRaised]}>
           <Pressable
             style={styles.mapControlButton}
+            onPress={() => Alert.alert("BLE status", bleStatus.label)}
+            accessibilityRole="button"
+            accessibilityLabel={bleStatus.label}
+          >
+            {bleStatus.phase === "preparing" || bleStatus.phase === "connecting"
+              ? <ActivityIndicator color="#69cfc7" size="small" />
+              : <Ionicons
+                  name={bleStatus.phase === "ready" ? "bluetooth" : "bluetooth-outline"}
+                  size={23}
+                  color={bleStatus.phase === "ready"
+                    ? "#69cfc7"
+                    : bleStatus.phase === "connected"
+                      ? "#f2c96d"
+                      : bleStatus.phase === "error"
+                        ? "#ff826f"
+                        : "#90aaa7"}
+                />}
+            <View style={[
+              styles.bleStatusDot,
+              bleStatus.phase === "ready" && styles.bleStatusDotReady,
+              bleStatus.phase === "connected" && styles.bleStatusDotConnected,
+              bleStatus.phase === "error" && styles.bleStatusDotError,
+            ]} />
+          </Pressable>
+          <Pressable
+            style={styles.mapControlButton}
             onPress={toggleMapTheme}
             accessibilityRole="button"
             accessibilityLabel={`Use ${mapTheme === "day" ? "night" : "day"} map`}
@@ -1043,6 +1390,7 @@ export default function App() {
   const [provisioningOpen, setProvisioningOpen] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState("");
+  const [bleStatus, setBleStatus] = useState<BleLinkStatus>({ phase: "preparing", label: "Preparing BLE connection", details: [] });
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
@@ -1062,7 +1410,7 @@ export default function App() {
         if (stored) {
           const parsed: unknown = JSON.parse(stored);
           if (validProfileDetails(parsed)) {
-            await createProfile(parsed);
+            await createProfile({ ...parsed, ...createProfileIdentity(parsed.name), bleDeviceId: "", bleDeviceName: "" });
             await AsyncStorage.removeItem(profileStorageKey);
           }
         }
@@ -1147,10 +1495,18 @@ export default function App() {
         </SafeAreaView>
       ) : profile ? (
         <>
+          {!provisioningOpen ? (
+            <ActiveProfileBleLink
+              key={`${profile.id}:${profile.bleDeviceId}`}
+              profile={profile}
+              onStatusChange={setBleStatus}
+            />
+          ) : null}
           <HomeMap
             key={`${profile.id}:${profile.location}`}
             profile={profile}
             devices={profileDevices}
+            bleStatus={bleStatus}
             onAddDevice={() => setProvisioningOpen(true)}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
@@ -1174,6 +1530,7 @@ export default function App() {
               <SettingsPage
                 profiles={profiles}
                 currentProfile={profile}
+                bleStatus={bleStatus}
                 managerOpen={profileManagerOpen}
                 busy={settingsBusy}
                 error={settingsError}
@@ -1212,12 +1569,18 @@ const styles = StyleSheet.create({
   profileDescription: { color: "#b7d7d8", fontSize: 14, lineHeight: 21, marginTop: 12, marginBottom: 30 },
   fieldLabel: { color: "#90aaa7", fontSize: 9, fontWeight: "900", letterSpacing: 1, marginTop: 16, marginBottom: 8 },
   profileInput: { height: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, color: "white", fontSize: 16 },
+  identityField: { minHeight: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, justifyContent: "center", backgroundColor: "#123f47" },
+  identityValue: { color: "#b7d7d8", fontSize: 13 },
   passphraseField: { height: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, flexDirection: "row", alignItems: "center" },
   passphraseInput: { flex: 1, height: 56, paddingLeft: 17, color: "white", fontSize: 16 },
   passphraseVisibilityButton: { width: 56, height: 56, alignItems: "center", justifyContent: "center" },
   profileSelect: { minHeight: 58, borderWidth: 1, borderColor: "#36565b", borderRadius: 14, paddingHorizontal: 17, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
   profileSelectText: { flexShrink: 1, color: "white", fontSize: 14 },
   profileSelectPlaceholder: { flexShrink: 1, color: "#718a83", fontSize: 14 },
+  profileSelectedDeviceText: { flex: 1, gap: 3 },
+  profileSelectedDeviceId: { color: "#718a83", fontSize: 10 },
+  profileClearDeviceButton: { alignSelf: "flex-start", paddingVertical: 10, paddingHorizontal: 2 },
+  profileClearDeviceText: { color: "#69cfc7", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
   profileOptionList: { maxHeight: 230, marginTop: 7, borderWidth: 1, borderColor: "#36565b", borderRadius: 12, backgroundColor: "#123f47" },
   profileOption: { minHeight: 48, paddingHorizontal: 16, justifyContent: "center", borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#36565b" },
   profileOptionSelected: { backgroundColor: "#1a5057" },
@@ -1264,6 +1627,10 @@ const styles = StyleSheet.create({
   provisioningBackText: { color: "#0a8c87", fontSize: 10, fontWeight: "900", letterSpacing: 0.8 },
   provisioningStatus: { color: "#59716f", fontSize: 11, lineHeight: 16, textAlign: "center" },
   provisioningError: { color: "#b9472f", fontSize: 11, lineHeight: 16, textAlign: "center" },
+  bleSelectionPage: { flex: 1, backgroundColor: "#f7faf9" },
+  bleSelectionContent: { padding: 22, paddingBottom: 42, gap: 12 },
+  bleDeviceRow: { minHeight: 72, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 10 },
+  bleDeviceRowSelected: { borderColor: "#0a8c87", borderWidth: 2, backgroundColor: "#f1fbf9" },
   settingsPage: { flex: 1, backgroundColor: "#f7faf9" },
   settingsHeader: { minHeight: 84, paddingHorizontal: 22, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#dce6e5" },
   settingsEyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 },
@@ -1271,6 +1638,12 @@ const styles = StyleSheet.create({
   settingsClose: { color: "#59716f", fontSize: 10, fontWeight: "900", letterSpacing: 0.6 },
   settingsContent: { padding: 22, paddingBottom: 42, gap: 12 },
   currentProfileCard: { padding: 18, borderRadius: 16, backgroundColor: "#e9f7f5", gap: 5 },
+  profileCardHeader: { minHeight: 28, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+  profileCardBleActions: { flexDirection: "row", alignItems: "center", gap: 7 },
+  profileCardBleStatus: { maxWidth: 130, minHeight: 28, paddingHorizontal: 9, borderRadius: 14, flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "white" },
+  profileCardBleDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: "#718a83" },
+  profileCardBleText: { flexShrink: 1, color: "#385753", fontSize: 8, fontWeight: "900", letterSpacing: 0.6 },
+  profileCardDebugButton: { width: 32, height: 32, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: "white", borderWidth: 1, borderColor: "#b9dad6" },
   currentProfileLabel: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 1 },
   currentProfileName: { color: "#0a3037", fontSize: 22, fontWeight: "900", marginBottom: 3 },
   manageProfilesButton: { minHeight: 48, marginTop: 10, borderWidth: 1, borderColor: "#0a8c87", borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: "white" },
@@ -1383,6 +1756,10 @@ const styles = StyleSheet.create({
   mapControls: { position: "absolute", right: 16, bottom: 34, gap: 10, alignItems: "center" },
   mapControlsRaised: { bottom: 174 },
   mapControlButton: { width: 46, height: 46, borderRadius: 23, alignItems: "center", justifyContent: "center", backgroundColor: "#092e35e8", elevation: 5, shadowColor: "#000", shadowOpacity: 0.24, shadowRadius: 7, shadowOffset: { width: 0, height: 3 } },
+  bleStatusDot: { position: "absolute", right: 7, bottom: 7, width: 8, height: 8, borderRadius: 4, backgroundColor: "#718a83", borderWidth: 1, borderColor: "#092e35" },
+  bleStatusDotReady: { backgroundColor: "#69cfc7" },
+  bleStatusDotConnected: { backgroundColor: "#f2c96d" },
+  bleStatusDotError: { backgroundColor: "#ff826f" },
   mapAttribution: {
     position: "absolute",
     left: 10,

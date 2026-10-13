@@ -74,6 +74,12 @@ else()
         )
     endif()
 
+    if(IDF_TARGET STREQUAL "esp32s3")
+        list(APPEND component_sources
+            "edgez_ble_control.c"
+            "../nrf54/src/usb_control.pb.c")
+    endif()
+
     if(IDF_TARGET STREQUAL "esp32p4")
         if(CONFIG_DAB_FACTORY_RESET_BUTTON)
             list(APPEND component_sources "factory_reset_button.c")
@@ -87,6 +93,7 @@ list(APPEND component_private_dependencies nanopb)
 idf_component_register(
     SRCS ${component_sources}
     INCLUDE_DIRS "include"
+    PRIV_INCLUDE_DIRS "../nrf54/src"
     PRIV_REQUIRES ${component_private_dependencies}
 )
 

@@ -7,6 +7,21 @@
 #include "edgez_halow_mesh_service.h"
 #include "halow_pawr.h"
 #include "halow_provisioning.h"
+#if CONFIG_IDF_TARGET_ESP32S3
+esp_err_t edgez_ble_control_start(void);
+void edgez_ble_control_set_radio_profile(const char *country_code,
+                                         const char *mesh_id,
+                                         const char *passphrase,
+                                         uint32_t frequency_khz,
+                                         uint8_t bandwidth_mhz);
+void edgez_ble_control_note_mesh_started(const uint8_t mac[6]);
+void edgez_ble_control_note_mesh_link(int state);
+esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
+                                               char mesh_id[33],
+                                               char passphrase[65],
+                                               uint32_t *frequency_khz,
+                                               uint8_t *bandwidth_mhz);
+#endif
 #if CONFIG_OFFGRID_MESH_PS_TEST
 #include "mesh_ps_test.h"
 #endif
@@ -77,6 +92,9 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
 #if CONFIG_HALOW_MESH_AUTO_JOIN
 static void mesh_status_callback(edgez_halow_link_state_t state)
 {
+#if CONFIG_IDF_TARGET_ESP32S3
+    edgez_ble_control_note_mesh_link((int)state);
+#endif
 #if CONFIG_OFFGRID_MESH_PS_TEST
     mesh_ps_test_notify_link(state == EDGEZ_HALOW_LINK_CONNECTED);
 #endif
@@ -125,18 +143,39 @@ static esp_err_t start_mesh(void)
 {
     esp_err_t err;
 #if CONFIG_HALOW_BLE_PROVISIONING
+    const char *country_code = provisioned_config.country;
     const char *mesh_id = provisioned_config.mesh_id;
     const char *passphrase = provisioned_config.passphrase;
     uint32_t mesh_frequency_khz = 0;
     uint8_t mesh_bandwidth_mhz = 0;
-    err = halow_provisioning_resolve_channel(provisioned_config.country,
-                                              provisioned_config.channel,
-                                              &mesh_frequency_khz,
-                                              &mesh_bandwidth_mhz);
+#if CONFIG_IDF_TARGET_ESP32S3
+    char realtime_country_code[3] = {0};
+    char realtime_mesh_id[33] = {0};
+    char realtime_passphrase[65] = {0};
+    ESP_LOGI(TAG, "Realtime BLE ready; waiting for app INIT_HALOW");
+    err = edgez_ble_control_wait_for_mesh_init(realtime_country_code,
+                                               realtime_mesh_id,
+                                               realtime_passphrase,
+                                               &mesh_frequency_khz,
+                                               &mesh_bandwidth_mhz);
     if (err != ESP_OK) {
         return err;
     }
+    country_code = realtime_country_code;
+    mesh_id = realtime_mesh_id;
+    passphrase = realtime_passphrase;
+#endif
+    if (mesh_frequency_khz == 0 || mesh_bandwidth_mhz == 0) {
+        err = halow_provisioning_resolve_channel(provisioned_config.country,
+                                                  provisioned_config.channel,
+                                                  &mesh_frequency_khz,
+                                                  &mesh_bandwidth_mhz);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
 #else
+    const char *country_code = CONFIG_HALOW_COUNTRY_CODE;
     const char *mesh_id = CONFIG_HALOW_MESH_ID;
     const char *passphrase = CONFIG_HALOW_MESH_PASSPHRASE;
     const uint32_t mesh_frequency_khz = CONFIG_HALOW_MESH_FREQUENCY_KHZ;
@@ -144,11 +183,7 @@ static esp_err_t start_mesh(void)
 #endif
     edgez_halow_mesh_service_config_t service_config =
         EDGEZ_HALOW_MESH_SERVICE_CONFIG_INIT;
-#if CONFIG_HALOW_BLE_PROVISIONING
-    service_config.country_code = provisioned_config.country;
-#else
-    service_config.country_code = CONFIG_HALOW_COUNTRY_CODE;
-#endif
+    service_config.country_code = country_code;
     service_config.mesh_id = mesh_id;
     service_config.passphrase = passphrase;
     service_config.frequency_khz = mesh_frequency_khz;
@@ -172,12 +207,21 @@ static esp_err_t start_mesh(void)
     service_config.enable_batman = true;
     service_config.batman_originator_interval_ms = 60000U;
 #endif
+#if CONFIG_IDF_TARGET_ESP32S3
+    edgez_ble_control_set_radio_profile(service_config.country_code,
+                                         mesh_id, passphrase,
+                                         mesh_frequency_khz,
+                                         mesh_bandwidth_mhz);
+#endif
 
     edgez_halow_mesh_service_info_t service_info = {0};
     err = edgez_halow_mesh_service_start(&service_config, &service_info);
     if (err != ESP_OK) {
         return err;
     }
+#if CONFIG_IDF_TARGET_ESP32S3
+    edgez_ble_control_note_mesh_started(service_info.mac);
+#endif
 
 #if CONFIG_OFFGRID_MESH_PS_TEST
     err = mesh_ps_test_start();
@@ -267,11 +311,24 @@ static void halow_init_task(void *arg)
     ESP_LOGI(TAG, "Starting Morse Micro HaLow stack with MM8108 USB transport");
 #endif
 #if CONFIG_HALOW_MESH_AUTO_JOIN
+#if CONFIG_HALOW_BLE_PROVISIONING && CONFIG_IDF_TARGET_ESP32S3
+    esp_err_t mesh_err;
+    while (true) {
+        mesh_err = start_mesh();
+        if (mesh_err == ESP_OK) {
+            break;
+        }
+        ESP_LOGE(TAG, "Failed to start HaLow mesh: %s (%d)",
+                 esp_err_to_name(mesh_err), (int)mesh_err);
+        ESP_LOGI(TAG, "Waiting for another realtime INIT_HALOW request");
+    }
+#else
     const esp_err_t mesh_err = start_mesh();
     if (mesh_err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HaLow mesh: %s (%d)",
                  esp_err_to_name(mesh_err), (int)mesh_err);
     }
+#endif
 #endif
     vTaskDelete(NULL);
 }
@@ -294,30 +351,22 @@ void app_main(void)
     bool provisioned = false;
     ESP_ERROR_CHECK(halow_provisioning_init(&provisioned_config, &provisioned));
     if (!provisioned) {
-        ESP_LOGI(TAG, "No saved HaLow profile; starting ESP32 BLE provisioning");
-#if CONFIG_IDF_TARGET_ESP32P4
-        ESP_LOGI(TAG, "Connecting to onboard ESP32-C6 BLE controller over SDIO");
-        ESP_ERROR_CHECK(esp_hosted_init());
-        ESP_ERROR_CHECK(esp_hosted_slave_reset());
-        /* The factory C6 image uses ESP-Hosted 1.4. Its Bluetooth controller
-         * is enabled during C6 startup. Controller init/enable RPCs were added
-         * in ESP-Hosted 2.5.2 and must not be sent to this legacy image: it
-         * does not implement Req_FeatureControl and the request times out. */
-        ESP_LOGI(TAG, "Using factory C6 Bluetooth controller (enabled by slave firmware)");
-#endif
-        esp_netif_create_default_wifi_sta();
-        wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
-        ESP_ERROR_CHECK(esp_wifi_init(&wifi_config));
-        const esp_err_t provisioning_err = halow_provisioning_start();
-        if (provisioning_err != ESP_OK) {
-            ESP_LOGE(TAG, "Could not start BLE provisioning: %s (%d)",
-                     esp_err_to_name(provisioning_err), (int)provisioning_err);
-        }
+        ESP_LOGI(TAG,
+                 "No saved HaLow profile; starting realtime BLE and waiting for INIT_HALOW");
+    } else {
+        ESP_LOGI(TAG, "Saved mesh profile '%s', country %s, channel %u available",
+                 provisioned_config.mesh_id, provisioned_config.country,
+                 provisioned_config.channel);
+    }
+#if CONFIG_IDF_TARGET_ESP32S3
+    ESP_ERROR_CHECK(edgez_ble_control_start());
+#elif CONFIG_IDF_TARGET_ESP32P4
+    if (!provisioned) {
+        ESP_LOGW(TAG,
+                 "Realtime BLE INIT is not available on ESP32-P4; use its explicit provisioning path");
         return;
     }
-    ESP_LOGI(TAG, "Using provisioned mesh '%s', country %s, channel %u",
-             provisioned_config.mesh_id, provisioned_config.country,
-             provisioned_config.channel);
+#endif
 #endif
 
     const BaseType_t created = xTaskCreate(halow_init_task,

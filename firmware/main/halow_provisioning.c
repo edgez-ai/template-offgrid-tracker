@@ -25,6 +25,13 @@
 #define HALOW_PROVISIONING_ENDPOINT "mqtt-config"
 #define HALOW_PROVISIONING_POP "abcd1234"
 
+/* Keep ESP provisioning discoverable by the app's FFF0-filtered BLE scan.
+ * ESP-IDF expects the 128-bit UUID in least-significant-byte-first order. */
+static uint8_t edgez_provisioning_service_uuid[16] = {
+    0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80,
+    0x00, 0x10, 0x00, 0x00, 0xf0, 0xff, 0x00, 0x00,
+};
+
 static const char *TAG = "halow_prov";
 static bool provisioning_active;
 static bool restart_after_stop;
@@ -281,7 +288,7 @@ esp_err_t halow_provisioning_start(void)
         return err;
     }
     char service_name[32];
-    snprintf(service_name, sizeof(service_name), "PROV_%02X%02X%02X%02X%02X%02X",
+    snprintf(service_name, sizeof(service_name), "EZ_%02X%02X%02X%02X%02X%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     err = esp_event_handler_register(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID,
@@ -296,6 +303,10 @@ esp_err_t halow_provisioning_start(void)
     err = network_prov_mgr_init(manager_config);
     if (err == ESP_OK) {
         err = network_prov_mgr_endpoint_create(HALOW_PROVISIONING_ENDPOINT);
+    }
+    if (err == ESP_OK) {
+        err = network_prov_scheme_ble_set_service_uuid(
+            edgez_provisioning_service_uuid);
     }
     if (err == ESP_OK) {
         err = network_prov_mgr_start_provisioning(NETWORK_PROV_SECURITY_1,
