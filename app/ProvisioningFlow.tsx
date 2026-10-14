@@ -264,7 +264,7 @@ export function ProvisioningFlow({
           <Text style={styles.provisioningEyebrow}>STEP {step} OF 3</Text>
           <Text style={styles.provisioningTitle}>{step === 1 ? "Choose device" : step === 2 ? "Device details" : "Confirm setup"}</Text>
         </View>
-        <Pressable onPress={close} disabled={busy} accessibilityRole="button"><Text style={styles.provisioningClose}>CLOSE</Text></Pressable>
+        <Pressable style={styles.headerTextButton} onPress={close} disabled={busy} hitSlop={8} accessibilityRole="button"><Text style={styles.provisioningClose}>CLOSE</Text></Pressable>
       </View>
       <ScrollView contentContainerStyle={styles.provisioningContent} keyboardShouldPersistTaps="handled">
         {step === 1 ? (
@@ -358,5 +358,4 @@ export function ProvisioningFlow({
     </SafeAreaView>
   );
 }
-
 

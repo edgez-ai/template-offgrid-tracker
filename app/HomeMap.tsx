@@ -4,7 +4,7 @@ import type { EdgezMapDownloadUpdate, EdgezMeshSession, EdgezMeshState, EdgezOrg
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useRef, useState } from "react";
-import { ActivityIndicator, Alert, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
 import { DeviceDetail, SwipeableDeviceRow } from "./DeviceComponents";
@@ -40,7 +40,6 @@ export function HomeMap({
   const profileCenter = coordinatesFromLocation(profile.location);
   const initialZoom = profileCenter ? 12 : 9;
   const mapZoom = useRef(initialZoom);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [region, setRegion] = useState("");
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
@@ -95,15 +94,6 @@ export function HomeMap({
     } finally {
       setLocating(false);
     }
-  };
-
-  const showOfflineMapHelp = () => {
-    setMenuOpen(false);
-    Alert.alert(
-      "Offline maps",
-      "Move the map to the area you need. When that region is available to save, the app will offer to download it for offline use.",
-      [{ text: "OK" }],
-    );
   };
 
   return (
@@ -248,73 +238,26 @@ export function HomeMap({
         {viewMode === "map" ? <Text style={styles.mapAttribution}>{locatedDevices.length} located devices · © OpenStreetMap contributors</Text> : null}
       </View>
 
-      {menuOpen ? (
-        <Pressable
-          style={styles.menuBackdrop}
-          onPress={() => setMenuOpen(false)}
-          accessibilityLabel="Close menu"
-        />
-      ) : null}
-
       <View style={styles.dashboardHeader} pointerEvents="box-none">
         <View />
         <View style={styles.headerActions}>
           <Pressable
-            style={styles.addButton}
+            style={[styles.headerIconButton, styles.headerAddIconButton]}
             onPress={onAddDevice}
             accessibilityRole="button"
             accessibilityLabel="Add device"
           >
-            <Text style={styles.addButtonText}>+ ADD</Text>
+            <Ionicons name="add" size={26} color="white" />
           </Pressable>
           <Pressable
-            style={styles.menuButton}
-            onPress={() => setMenuOpen((open) => !open)}
+            style={styles.headerIconButton}
+            onPress={onOpenSettings}
             accessibilityRole="button"
-            accessibilityLabel="Open menu"
-            accessibilityState={{ expanded: menuOpen }}
+            accessibilityLabel="Open settings"
           >
-            <Text style={styles.menuButtonText}>MENU ⌄</Text>
+            <Ionicons name="settings-outline" size={22} color="white" />
           </Pressable>
         </View>
-
-        {menuOpen ? (
-          <View style={styles.dropdownMenu} accessibilityRole="menu">
-            <Pressable style={styles.menuItem} onPress={() => { setViewMode("map"); setMenuOpen(false); }} accessibilityRole="menuitem">
-              <Text style={[styles.menuItemText, viewMode === "map" && styles.menuItemActive]}>Map view</Text>
-            </Pressable>
-            <Pressable style={styles.menuItem} onPress={() => { setViewMode("list"); setMenuOpen(false); }} accessibilityRole="menuitem">
-              <Text style={[styles.menuItemText, viewMode === "list" && styles.menuItemActive]}>Nodes list</Text>
-            </Pressable>
-            <Pressable style={styles.menuItem} onPress={showOfflineMapHelp} accessibilityRole="menuitem">
-              <Text style={styles.menuItemText}>Offline maps</Text>
-            </Pressable>
-            <Pressable style={styles.menuItem} onPress={() => { setMenuOpen(false); setMessagesOpen(true); }} accessibilityRole="menuitem">
-              <Text style={styles.menuItemText}>Messages</Text>
-            </Pressable>
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                setMenuOpen(false);
-                onOpenSettings();
-              }}
-              accessibilityRole="menuitem"
-            >
-              <Text style={styles.menuItemText}>Settings</Text>
-            </Pressable>
-            <View style={styles.menuDivider} />
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                setMenuOpen(false);
-                Alert.alert("Offgrid Tracker", "Local-first device tracking with offline maps.");
-              }}
-              accessibilityRole="menuitem"
-            >
-              <Text style={styles.menuItemText}>About</Text>
-            </Pressable>
-          </View>
-        ) : null}
       </View>
       <BleDebugModal
         visible={debugOpen}
@@ -348,5 +291,4 @@ export function HomeMap({
     </SafeAreaView>
   );
 }
-
 

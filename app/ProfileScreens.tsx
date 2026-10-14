@@ -110,7 +110,7 @@ function ProfileBleDevicePicker({
           <Text style={styles.settingsEyebrow}>PROFILE DEVICE</Text>
           <Text style={styles.settingsTitle}>Select BLE device</Text>
         </View>
-        <Pressable onPress={() => void close()} accessibilityRole="button">
+        <Pressable style={styles.headerTextButton} onPress={() => void close()} hitSlop={8} accessibilityRole="button">
           <Text style={styles.settingsClose}>BACK</Text>
         </Pressable>
       </View>
@@ -182,7 +182,7 @@ export function ProfileLocationPicker({
           <Text style={styles.locationEyebrow}>{subject.toUpperCase()} LOCATION</Text>
           <Text style={styles.locationTitle}>Choose on map</Text>
         </View>
-        <Pressable onPress={onCancel} accessibilityRole="button"><Text style={styles.locationClose}>BACK</Text></Pressable>
+        <Pressable style={styles.headerTextButton} onPress={onCancel} hitSlop={8} accessibilityRole="button"><Text style={styles.locationClose}>BACK</Text></Pressable>
       </View>
       <View style={styles.locationMap}>
         <EdgezOrganicMap
@@ -558,4 +558,3 @@ export function ProfileForm({
     </SafeAreaView>
   );
 }
-

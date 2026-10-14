@@ -31,7 +31,7 @@ export function BleDebugModal({
               <Text style={styles.bleDebugEyebrow}>LIVE DEVICE STATUS</Text>
               <Text style={styles.bleDebugTitle}>BLE debug</Text>
             </View>
-            <Pressable onPress={onClose} accessibilityRole="button">
+            <Pressable style={styles.headerTextButton} onPress={onClose} hitSlop={8} accessibilityRole="button" accessibilityLabel="Close BLE debug">
               <Text style={styles.settingsClose}>CLOSE</Text>
             </Pressable>
           </View>
@@ -101,7 +101,7 @@ export function SettingsPage({
           <Text style={styles.settingsEyebrow}>SETTINGS</Text>
           <Text style={styles.settingsTitle}>{managerOpen ? "Profile management" : "Profile settings"}</Text>
         </View>
-        <Pressable onPress={managerOpen ? onBack : onClose} disabled={busy} accessibilityRole="button">
+        <Pressable style={styles.headerTextButton} onPress={managerOpen ? onBack : onClose} disabled={busy} hitSlop={8} accessibilityRole="button">
           <Text style={styles.settingsClose}>{managerOpen ? "BACK" : "CLOSE"}</Text>
         </Pressable>
       </View>
@@ -202,4 +202,3 @@ export function SettingsPage({
     </SafeAreaView>
   );
 }
-

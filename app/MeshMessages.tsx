@@ -147,7 +147,7 @@ export function MeshMessages({
       <SafeAreaView style={styles.page}>
         <View style={styles.header}>
           <View><Text style={styles.eyebrow}>OFFGRID MESSAGES</Text><Text style={styles.title}>{selectedPeer ? selectedPeer.name : "Messages"}</Text></View>
-          <Pressable onPress={onClose} accessibilityRole="button"><Text style={styles.close}>CLOSE</Text></Pressable>
+          <Pressable style={styles.closeButton} onPress={onClose} hitSlop={8} accessibilityRole="button"><Text style={styles.close}>CLOSE</Text></Pressable>
         </View>
         <ScrollView contentContainerStyle={styles.content}>
           {!peers.length ? (
@@ -192,6 +192,7 @@ const styles = StyleSheet.create({
   header: { minHeight: 84, paddingHorizontal: 22, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderBottomWidth: 1, borderBottomColor: "#dce6e5" },
   eyebrow: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 1 },
   title: { color: "#0a3037", fontSize: 24, fontWeight: "900", marginTop: 3 },
+  closeButton: { minWidth: 52, minHeight: 44, alignItems: "center", justifyContent: "center" },
   close: { color: "#59716f", fontSize: 10, fontWeight: "900", letterSpacing: 0.6 },
   content: { padding: 22, paddingBottom: 42, gap: 12 },
   empty: { padding: 20, borderRadius: 16, backgroundColor: "#e9f7f5", gap: 6 },
