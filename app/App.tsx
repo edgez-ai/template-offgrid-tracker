@@ -4,7 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fromByteArray } from "base64-js";
 import type { EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
@@ -39,6 +39,8 @@ import {
 import type { SharedProfileSettings } from "./app-settings";
 
 const profileStorageKey = "offgrid-tracker.profile.v1";
+type ProfileMeshLink = { profileId: string; session: EdgezMeshSession; state: EdgezMeshState };
+
 export default function App() {
   const [profiles, setProfiles] = useState<StoredProfile[]>([]);
   const [profile, setProfile] = useState<StoredProfile | null>(null);
@@ -59,13 +61,35 @@ export default function App() {
     halowLinkUp: null,
     updatedAt: Date.now(),
   });
-  const [meshLink, setMeshLink] = useState<{ session: EdgezMeshSession; state: EdgezMeshState } | null>(null);
+  const [meshLink, setMeshLink] = useState<ProfileMeshLink | null>(null);
+  const activeProfileIdRef = useRef<string | null>(null);
   const persistedNodeFingerprint = useRef("");
   const persistedMessageFingerprint = useRef("");
   const runtimeProfile = useMemo(
     () => profile && sharedSettings ? applySharedProfileSettings(profile, sharedSettings) : profile,
     [profile, sharedSettings],
   );
+  const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
+  const handleMeshChange = useCallback((value: { session: EdgezMeshSession; state: EdgezMeshState }) => {
+    if (!runtimeProfile || activeProfileIdRef.current !== runtimeProfile.id) return;
+    setMeshLink({ profileId: runtimeProfile.id, ...value });
+  }, [runtimeProfile?.id]);
+
+  const applyProfileData = (currentProfile: StoredProfile | null, devices: StoredDevice[], messages: StoredMessage[]) => {
+    activeProfileIdRef.current = currentProfile?.id ?? null;
+    setProfile(currentProfile);
+    setProfileDevices(devices);
+    setProfileMessages(messages);
+  };
+
+  const resetProfileRuntime = () => {
+    activeProfileIdRef.current = null;
+    persistedNodeFingerprint.current = "";
+    persistedMessageFingerprint.current = "";
+    setMeshLink(null);
+    setProfileDevices([]);
+    setProfileMessages([]);
+  };
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
@@ -73,9 +97,7 @@ export default function App() {
       ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
       : [[], []];
     setProfiles(availableProfiles);
-    setProfile(currentProfile);
-    setProfileDevices(availableDevices);
-    setProfileMessages(availableMessages);
+    applyProfileData(currentProfile, availableDevices, availableMessages);
     return currentProfile;
   };
 
@@ -100,6 +122,7 @@ export default function App() {
         ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
         : [[], []];
       setProfiles(availableProfiles);
+      activeProfileIdRef.current = currentProfile?.id ?? null;
       setProfile(currentProfile);
       setSharedSettings(settings);
       setProfileDevices(availableDevices);
@@ -110,7 +133,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!profile || !meshLink) return;
+    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
     const discovered = [...meshLink.state.nodes.values()]
       .filter((node) => !isEdgezPublicChannel(node.nodeNum) && node.lastSeenMs > 0);
     if (!discovered.length) return;
@@ -146,16 +169,17 @@ export default function App() {
           }, existing?.id);
         }
         persistedNodeFingerprint.current = fingerprint;
-        setProfileDevices(await listProfileDevices(profile.id));
+        const refreshedDevices = await listProfileDevices(profile.id);
+        if (activeProfileIdRef.current === profile.id) setProfileDevices(refreshedDevices);
       })().catch((caught) => {
         setSettingsError(caught instanceof Error ? caught.message : "Could not save discovered mesh devices.");
       });
     }, 250);
     return () => clearTimeout(timer);
-  }, [meshLink?.state.nodes, profile]);
+  }, [meshLink?.profileId, meshLink?.state.nodes, profile]);
 
   useEffect(() => {
-    if (!profile || !meshLink) return;
+    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
     const conversations = [...meshLink.state.conversations.entries()];
     if (!conversations.length) return;
     const fingerprint = `${profile.id}:` + conversations.map(([nodeNum, items]) =>
@@ -167,13 +191,14 @@ export default function App() {
           await replaceProfileConversation(profile.id, edgezNodeId(nodeNum).toUpperCase(), items);
         }
         persistedMessageFingerprint.current = fingerprint;
-        setProfileMessages(await listProfileMessages(profile.id));
+        const refreshedMessages = await listProfileMessages(profile.id);
+        if (activeProfileIdRef.current === profile.id) setProfileMessages(refreshedMessages);
       })().catch((caught) => {
         setSettingsError(caught instanceof Error ? caught.message : "Could not save mesh messages.");
       });
     }, 100);
     return () => clearTimeout(timer);
-  }, [meshLink?.state.conversations, profile]);
+  }, [meshLink?.profileId, meshLink?.state.conversations, profile]);
 
   const saveInitialProfile = async (details: ProfileDetails) => {
     await createProfile(details);
@@ -182,7 +207,10 @@ export default function App() {
 
   const saveManagedProfile = async (details: ProfileDetails) => {
     if (profileFormMode === "edit" && profile) await updateProfile(profile.id, details);
-    else await createProfile(details);
+    else {
+      await createProfile(details);
+      resetProfileRuntime();
+    }
     await refreshProfiles();
     setProfileFormMode(null);
     setSettingsError("");
@@ -199,6 +227,7 @@ export default function App() {
     setSettingsError("");
     try {
       await setActiveProfile(selected.id);
+      if (selected.id !== profile?.id) resetProfileRuntime();
       await refreshProfiles();
     } catch (caught) {
       setSettingsError(caught instanceof Error ? caught.message : "Could not select the profile.");
@@ -223,14 +252,13 @@ export default function App() {
               setSettingsError("");
               try {
                 const nextProfile = await deleteProfile(profile.id);
+                resetProfileRuntime();
                 const availableProfiles = await listProfiles();
                 const [availableDevices, availableMessages] = nextProfile
                   ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id)])
                   : [[], []];
                 setProfiles(availableProfiles);
-                setProfile(nextProfile);
-                setProfileDevices(availableDevices);
-                setProfileMessages(availableMessages);
+                applyProfileData(nextProfile, availableDevices, availableMessages);
                 if (!nextProfile) setSettingsOpen(false);
               } catch (caught) {
                 setSettingsError(caught instanceof Error ? caught.message : "Could not delete the profile.");
@@ -257,7 +285,8 @@ export default function App() {
           onPress: () => {
             void (async () => {
               await deleteProfileDevice(profile.id, device.id);
-              setProfileDevices(await listProfileDevices(profile.id));
+              const refreshedDevices = await listProfileDevices(profile.id);
+              if (activeProfileIdRef.current === profile.id) setProfileDevices(refreshedDevices);
             })().catch((caught) => {
               setSettingsError(caught instanceof Error ? caught.message : "Could not remove the device.");
             });
@@ -284,7 +313,7 @@ export default function App() {
               iconType={sharedSettings?.iconType ?? "person"}
               iconColor={sharedSettings?.iconColor ?? "blue"}
               onStatusChange={setBleStatus}
-              onMeshChange={setMeshLink}
+              onMeshChange={handleMeshChange}
             />
           ) : null}
           <HomeMap
@@ -293,10 +322,13 @@ export default function App() {
             devices={profileDevices}
             messages={profileMessages}
             bleStatus={bleStatus}
-            meshLink={meshLink}
+            meshLink={currentMeshLink}
             onAddDevice={() => setProvisioningOpen(true)}
             onRemoveDevice={requestRemoveDevice}
-            onMessagesChanged={async () => setProfileMessages(await listProfileMessages(runtimeProfile.id))}
+            onMessagesChanged={async () => {
+              const refreshedMessages = await listProfileMessages(runtimeProfile.id);
+              if (activeProfileIdRef.current === runtimeProfile.id) setProfileMessages(refreshedMessages);
+            }}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
@@ -351,7 +383,10 @@ export default function App() {
             <ProvisioningFlow
               profile={runtimeProfile}
               onClose={() => setProvisioningOpen(false)}
-              onProvisioned={async () => setProfileDevices(await listProfileDevices(runtimeProfile.id))}
+              onProvisioned={async () => {
+                const refreshedDevices = await listProfileDevices(runtimeProfile.id);
+                if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+              }}
             />
           </Modal>
         </>

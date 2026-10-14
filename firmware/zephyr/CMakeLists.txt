@@ -46,7 +46,8 @@ endif()
 if(CONFIG_WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY)
 	target_compile_definitions(app PRIVATE EDGEZ_DIAGNOSTICS_ENABLED=1)
 	target_link_libraries(app PRIVATE
-		edgez_umac_core edgez_mesh_security edgez_rf_morsemicro libmorse
+		edgez_umac_core edgez_mesh_security
+		edgez_rf_morsemicro libmorse
 	)
 	zephyr_include_directories(
 		"${MORSE_ZEPHYR_MODULE}/components/morsemicro/libmorse_interface/include"

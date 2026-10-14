@@ -4,10 +4,10 @@ import type { EdgezMapDownloadUpdate, EdgezMeshSession, EdgezMeshState, EdgezOrg
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useRef, useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, Text, View } from "react-native";
+import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
-import { DeviceDetail, SwipeableDeviceRow } from "./DeviceComponents";
+import { DeviceDetail } from "./DeviceComponents";
 import { MeshMessages } from "./MeshMessages";
 import { BleDebugModal } from "./SettingsScreens";
 import { styles } from "./app-styles";
@@ -45,7 +45,6 @@ export function HomeMap({
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
   const [mapError, setMapError] = useState("");
   const [mapTheme, setMapTheme] = useState<"day" | "night">("day");
-  const [viewMode, setViewMode] = useState<"map" | "list">("map");
   const [debugOpen, setDebugOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState<StoredDevice | null>(null);
@@ -84,20 +83,14 @@ export function HomeMap({
     ...(currentLocation ? [{ id: "current-location", label: "You", icon: "gps" as const, ...currentLocation }] : []),
   ];
 
-  const openDevice = (device: StoredDevice) => {
-    setSelectedDevice(device);
-  };
-
   const toggleMapTheme = () => {
     const nextTheme = mapTheme === "day" ? "night" : "day";
     map.current?.setMapTheme(nextTheme);
     setMapTheme(nextTheme);
-    setViewMode("map");
   };
 
   const centerOnCurrentLocation = async () => {
     if (locating) return;
-    setViewMode("map");
     setLocating(true);
     setMapError("");
     try {
@@ -135,22 +128,7 @@ export function HomeMap({
           }}
           onMapError={setMapError}
         />
-        {viewMode === "list" ? (
-          <ScrollView style={styles.nodeList} contentContainerStyle={styles.nodeListContent}>
-            <Text style={styles.nodeListEyebrow}>OFFGRID NODES</Text>
-            <Text style={styles.nodeListTitle}>Devices in {profile.name}</Text>
-            {!devices.length ? (
-              <View style={styles.nodeEmptyCard}>
-                <Text style={styles.nodeName}>No devices discovered yet</Text>
-                <Text style={styles.nodeMeta}>Devices appear after a beacon is received over the HaLow mesh.</Text>
-              </View>
-            ) : devices.map((device) => (
-              <SwipeableDeviceRow key={device.id} device={device} onOpen={openDevice} onRemove={onRemoveDevice} />
-            ))}
-          </ScrollView>
-        ) : null}
-
-        {viewMode === "map" && region ? (
+        {region ? (
           <View style={styles.mapPrompt}>
             <Text style={styles.mapPromptTitle}>Save {region} offline?</Text>
             <Text style={styles.mapPromptText}>
@@ -181,7 +159,7 @@ export function HomeMap({
           </View>
         ) : null}
 
-        {viewMode === "map" && download && !download.finished ? (
+        {download && !download.finished ? (
           <View style={styles.mapNotice}>
             <Text style={styles.mapNoticeText}>
               {download.status}
@@ -196,7 +174,7 @@ export function HomeMap({
           </Pressable>
         ) : null}
 
-        <View style={[styles.mapControls, viewMode === "map" && region && styles.mapControlsRaised]}>
+        <View style={[styles.mapControls, region && styles.mapControlsRaised]}>
           <Pressable
             style={styles.mapControlButton}
             onPress={() => setMessagesOpen(true)}
@@ -253,7 +231,7 @@ export function HomeMap({
           </Pressable>
         </View>
 
-        {viewMode === "map" ? <Text style={styles.mapAttribution}>{locatedDevices.length} located devices · © OpenStreetMap contributors</Text> : null}
+        <Text style={styles.mapAttribution}>{locatedDevices.length} located devices · © OpenStreetMap contributors</Text>
       </View>
 
       <View style={styles.dashboardHeader} pointerEvents="box-none">
@@ -291,6 +269,8 @@ export function HomeMap({
         messages={messages}
         initialPeerSerial={conversationPeer}
         onMessagesChanged={onMessagesChanged}
+        onShowDevice={setSelectedDevice}
+        onRemoveDevice={onRemoveDevice}
         onClose={() => { setMessagesOpen(false); setConversationPeer(null); }}
       />
       <DeviceDetail

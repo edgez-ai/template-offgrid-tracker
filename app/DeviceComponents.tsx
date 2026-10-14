@@ -57,10 +57,18 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 
 export function SwipeableDeviceRow({
   device,
+  icon = device.kind === "h7608" ? "git-network-outline" : "radio-outline",
+  subtitle,
+  meta,
+  badge,
   onOpen,
   onRemove,
 }: {
   device: StoredDevice;
+  icon?: React.ComponentProps<typeof Ionicons>["name"];
+  subtitle?: string;
+  meta?: string;
+  badge?: string;
   onOpen: (device: StoredDevice) => void;
   onRemove: (device: StoredDevice) => void;
 }) {
@@ -87,13 +95,16 @@ export function SwipeableDeviceRow({
       </Pressable>
       <Animated.View style={[styles.card, { transform: [{ translateX }] }]} {...panResponder.panHandlers}>
         <Pressable style={styles.open} onPress={() => onOpen(device)} accessibilityRole="button">
-          <View style={styles.nodeIcon}><Ionicons name={device.kind === "h7608" ? "git-network-outline" : "radio-outline"} size={21} color="#0a8c87" /></View>
+          <View style={styles.nodeIcon}><Ionicons name={icon} size={21} color="#0a8c87" /></View>
           <View style={styles.body}>
             <Text style={styles.name}>{device.name}</Text>
-            <Text style={styles.serial}>{device.meshMacAddress || device.serial}</Text>
-            <Text style={styles.meta}>{device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(5)}, ${device.longitude.toFixed(5)}` : "Location not shared"}</Text>
+            <Text style={styles.serial} numberOfLines={1}>{subtitle ?? (device.meshMacAddress || device.serial)}</Text>
+            <Text style={styles.meta} numberOfLines={1}>{meta ?? (device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(5)}, ${device.longitude.toFixed(5)}` : "Location not shared")}</Text>
           </View>
-          <Text style={styles.kind}>{device.kind.toUpperCase()}</Text>
+          <View style={styles.rowEnd}>
+            {badge ? <Text style={styles.badge}>{badge}</Text> : null}
+            <Ionicons name="chevron-forward" size={17} color="#718783" />
+          </View>
         </Pressable>
       </Animated.View>
     </View>
@@ -128,4 +139,6 @@ const styles = StyleSheet.create({
   serial: { color: "#385753", fontSize: 10, fontWeight: "700", letterSpacing: 0.4 },
   meta: { color: "#718783", fontSize: 10, lineHeight: 15 },
   kind: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 0.7 },
+  rowEnd: { alignItems: "flex-end", gap: 7 },
+  badge: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 0.5 },
 });
