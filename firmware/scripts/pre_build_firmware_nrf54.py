@@ -115,9 +115,18 @@ os.environ["MORSE_ZEPHYR_MODULE"] = str(mm_root)
 if edgez_source_root is not None:
     env["ENV"]["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
     os.environ["EDGEZ_HALOW_MESH_SOURCE_ROOT"] = str(edgez_source_root)
+    env.AppendUnique(CPPPATH=[str(edgez_source_root / "include")])
 else:
     env["ENV"].pop("EDGEZ_HALOW_MESH_SOURCE_ROOT", None)
     os.environ.pop("EDGEZ_HALOW_MESH_SOURCE_ROOT", None)
+    edgez_prebuilt_include = mm_root / "submodules" / "edgez-halow-mesh-prebuilt" / "include"
+    if not (edgez_prebuilt_include / "edgez_mesh_zephyr.h").is_file():
+        print(f"ERROR: EdgeZ HaLow mesh public API headers not found at {edgez_prebuilt_include}")
+        env.Exit(1)
+    # PlatformIO recompiles the application sources outside Zephyr's CMake
+    # target graph, so explicitly carry the public API include directory into
+    # that second compilation phase.
+    env.AppendUnique(CPPPATH=[str(edgez_prebuilt_include)])
     # PlatformIO recompiles application sources outside Zephyr's CMake target
     # graph, so mirror the release-archive definition into its SCons flags.
     env.AppendUnique(CPPDEFINES=[("EDGEZ_PLATFORM_ARCHIVE_BUILD", 1)])

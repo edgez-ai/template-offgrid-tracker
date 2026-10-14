@@ -58,7 +58,7 @@ static int edgez_halow_power_init(void)
 	}
 	k_msleep(500);
 	halow_power_ready = true;
-	LOG_INF("HC01 power ready before Morse init on GPIO %s pin %u",
+	LOG_INF("HaLow power ready before Morse init on GPIO %s pin %u",
 		halow_power_en.port->name, halow_power_en.pin);
 #else
 	halow_power_ready = true;

@@ -22,6 +22,7 @@ LOG_MODULE_REGISTER(edgez_relay, LOG_LEVEL_INF);
 #define RELAY_FRAME_LIMIT 480U
 #define RELAY_PAYLOAD_LIMIT 512U
 #define RELAY_ASSEMBLIES 2U
+#define RELAY_TX_QUEUE_DEPTH 4U
 
 struct __packed relay_header {
 	uint32_t magic;
@@ -46,7 +47,15 @@ struct relay_assembly {
 	uint8_t payload[RELAY_PAYLOAD_LIMIT + 1U];
 };
 
+struct relay_tx_item {
+	bool broadcast;
+	uint8_t destination[6];
+	uint16_t payload_len;
+	uint8_t payload[RELAY_PAYLOAD_LIMIT];
+};
+
 K_MUTEX_DEFINE(relay_lock);
+K_MSGQ_DEFINE(relay_tx_queue, sizeof(struct relay_tx_item), RELAY_TX_QUEUE_DEPTH, 4);
 static struct relay_assembly assemblies[RELAY_ASSEMBLIES];
 static uint8_t local_mac[6];
 static bool initialized;
@@ -126,8 +135,8 @@ int edgez_nrf_relay_init(const uint8_t mac[6])
 	return 0;
 }
 
-int edgez_nrf_relay_send(const uint8_t destination[6], const uint8_t *payload,
-			 size_t payload_len)
+static int relay_send_now(const uint8_t destination[6], const uint8_t *payload,
+			  size_t payload_len)
 {
 	uint8_t relay_payload[RELAY_PAYLOAD_LIMIT + 1U];
 	uint8_t frame[RELAY_ETH_HEADER_LEN + RELAY_FRAME_LIMIT];
@@ -166,8 +175,55 @@ int edgez_nrf_relay_send(const uint8_t destination[6], const uint8_t *payload,
 	return 0;
 }
 
+static void relay_tx_thread(void *arg1, void *arg2, void *arg3)
+{
+	ARG_UNUSED(arg1);
+	ARG_UNUSED(arg2);
+	ARG_UNUSED(arg3);
+	struct relay_tx_item item;
+
+	for (;;) {
+		k_msgq_get(&relay_tx_queue, &item, K_FOREVER);
+		int rc = relay_send_now(item.broadcast ? NULL : item.destination,
+					item.payload, item.payload_len);
+		if (rc) {
+			LOG_WRN("Queued BLE-to-mesh TX failed rc=%d", rc);
+		} else {
+			LOG_INF("Queued BLE-to-mesh TX complete bytes=%u route=%s",
+				item.payload_len, item.broadcast ? "broadcast" : "unicast");
+		}
+	}
+}
+
+/* The BATMAN broadcast builder reserves roughly 1.5 KiB on its own. Leave
+ * enough headroom for the queued packet and the Morse transport call chain,
+ * and keep this radio worker below the Bluetooth RX thread (priority 8). */
+K_THREAD_DEFINE(relay_tx_thread_id, 5120, relay_tx_thread, NULL, NULL, NULL,
+		10, 0, 0);
+
+int edgez_nrf_relay_send(const uint8_t destination[6], const uint8_t *payload,
+			 size_t payload_len)
+{
+	struct relay_tx_item item = {
+		.broadcast = destination == NULL,
+		.payload_len = (uint16_t)payload_len,
+	};
+
+	if (!initialized) return -EHOSTDOWN;
+	if (!payload || payload_len == 0 || payload_len > RELAY_PAYLOAD_LIMIT) return -EINVAL;
+	if (destination) memcpy(item.destination, destination, sizeof(item.destination));
+	memcpy(item.payload, payload, payload_len);
+	if (k_msgq_put(&relay_tx_queue, &item, K_NO_WAIT) != 0) {
+		LOG_WRN("BLE-to-mesh TX queue full; dropping %u-byte packet",
+			(unsigned int)payload_len);
+		return -ENOBUFS;
+	}
+	return 0;
+}
+
 void edgez_nrf_relay_reset(void)
 {
+	k_msgq_purge(&relay_tx_queue);
 	k_mutex_lock(&relay_lock, K_FOREVER);
 	memset(assemblies, 0, sizeof(assemblies));
 	k_mutex_unlock(&relay_lock);

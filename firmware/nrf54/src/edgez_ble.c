@@ -66,6 +66,12 @@ static bool advertising;
 static bool provisioning_enabled;
 static bool tx_notify_enabled;
 static char advertised_name[20];
+static const struct bt_le_conn_param stable_connection = {
+	.interval_min = 24, /* 30 ms */
+	.interval_max = 40, /* 50 ms */
+	.latency = 0,
+	.timeout = 3000, /* 30 seconds */
+};
 
 static const char *conn_addr_str(const struct bt_conn *conn, char *buf, size_t len)
 {
@@ -421,6 +427,10 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	tx_notify_enabled = false;
 	LOG_INF("EdgeZ BLE provisioning client connected peer=%s; no pairing required",
 		conn_addr_str(conn, addr, sizeof(addr)));
+	err = bt_conn_le_param_update(conn, &stable_connection);
+	if (err) {
+		LOG_WRN("Could not request stable BLE parameters: %d", err);
+	}
 }
 
 static void disconnected(struct bt_conn *conn, uint8_t reason)
@@ -445,9 +455,19 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	(void)k_work_reschedule(&restart_advertising_work, K_MSEC(500));
 }
 
+static void le_param_updated(struct bt_conn *conn, uint16_t interval,
+			     uint16_t latency, uint16_t timeout)
+{
+	ARG_UNUSED(conn);
+	LOG_INF("BLE link interval=%u.%02u ms latency=%u timeout=%u ms",
+		(interval * 125U) / 100U, (interval * 125U) % 100U,
+		latency, timeout * 10U);
+}
+
 BT_CONN_CB_DEFINE(conn_callbacks) = {
 	.connected = connected,
 	.disconnected = disconnected,
+	.le_param_updated = le_param_updated,
 };
 
 static void bt_ready_cb(int err)

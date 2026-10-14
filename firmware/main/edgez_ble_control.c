@@ -7,6 +7,7 @@
 #include "esp_app_desc.h"
 #include "esp_mac.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "host/ble_att.h"
@@ -77,14 +78,13 @@ static edgez_control_state_t control_state = {
     .beacon_interval_seconds = 30,
 };
 
-/* Keep the control link responsive enough for messages while allowing the
- * peripheral to skip most connection events when no data is pending. The
+/* Keep the control link responsive during concurrent HaLow traffic. The
  * Android central may clamp these values, so log the negotiated result. */
-static const struct ble_gap_upd_params low_power_connection = {
-    .itvl_min = 80,           /* 100 ms */
-    .itvl_max = 96,           /* 120 ms */
-    .latency = 4,             /* up to ~600 ms between attended events */
-    .supervision_timeout = 600, /* 6 seconds */
+static const struct ble_gap_upd_params stable_connection = {
+    .itvl_min = 24,             /* 30 ms */
+    .itvl_max = 40,             /* 50 ms */
+    .latency = 0,
+    .supervision_timeout = 3000, /* 30 seconds */
     .min_ce_len = 0,
     .max_ce_len = 0,
 };
@@ -226,6 +226,17 @@ static esp_err_t notify_packet(const ai_edgez_halow_NetworkPacket *packet)
 }
 
 #if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+#define EDGEZ_BLE_MESH_TX_QUEUE_DEPTH 4U
+
+typedef struct {
+    bool broadcast;
+    uint8_t destination[6];
+    size_t length;
+    uint8_t payload[EDGEZ_MAX_PACKET_SIZE];
+} edgez_ble_mesh_tx_item_t;
+
+static QueueHandle_t mesh_tx_queue;
+
 static bool is_public_channel(uint64_t destination)
 {
     return destination >= UINT64_C(38801) && destination <= UINT64_C(38809) &&
@@ -244,14 +255,45 @@ static esp_err_t relay_network_packet(const ai_edgez_halow_NetworkPacket *packet
                                       const uint8_t *payload,
                                       size_t length)
 {
-    uint8_t destination[6];
-    const bool broadcast = packet->to == 0 || is_public_channel(packet->to) ||
+    if (mesh_tx_queue == NULL || length > EDGEZ_MAX_PACKET_SIZE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    edgez_ble_mesh_tx_item_t item = {
+        .broadcast = packet->to == 0 || is_public_channel(packet->to) ||
         packet->which_body == ai_edgez_halow_NetworkPacket_beacon_tag ||
         packet->which_body == ai_edgez_halow_NetworkPacket_report_tag ||
-        packet->which_body == ai_edgez_halow_NetworkPacket_payload_tag;
-    if (!broadcast) node_id_to_mac(packet->to, destination);
-    return edgez_halow_mesh_packet_send(
-        broadcast ? NULL : destination, payload, length);
+        packet->which_body == ai_edgez_halow_NetworkPacket_payload_tag,
+        .length = length,
+    };
+    if (!item.broadcast) node_id_to_mac(packet->to, item.destination);
+    memcpy(item.payload, payload, length);
+
+    if (xQueueSend(mesh_tx_queue, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "BLE-to-mesh TX queue full; dropping %u-byte packet",
+                 (unsigned)length);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+
+static void mesh_tx_task(void *argument)
+{
+    (void)argument;
+    edgez_ble_mesh_tx_item_t item;
+    for (;;) {
+        if (xQueueReceive(mesh_tx_queue, &item, portMAX_DELAY) != pdTRUE) continue;
+        const esp_err_t err = edgez_halow_mesh_packet_send(
+            item.broadcast ? NULL : item.destination, item.payload, item.length);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Queued BLE-to-mesh TX failed: %s",
+                     esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "Queued BLE-to-mesh TX complete bytes=%u route=%s",
+                     (unsigned)item.length,
+                     item.broadcast ? "broadcast" : "unicast");
+        }
+    }
 }
 
 static esp_err_t broadcast_beacon(void)
@@ -713,9 +755,9 @@ static int gap_event(struct ble_gap_event *event, void *argument)
             rx_length = 0;
             xSemaphoreGive(state_lock);
             const int rc = ble_gap_update_params(event->connect.conn_handle,
-                                                 &low_power_connection);
+                                                 &stable_connection);
             if (rc != 0) {
-                ESP_LOGW(TAG, "Could not request low-power BLE parameters: %d", rc);
+                ESP_LOGW(TAG, "Could not request stable BLE parameters: %d", rc);
             }
             return 0;
         }
@@ -752,7 +794,7 @@ static int gap_event(struct ble_gap_event *event, void *argument)
                                          &description);
         if (event->conn_update.status == 0 && rc == 0) {
             ESP_LOGI(TAG,
-                     "BLE low-power link interval=%.2f ms latency=%u timeout=%u ms",
+                     "BLE link interval=%.2f ms latency=%u timeout=%u ms",
                      description.conn_itvl * 1.25,
                      description.conn_latency,
                      description.supervision_timeout * 10);
@@ -919,6 +961,20 @@ esp_err_t edgez_ble_control_start(void)
         state_lock = NULL;
         return ESP_ERR_NO_MEM;
     }
+
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    mesh_tx_queue = xQueueCreate(EDGEZ_BLE_MESH_TX_QUEUE_DEPTH,
+                                 sizeof(edgez_ble_mesh_tx_item_t));
+    if (mesh_tx_queue == NULL ||
+        xTaskCreate(mesh_tx_task, "edgez_ble_mesh_tx", 4096, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Could not start BLE-to-mesh TX worker");
+        if (mesh_tx_queue != NULL) {
+            vQueueDelete(mesh_tx_queue);
+            mesh_tx_queue = NULL;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+#endif
 
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
