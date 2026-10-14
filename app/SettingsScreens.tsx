@@ -1,11 +1,14 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { StatusBar } from "expo-status-bar";
-import React, { useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, Text, View } from "react-native";
+import React, { useEffect, useState } from "react";
+import { ActivityIndicator, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
 import { styles } from "./app-styles";
+import { ProfileBleDevicePicker, ProfileLocationPicker } from "./ProfileScreens";
+import type { LocationMode, SharedProfileSettings } from "./app-settings";
 import type { StoredProfile } from "./profile-store";
+import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
 
 export function BleDebugModal({
   visible,
@@ -65,6 +68,7 @@ export function BleDebugModal({
 export function SettingsPage({
   profiles,
   currentProfile,
+  sharedSettings,
   bleStatus,
   managerOpen,
   busy,
@@ -76,9 +80,11 @@ export function SettingsPage({
   onCreate,
   onEdit,
   onDelete,
+  onSaveSharedSettings,
 }: {
   profiles: StoredProfile[];
   currentProfile: StoredProfile;
+  sharedSettings: SharedProfileSettings;
   bleStatus: BleLinkStatus;
   managerOpen: boolean;
   busy: boolean;
@@ -90,8 +96,57 @@ export function SettingsPage({
   onCreate: () => void;
   onEdit: () => void;
   onDelete: () => void;
+  onSaveSharedSettings: (settings: SharedProfileSettings) => Promise<void>;
 }) {
   const [debugOpen, setDebugOpen] = useState(false);
+  const [locationPickerOpen, setLocationPickerOpen] = useState(false);
+  const [blePickerOpen, setBlePickerOpen] = useState(false);
+  const [identityName, setIdentityName] = useState(sharedSettings.identityName);
+  const [locationMode, setLocationMode] = useState<LocationMode>(sharedSettings.locationMode);
+  const [location, setLocation] = useState(sharedSettings.location);
+  const [bleDeviceId, setBleDeviceId] = useState(sharedSettings.bleDeviceId);
+  const [bleDeviceName, setBleDeviceName] = useState(sharedSettings.bleDeviceName);
+  const [savingSharedSettings, setSavingSharedSettings] = useState(false);
+  const [sharedSettingsError, setSharedSettingsError] = useState("");
+  const selectedChannel = channelsForCountry(currentProfile.country)
+    .find(({ number }) => number === currentProfile.halowChannel);
+
+  useEffect(() => {
+    setIdentityName(sharedSettings.identityName);
+    setLocationMode(sharedSettings.locationMode);
+    setLocation(sharedSettings.location);
+    setBleDeviceId(sharedSettings.bleDeviceId);
+    setBleDeviceName(sharedSettings.bleDeviceName);
+  }, [sharedSettings]);
+
+  const saveSharedSettings = async () => {
+    if (!identityName.trim()) {
+      setSharedSettingsError("Enter the name shown to other mesh users.");
+      return;
+    }
+    if (locationMode === "fixed" && !location) {
+      setSharedSettingsError("Choose the fixed location on the map.");
+      return;
+    }
+    setSavingSharedSettings(true);
+    setSharedSettingsError("");
+    try {
+      await onSaveSharedSettings({
+        identityName: identityName.trim(),
+        identityId: sharedSettings.identityId,
+        identityPrivateKey: sharedSettings.identityPrivateKey,
+        identityPublicKey: sharedSettings.identityPublicKey,
+        locationMode,
+        location,
+        bleDeviceId,
+        bleDeviceName,
+      });
+    } catch (caught) {
+      setSharedSettingsError(caught instanceof Error ? caught.message : "Could not save app settings.");
+    } finally {
+      setSavingSharedSettings(false);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.settingsPage}>
@@ -178,20 +233,95 @@ export function SettingsPage({
             </View>
             <Text style={styles.currentProfileName}>{currentProfile.name}</Text>
             <Text style={styles.settingsMuted}>
-              {currentProfile.country} · {currentProfile.halowChannel === 0 ? "Auto channel" : `Channel ${currentProfile.halowChannel}`}
+              {currentProfile.country} · {selectedChannel ? `${bandwidthForChannel(selectedChannel)} MHz · ${selectedChannel.frequencyMHz} MHz` : "Auto frequency"}
             </Text>
-            <Text style={styles.settingsMuted}>{currentProfile.location}</Text>
-            <Text style={styles.settingsMuted}>User: {currentProfile.identityName}</Text>
-            <Text style={styles.settingsMuted}>Identity: {currentProfile.identityId}</Text>
             <Text style={styles.settingsMuted}>Mesh ID: {currentProfile.meshId}</Text>
-            <Text style={styles.settingsMuted}>
-              BLE device: {currentProfile.bleDeviceName || currentProfile.bleDeviceId || "Not selected"}
-            </Text>
             <Pressable style={styles.manageProfilesButton} onPress={onManage} disabled={busy} accessibilityRole="button">
               <Text style={styles.settingsOutlineText}>MANAGE PROFILES</Text>
             </Pressable>
           </View>
         )}
+        {!managerOpen ? (
+          <>
+            <Text style={styles.settingsSectionLabel}>SHARED APP SETTINGS</Text>
+            <View style={styles.sharedSettingsCard}>
+              <Text style={styles.settingsFieldLabel}>USER NAME</Text>
+              <TextInput
+                style={styles.settingsInput}
+                value={identityName}
+                onChangeText={setIdentityName}
+                placeholder="Name shown to mesh peers"
+                placeholderTextColor="#718783"
+                maxLength={64}
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+              <Text style={styles.settingsFieldLabel}>IDENTITY ID</Text>
+              <View style={styles.settingsReadOnlyField}>
+                <Text style={styles.settingsReadOnlyText} selectable>{sharedSettings.identityId}</Text>
+              </View>
+              <Text style={styles.settingsFieldLabel}>LOCATION</Text>
+              <View style={styles.locationModeRow} accessibilityRole="radiogroup">
+                {(["off", "fixed", "live"] as const).map((mode) => (
+                  <Pressable
+                    key={mode}
+                    style={[styles.locationModeOption, locationMode === mode && styles.locationModeOptionSelected]}
+                    onPress={() => setLocationMode(mode)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: locationMode === mode }}
+                  >
+                    <Text style={[styles.locationModeText, locationMode === mode && styles.locationModeTextSelected]}>
+                      {mode === "off" ? "Off" : mode === "fixed" ? "Fixed" : "Live"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+              {locationMode === "fixed" ? (
+                <Pressable style={styles.settingsSelect} onPress={() => setLocationPickerOpen(true)} accessibilityRole="button">
+                  <Text style={location ? styles.settingsSelectText : styles.settingsSelectPlaceholder}>
+                    {location || "Choose on offline map"}
+                  </Text>
+                  <Ionicons name="location-outline" size={21} color="#0a8c87" />
+                </Pressable>
+              ) : locationMode === "live" ? (
+                <Text style={styles.settingsInlineHelp}>Uses the phone’s current location while the app is connected to the device.</Text>
+              ) : (
+                <Text style={styles.settingsInlineHelp}>Location is not included in mesh beacons.</Text>
+              )}
+              <Text style={styles.settingsFieldLabel}>BLE DEVICE</Text>
+              <Pressable style={styles.settingsSelect} onPress={() => setBlePickerOpen(true)} accessibilityRole="button">
+                <View style={styles.profileSelectedDeviceText}>
+                  <Text style={bleDeviceId ? styles.settingsSelectText : styles.settingsSelectPlaceholder}>
+                    {bleDeviceName || bleDeviceId || "Select nearby device"}
+                  </Text>
+                  {bleDeviceId ? <Text style={styles.profileSelectedDeviceId}>{bleDeviceId}</Text> : null}
+                </View>
+                <Ionicons name="bluetooth-outline" size={22} color="#0a8c87" />
+              </Pressable>
+              {bleDeviceId ? (
+                <Pressable
+                  style={styles.profileClearDeviceButton}
+                  onPress={() => { setBleDeviceId(""); setBleDeviceName(""); }}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.profileClearDeviceText}>REMOVE SELECTED DEVICE</Text>
+                </Pressable>
+              ) : null}
+              {sharedSettingsError ? <Text style={styles.settingsError}>{sharedSettingsError}</Text> : null}
+              <Pressable
+                style={[styles.settingsPrimaryButton, savingSharedSettings && styles.disabledButton]}
+                onPress={() => void saveSharedSettings()}
+                disabled={savingSharedSettings}
+                accessibilityRole="button"
+              >
+                {savingSharedSettings
+                  ? <ActivityIndicator color="white" />
+                  : <Text style={styles.settingsPrimaryText}>SAVE APP SETTINGS</Text>}
+              </Pressable>
+              <Text style={styles.settingsSharedHelp}>These settings apply to every profile on this phone.</Text>
+            </View>
+          </>
+        ) : null}
         {error ? <Text style={styles.settingsError}>{error}</Text> : null}
       </ScrollView>
       <BleDebugModal
@@ -199,6 +329,28 @@ export function SettingsPage({
         status={bleStatus}
         onClose={() => setDebugOpen(false)}
       />
+      <Modal visible={locationPickerOpen} animationType="slide" onRequestClose={() => setLocationPickerOpen(false)}>
+        <ProfileLocationPicker
+          location={location}
+          country={currentProfile.country}
+          subject="profile"
+          onCancel={() => setLocationPickerOpen(false)}
+          onSelect={(nextLocation) => { setLocation(nextLocation); setLocationPickerOpen(false); }}
+        />
+      </Modal>
+      {blePickerOpen ? (
+        <Modal visible animationType="slide" onRequestClose={() => setBlePickerOpen(false)}>
+          <ProfileBleDevicePicker
+            selectedDeviceId={bleDeviceId}
+            onCancel={() => setBlePickerOpen(false)}
+            onSelect={(device) => {
+              setBleDeviceId(device.id);
+              setBleDeviceName(device.name);
+              setBlePickerOpen(false);
+            }}
+          />
+        </Modal>
+      ) : null}
     </SafeAreaView>
   );
 }

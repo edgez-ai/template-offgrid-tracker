@@ -4,7 +4,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fromByteArray } from "base64-js";
 import type { EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
 import { StatusBar } from "expo-status-bar";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
@@ -31,6 +31,12 @@ import { ProvisioningFlow } from "./ProvisioningFlow";
 import { SettingsPage } from "./SettingsScreens";
 import { HomeMap } from "./HomeMap";
 import { normalizedDeviceSerial } from "./mesh-utils";
+import {
+  applySharedProfileSettings,
+  loadSharedProfileSettings,
+  saveSharedProfileSettings,
+} from "./app-settings";
+import type { SharedProfileSettings } from "./app-settings";
 
 const profileStorageKey = "offgrid-tracker.profile.v1";
 export default function App() {
@@ -39,6 +45,7 @@ export default function App() {
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
   const [profileMessages, setProfileMessages] = useState<StoredMessage[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
+  const [sharedSettings, setSharedSettings] = useState<SharedProfileSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileManagerOpen, setProfileManagerOpen] = useState(false);
   const [profileFormMode, setProfileFormMode] = useState<"create" | "edit" | null>(null);
@@ -55,6 +62,10 @@ export default function App() {
   const [meshLink, setMeshLink] = useState<{ session: EdgezMeshSession; state: EdgezMeshState } | null>(null);
   const persistedNodeFingerprint = useRef("");
   const persistedMessageFingerprint = useRef("");
+  const runtimeProfile = useMemo(
+    () => profile && sharedSettings ? applySharedProfileSettings(profile, sharedSettings) : profile,
+    [profile, sharedSettings],
+  );
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
@@ -84,11 +95,13 @@ export default function App() {
         availableProfiles = await listProfiles();
       }
       const currentProfile = await activeProfile();
+      const settings = await loadSharedProfileSettings(currentProfile ?? availableProfiles[0]);
       const [availableDevices, availableMessages] = currentProfile
         ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
         : [[], []];
       setProfiles(availableProfiles);
       setProfile(currentProfile);
+      setSharedSettings(settings);
       setProfileDevices(availableDevices);
       setProfileMessages(availableMessages);
     })()
@@ -174,6 +187,12 @@ export default function App() {
     setSettingsError("");
   };
 
+  const saveAppSettings = async (settings: SharedProfileSettings) => {
+    await saveSharedProfileSettings(settings);
+    setSharedSettings(settings);
+    setSettingsError("");
+  };
+
   const selectManagedProfile = async (selected: StoredProfile) => {
     setSettingsBusy(true);
     setSettingsError("");
@@ -254,26 +273,27 @@ export default function App() {
           <StatusBar style="light" />
           <ActivityIndicator color="#69cfc7" size="large" />
         </SafeAreaView>
-      ) : profile ? (
+      ) : runtimeProfile ? (
         <>
           {!provisioningOpen ? (
             <ActiveProfileBleLink
-              key={`${profile.id}:${profile.bleDeviceId}`}
-              profile={profile}
+              key={`${runtimeProfile.id}:${runtimeProfile.bleDeviceId}`}
+              profile={runtimeProfile}
+              locationMode={sharedSettings?.locationMode ?? "off"}
               onStatusChange={setBleStatus}
               onMeshChange={setMeshLink}
             />
           ) : null}
           <HomeMap
-            key={`${profile.id}:${profile.location}`}
-            profile={profile}
+            key={`${runtimeProfile.id}:${runtimeProfile.location}`}
+            profile={runtimeProfile}
             devices={profileDevices}
             messages={profileMessages}
             bleStatus={bleStatus}
             meshLink={meshLink}
             onAddDevice={() => setProvisioningOpen(true)}
             onRemoveDevice={requestRemoveDevice}
-            onMessagesChanged={async () => setProfileMessages(await listProfileMessages(profile.id))}
+            onMessagesChanged={async () => setProfileMessages(await listProfileMessages(runtimeProfile.id))}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
@@ -287,7 +307,8 @@ export default function App() {
           >
             {profileFormMode ? (
               <ProfileForm
-                initialProfile={profileFormMode === "edit" ? profile : undefined}
+                initialProfile={profileFormMode === "edit" ? runtimeProfile : undefined}
+                sharedSettings={sharedSettings ?? undefined}
                 required={false}
                 onCancel={() => setProfileFormMode(null)}
                 onSave={saveManagedProfile}
@@ -295,7 +316,17 @@ export default function App() {
             ) : (
               <SettingsPage
                 profiles={profiles}
-                currentProfile={profile}
+                currentProfile={runtimeProfile}
+                sharedSettings={sharedSettings ?? {
+                  identityName: runtimeProfile.identityName,
+                  identityId: runtimeProfile.identityId,
+                  identityPrivateKey: runtimeProfile.identityPrivateKey,
+                  identityPublicKey: runtimeProfile.identityPublicKey,
+                  location: runtimeProfile.location,
+                  locationMode: runtimeProfile.location ? "fixed" : "off",
+                  bleDeviceId: runtimeProfile.bleDeviceId,
+                  bleDeviceName: runtimeProfile.bleDeviceName,
+                }}
                 bleStatus={bleStatus}
                 managerOpen={profileManagerOpen}
                 busy={settingsBusy}
@@ -307,19 +338,20 @@ export default function App() {
                 onCreate={() => setProfileFormMode("create")}
                 onEdit={() => setProfileFormMode("edit")}
                 onDelete={requestDeleteProfile}
+                onSaveSharedSettings={saveAppSettings}
               />
             )}
           </Modal>
           <Modal visible={provisioningOpen} animationType="slide" onRequestClose={() => setProvisioningOpen(false)}>
             <ProvisioningFlow
-              profile={profile}
+              profile={runtimeProfile}
               onClose={() => setProvisioningOpen(false)}
-              onProvisioned={async () => setProfileDevices(await listProfileDevices(profile.id))}
+              onProvisioned={async () => setProfileDevices(await listProfileDevices(runtimeProfile.id))}
             />
           </Modal>
         </>
       ) : (
-        <ProfileForm required onSave={saveInitialProfile} />
+        <ProfileForm sharedSettings={sharedSettings ?? undefined} required onSave={saveInitialProfile} />
       )}
     </SafeAreaProvider>
   );

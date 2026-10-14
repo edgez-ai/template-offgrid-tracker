@@ -1,7 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { EdgezOrganicMap, edgezBleDeviceLabel, useEdgezMeshSession } from "@edgez/react-native-sdk";
 import type { EdgezBleDevice, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
-import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -11,6 +10,7 @@ import { bandwidthForChannel, bandwidthsForCountry, channelsForCountry, halowCou
 import { coordinatesFromLocation } from "./mesh-utils";
 import { createProfileIdentity } from "./profile-store";
 import type { ProfileDetails, StoredProfile } from "./profile-store";
+import type { SharedProfileSettings } from "./app-settings";
 
 type ProfileDraft = Omit<ProfileDetails, "halowChannel"> & { halowChannel: string; halowBandwidthMHz: string };
 
@@ -41,7 +41,7 @@ export function validProfileDetails(value: unknown): value is LegacyProfileDetai
     (profile.meshPassphrase.length === 0 || (profile.meshPassphrase.length >= 8 && profile.meshPassphrase.length <= 63));
 }
 
-function ProfileBleDevicePicker({
+export function ProfileBleDevicePicker({
   selectedDeviceId,
   onCancel,
   onSelect,
@@ -227,11 +227,13 @@ export function ProfileLocationPicker({
 
 export function ProfileForm({
   initialProfile,
+  sharedSettings,
   required,
   onCancel,
   onSave,
 }: {
   initialProfile?: ProfileDetails;
+  sharedSettings?: SharedProfileSettings;
   required: boolean;
   onCancel?: () => void;
   onSave: (profile: ProfileDetails) => Promise<void>;
@@ -239,7 +241,15 @@ export function ProfileForm({
   const creating = !initialProfile;
   const [draft, setDraft] = useState<ProfileDraft>(() => {
     if (!initialProfile) {
-      return { name: "", ...createProfileIdentity(), country: "US", location: "", halowChannel: "27", halowBandwidthMHz: "1", meshId: "", meshPassphrase: "", bleDeviceId: "", bleDeviceName: "" };
+      return {
+        name: "",
+        ...(sharedSettings ?? { ...createProfileIdentity(), location: "", bleDeviceId: "", bleDeviceName: "" }),
+        country: "US",
+        halowChannel: "27",
+        halowBandwidthMHz: "1",
+        meshId: "",
+        meshPassphrase: "",
+      };
     }
     const initialChannel = channelsForCountry(initialProfile.country)
       .find(({ number }) => number === initialProfile.halowChannel);
@@ -252,8 +262,6 @@ export function ProfileForm({
   const [meshIdEdited, setMeshIdEdited] = useState(Boolean(initialProfile));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [locationPickerOpen, setLocationPickerOpen] = useState(false);
-  const [blePickerOpen, setBlePickerOpen] = useState(false);
   const [openDropdown, setOpenDropdown] = useState<"country" | "bandwidth" | "channel" | null>(null);
   const [passphraseVisible, setPassphraseVisible] = useState(false);
   const set = (key: keyof ProfileDraft, value: string) => setDraft((current) => ({ ...current, [key]: value }));
@@ -267,13 +275,13 @@ export function ProfileForm({
   const save = async () => {
     const country = draft.country.trim().toUpperCase();
     const channel = Number(draft.halowChannel);
-    if (!draft.name.trim() || !draft.identityName.trim() || !draft.identityId.trim() || !coordinatesFromLocation(draft.location) ||
+    if (!draft.name.trim() ||
       !halowCountries.some(({ code }) => code === country) ||
       !bandwidthsForCountry(country).includes(selectedBandwidth) ||
       !draft.halowChannel.trim() || (channel !== 0 && !availableChannels.some(({ number }) => number === channel)) ||
       !draft.meshId.trim() || draft.meshId.trim().length > 32 ||
       (draft.meshPassphrase.length > 0 && (draft.meshPassphrase.length < 8 || draft.meshPassphrase.length > 63))) {
-      setError("Enter the required fields, choose a valid location and country, use Auto or an allowed HaLow channel, and leave the passphrase empty or use 8–63 characters.");
+      setError("Enter the required fields, choose a valid country, bandwidth and frequency, and leave the passphrase empty or use 8–63 characters.");
       return;
     }
     setSaving(true);
@@ -307,7 +315,7 @@ export function ProfileForm({
         <Text style={styles.profileEyebrow}>OFFGRID TRACKER</Text>
         <Text style={styles.profileTitle}>{required ? "Create your profile" : creating ? "Create profile" : "Edit profile"}</Text>
         <Text style={styles.profileDescription}>
-          This local profile contains the location and radio settings used when provisioning devices.
+          Configure the HaLow radio profile used by devices on this mesh.
         </Text>
         <Text style={styles.fieldLabel}>PROFILE NAME</Text>
         <TextInput
@@ -324,22 +332,6 @@ export function ProfileForm({
           autoCorrect={false}
           accessibilityLabel="Profile name"
         />
-        <Text style={styles.fieldLabel}>USER NAME</Text>
-        <TextInput
-          style={styles.profileInput}
-          value={draft.identityName}
-          onChangeText={(value) => set("identityName", value)}
-          placeholder="Name shown to mesh peers"
-          placeholderTextColor="#718a83"
-          maxLength={64}
-          autoCapitalize="words"
-          autoCorrect={false}
-          accessibilityLabel="Mesh user name"
-        />
-        <Text style={styles.fieldLabel}>IDENTITY ID</Text>
-        <View style={styles.identityField}>
-          <Text style={styles.identityValue} selectable>{draft.identityId}</Text>
-        </View>
         <Text style={styles.fieldLabel}>COUNTRY</Text>
         <Pressable
           style={styles.profileSelect}
@@ -373,16 +365,7 @@ export function ProfileForm({
             ))}
           </ScrollView>
         ) : null}
-        <Text style={styles.fieldLabel}>LOCATION</Text>
-        <Pressable
-          style={styles.profileSelect}
-          onPress={() => { setOpenDropdown(null); setLocationPickerOpen(true); }}
-          accessibilityRole="button"
-        >
-          <Text style={draft.location ? styles.profileSelectText : styles.profileSelectPlaceholder}>{draft.location || "Choose on offline map"}</Text>
-          <Text style={styles.profileSelectText}>⌖</Text>
-        </Pressable>
-        <Text style={styles.fieldLabel}>HALOW BANDWIDTH</Text>
+        <Text style={styles.fieldLabel}>BANDWIDTH</Text>
         <Pressable
           style={[styles.profileSelect, !draft.country && styles.disabledButton]}
           onPress={() => draft.country && setOpenDropdown((current) => current === "bandwidth" ? null : "bandwidth")}
@@ -415,7 +398,7 @@ export function ProfileForm({
             ))}
           </View>
         ) : null}
-        <Text style={styles.fieldLabel}>HALOW CHANNEL</Text>
+        <Text style={styles.fieldLabel}>FREQUENCY</Text>
         <Pressable
           style={[styles.profileSelect, !draft.country && styles.disabledButton]}
           onPress={() => draft.country && setOpenDropdown((current) => current === "channel" ? null : "channel")}
@@ -429,8 +412,8 @@ export function ProfileForm({
               : draft.halowChannel === "0"
                 ? "Auto"
                 : selectedChannel
-                  ? `Channel ${selectedChannel.number} · ${selectedChannel.frequencyMHz} MHz`
-                  : "Choose channel"}
+                  ? `${selectedChannel.frequencyMHz} MHz · Channel ${selectedChannel.number}`
+                  : "Choose frequency"}
           </Text>
           <Text style={styles.profileSelectText}>⌄</Text>
         </Pressable>
@@ -453,7 +436,7 @@ export function ProfileForm({
                 accessibilityState={{ selected: draft.halowChannel === String(channel.number) }}
               >
                 <Text style={[styles.profileOptionText, draft.halowChannel === String(channel.number) && styles.profileOptionTextSelected]}>
-                  Channel {channel.number} · {channel.frequencyMHz} MHz
+                  {channel.frequencyMHz} MHz · Channel {channel.number}
                 </Text>
               </Pressable>
             ))}
@@ -497,29 +480,6 @@ export function ProfileForm({
             <Ionicons name={passphraseVisible ? "eye-outline" : "eye-off-outline"} size={24} color="#8cb0ad" />
           </Pressable>
         </View>
-        <Text style={styles.fieldLabel}>BLE DEVICE</Text>
-        <Pressable
-          style={styles.profileSelect}
-          onPress={() => { setOpenDropdown(null); setBlePickerOpen(true); }}
-          accessibilityRole="button"
-        >
-          <View style={styles.profileSelectedDeviceText}>
-            <Text style={draft.bleDeviceId ? styles.profileSelectText : styles.profileSelectPlaceholder}>
-              {draft.bleDeviceName || draft.bleDeviceId || "Select nearby device (optional)"}
-            </Text>
-            {draft.bleDeviceId ? <Text style={styles.profileSelectedDeviceId}>{draft.bleDeviceId}</Text> : null}
-          </View>
-          <Ionicons name="bluetooth-outline" size={22} color="#8cb0ad" />
-        </Pressable>
-        {draft.bleDeviceId ? (
-          <Pressable
-            style={styles.profileClearDeviceButton}
-            onPress={() => setDraft((current) => ({ ...current, bleDeviceId: "", bleDeviceName: "" }))}
-            accessibilityRole="button"
-          >
-            <Text style={styles.profileClearDeviceText}>REMOVE SELECTED DEVICE</Text>
-          </Pressable>
-        ) : null}
         {error ? <Text style={styles.profileError}>{error}</Text> : null}
         <Pressable
           style={[styles.profileSaveButton, saving && styles.disabledButton]}
@@ -535,26 +495,6 @@ export function ProfileForm({
           </Pressable>
         ) : null}
       </ScrollView>
-      <Modal visible={locationPickerOpen} animationType="slide" onRequestClose={() => setLocationPickerOpen(false)}>
-        <ProfileLocationPicker
-          location={draft.location}
-          country={draft.country}
-          onCancel={() => setLocationPickerOpen(false)}
-          onSelect={(location) => { set("location", location); setLocationPickerOpen(false); }}
-        />
-      </Modal>
-      {blePickerOpen ? (
-        <Modal visible animationType="slide" onRequestClose={() => setBlePickerOpen(false)}>
-          <ProfileBleDevicePicker
-            selectedDeviceId={draft.bleDeviceId}
-            onCancel={() => setBlePickerOpen(false)}
-            onSelect={(device) => {
-              setDraft((current) => ({ ...current, bleDeviceId: device.id, bleDeviceName: device.name }));
-              setBlePickerOpen(false);
-            }}
-          />
-        </Modal>
-      ) : null}
     </SafeAreaView>
   );
 }

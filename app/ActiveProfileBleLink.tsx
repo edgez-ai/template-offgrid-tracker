@@ -1,10 +1,32 @@
 import { useEdgezMeshSession } from "@edgez/react-native-sdk";
-import type { EdgezMeshNode, EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
+import type { EdgezMeshConfig, EdgezMeshNode, EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
+import * as Location from "expo-location";
 import React, { useEffect, useRef, useState } from "react";
 import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
 import { coordinatesFromLocation, messagesByNode, storedDeviceNode } from "./mesh-utils";
 import { listProfileDevices, listProfileMessages, profileIdentity } from "./profile-store";
 import type { StoredProfile } from "./profile-store";
+import type { LocationMode } from "./app-settings";
+
+type BeaconLocation = { latitude: number; longitude: number };
+
+function meshConfig(profile: StoredProfile, location?: BeaconLocation): EdgezMeshConfig {
+  const channel = channelsForCountry(profile.country).find(({ number }) => number === profile.halowChannel);
+  return {
+    identity: profileIdentity(profile),
+    countryCode: profile.country,
+    meshId: profile.meshId,
+    passphrase: profile.meshPassphrase,
+    meshBandwidthMhz: channel ? bandwidthForChannel(channel) : 0,
+    meshFrequencyKhz: channel ? Math.round(channel.frequencyMHz * 1000) : 0,
+    beacon: {
+      shareLocation: Boolean(location),
+      latitude: location?.latitude,
+      longitude: location?.longitude,
+      locationTimestampMs: location ? Date.now() : undefined,
+    },
+  };
+}
 
 export type BleLinkStatus = {
   phase: "not-selected" | "preparing" | "disconnected" | "connecting" | "connected" | "ready" | "error";
@@ -16,10 +38,12 @@ export type BleLinkStatus = {
 
 export function ActiveProfileBleLink({
   profile,
+  locationMode,
   onStatusChange,
   onMeshChange,
 }: {
   profile: StoredProfile;
+  locationMode: LocationMode;
   onStatusChange: (status: BleLinkStatus) => void;
   onMeshChange: (value: { session: EdgezMeshSession; state: EdgezMeshState }) => void;
 }) {
@@ -27,6 +51,7 @@ export function ActiveProfileBleLink({
   const retryDelayMs = useRef(500);
   const [configured, setConfigured] = useState(false);
   const [setupError, setSetupError] = useState("");
+  const [liveLocationError, setLiveLocationError] = useState("");
   const [session, state] = useEdgezMeshSession({
     onIncomingMessage: (message, sender) => {
       void sessionRef.current?.sdk.showIncomingMessageNotification(message, sender).catch(() => undefined);
@@ -40,6 +65,7 @@ export function ActiveProfileBleLink({
     let cancelled = false;
     setConfigured(false);
     setSetupError("");
+    setLiveLocationError("");
     void (async () => {
       if (!profile.bleDeviceId) return;
       const [storedMessages, storedDevices] = await Promise.all([
@@ -55,17 +81,17 @@ export function ActiveProfileBleLink({
         ...(cachedNodes.size ? { nodes: cachedNodes } : {}),
         ...(storedMessages.length ? { conversations: messagesByNode(storedMessages) } : {}),
       });
-      const channel = channelsForCountry(profile.country).find(({ number }) => number === profile.halowChannel);
-      const coordinates = coordinatesFromLocation(profile.location);
-      await session.initializeMesh({
-        identity: profileIdentity(profile),
-        countryCode: profile.country,
-        meshId: profile.meshId,
-        passphrase: profile.meshPassphrase,
-        meshBandwidthMhz: channel ? bandwidthForChannel(channel) : 0,
-        meshFrequencyKhz: channel ? Math.round(channel.frequencyMHz * 1000) : 0,
-        beacon: { shareLocation: Boolean(coordinates), latitude: coordinates?.latitude, longitude: coordinates?.longitude },
-      });
+      let coordinates = locationMode === "fixed" ? coordinatesFromLocation(profile.location) ?? undefined : undefined;
+      if (locationMode === "live") {
+        const permission = await Location.requestForegroundPermissionsAsync();
+        if (permission.status === "granted") {
+          const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+          coordinates = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        } else {
+          setLiveLocationError("Phone location permission is required for Live mode");
+        }
+      }
+      await session.initializeMesh(meshConfig(profile, coordinates));
       await session.sdk.requestNotificationPermission().catch(() => false);
       if (!cancelled) setConfigured(true);
     })().catch((caught) => {
@@ -78,7 +104,39 @@ export function ActiveProfileBleLink({
       cancelled = true;
       void session.disconnect().catch(() => undefined);
     };
-  }, [profile, session]);
+  }, [locationMode, profile, session]);
+
+  useEffect(() => {
+    if (locationMode !== "live" || !configured || !state.bleReady || !profile.bleDeviceId) return;
+    let cancelled = false;
+    let subscription: Location.LocationSubscription | undefined;
+    void (async () => {
+      const permission = await Location.requestForegroundPermissionsAsync();
+      if (permission.status !== "granted") {
+        if (!cancelled) setLiveLocationError("Phone location permission is required for Live mode");
+        return;
+      }
+      subscription = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.Balanced, timeInterval: 15_000, distanceInterval: 10 },
+        (position) => {
+          if (cancelled) return;
+          setLiveLocationError("");
+          void session.initializeMesh(meshConfig(profile, {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          })).catch((caught) => {
+            if (!cancelled) setLiveLocationError(caught instanceof Error ? caught.message : "Could not update the live beacon location");
+          });
+        },
+      );
+    })().catch((caught) => {
+      if (!cancelled) setLiveLocationError(caught instanceof Error ? caught.message : "Could not watch the phone location");
+    });
+    return () => {
+      cancelled = true;
+      subscription?.remove();
+    };
+  }, [configured, locationMode, profile, session, state.bleReady]);
 
   useEffect(() => {
     if (state.connection !== "none") {
@@ -103,6 +161,7 @@ export function ActiveProfileBleLink({
       `Control channel: ${state.bleReady ? "ready" : "not ready"}`,
       `Connecting: ${state.bleConnecting ? "yes" : "no"}`,
       `Session: ${state.statusLine}`,
+      `Location: ${locationMode === "off" ? "off" : locationMode === "fixed" ? "fixed" : liveLocationError || "live phone updates"}`,
       ...(state.status ? [
         `Firmware: ${state.status.firmwareVersion || "unknown"}`,
         `License: ${state.status.licenseStatus}`,
@@ -121,7 +180,7 @@ export function ActiveProfileBleLink({
     else if (state.connection === "ble") onStatusChange({ phase: "connected", label: "BLE connected", ...liveStatus });
     else if (state.bleConnecting) onStatusChange({ phase: "connecting", label: "Connecting to BLE device", ...liveStatus });
     else onStatusChange({ phase: "disconnected", label: "BLE disconnected · retrying", ...liveStatus });
-  }, [configured, onStatusChange, profile.bleDeviceId, profile.bleDeviceName, setupError, state.bleConnecting, state.bleReady, state.connection, state.status, state.statusLine]);
+  }, [configured, liveLocationError, locationMode, onStatusChange, profile.bleDeviceId, profile.bleDeviceName, setupError, state.bleConnecting, state.bleReady, state.connection, state.status, state.statusLine]);
 
   return null;
 }
