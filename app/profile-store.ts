@@ -1,6 +1,7 @@
 import * as SQLite from "expo-sqlite";
 import { EdgezIdentityStore } from "@edgez/react-native-sdk";
 import type { EdgezUserIdentity } from "@edgez/react-native-sdk";
+import type { EdgezConversationMessage } from "@edgez/react-native-sdk";
 import { fromByteArray, toByteArray } from "base64-js";
 
 const identityFactory = new EdgezIdentityStore();
@@ -35,12 +36,30 @@ export type DeviceDetails = {
   locationSource: "none" | "current" | "map" | "gps";
   latitude: number | null;
   longitude: number | null;
+  deviceType: string;
+  userUuid: string;
+  lastSeenAt: string;
+  meshMacAddress: string;
+  userPublicKey: string;
 };
 
 export type StoredDevice = DeviceDetails & {
   id: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type StoredMessage = {
+  profileId: string;
+  messageUuid: string;
+  peerSerial: string;
+  text: string;
+  mine: boolean;
+  timestampMs: number;
+  status: string;
+  voiceBytes: Uint8Array;
+  voiceCodec: number;
+  durationMs: number;
 };
 
 type ProfileRow = {
@@ -71,8 +90,26 @@ type DeviceRow = {
   location_source: DeviceDetails["locationSource"];
   latitude: number | null;
   longitude: number | null;
+  device_type: string;
+  user_uuid: string;
+  last_seen_at: string;
+  mesh_mac_address: string;
+  user_public_key: string;
   created_at: string;
   updated_at: string;
+};
+
+type MessageRow = {
+  profile_id: string;
+  message_uuid: string;
+  peer_serial: string;
+  text: string;
+  mine: number;
+  timestamp_ms: number;
+  status: string;
+  voice_bytes: string;
+  voice_codec: number;
+  duration_ms: number;
 };
 
 const databaseName = "offgrid-tracker.db";
@@ -134,8 +171,28 @@ function deviceFromRow(row: DeviceRow): StoredDevice {
     locationSource: row.location_source,
     latitude: row.latitude,
     longitude: row.longitude,
+    deviceType: row.device_type,
+    userUuid: row.user_uuid,
+    lastSeenAt: row.last_seen_at,
+    meshMacAddress: row.mesh_mac_address,
+    userPublicKey: row.user_public_key,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function messageFromRow(row: MessageRow): StoredMessage {
+  return {
+    profileId: row.profile_id,
+    messageUuid: row.message_uuid,
+    peerSerial: row.peer_serial,
+    text: row.text,
+    mine: Boolean(row.mine),
+    timestampMs: row.timestamp_ms,
+    status: row.status,
+    voiceBytes: row.voice_bytes ? toByteArray(row.voice_bytes) : new Uint8Array(),
+    voiceCodec: row.voice_codec,
+    durationMs: row.duration_ms,
   };
 }
 
@@ -198,12 +255,33 @@ async function database() {
           location_source TEXT NOT NULL CHECK (location_source IN ('none', 'current', 'map', 'gps')),
           latitude REAL,
           longitude REAL,
+          device_type TEXT NOT NULL DEFAULT 'Unspecified',
+          user_uuid TEXT NOT NULL DEFAULT '',
+          last_seen_at TEXT NOT NULL DEFAULT '',
+          mesh_mac_address TEXT NOT NULL DEFAULT '',
+          user_public_key TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
           UNIQUE (profile_id, serial),
           FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS devices_profile_id_idx ON devices(profile_id);
+        CREATE TABLE IF NOT EXISTS messages (
+          profile_id TEXT NOT NULL,
+          message_uuid TEXT NOT NULL,
+          peer_serial TEXT NOT NULL,
+          text TEXT NOT NULL,
+          mine INTEGER NOT NULL CHECK (mine IN (0, 1)),
+          timestamp_ms INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT '',
+          voice_bytes TEXT NOT NULL DEFAULT '',
+          voice_codec INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (profile_id, message_uuid),
+          FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS messages_profile_peer_time_idx
+          ON messages(profile_id, peer_serial, timestamp_ms);
       `);
       const profileColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(profiles)");
       const profileColumnNames = new Set(profileColumns.map(({ name }) => name));
@@ -225,6 +303,24 @@ async function database() {
       if (!profileColumnNames.has("ble_device_name")) {
         await db.execAsync("ALTER TABLE profiles ADD COLUMN ble_device_name TEXT NOT NULL DEFAULT ''");
       }
+      const deviceColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(devices)");
+      const deviceColumnNames = new Set(deviceColumns.map(({ name }) => name));
+      if (!deviceColumnNames.has("device_type")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Unspecified'");
+      }
+      if (!deviceColumnNames.has("user_uuid")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN user_uuid TEXT NOT NULL DEFAULT ''");
+      }
+      if (!deviceColumnNames.has("last_seen_at")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN last_seen_at TEXT NOT NULL DEFAULT ''");
+      }
+      if (!deviceColumnNames.has("mesh_mac_address")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN mesh_mac_address TEXT NOT NULL DEFAULT ''");
+        await db.execAsync("UPDATE devices SET mesh_mac_address = serial WHERE mesh_mac_address = ''");
+      }
+      if (!deviceColumnNames.has("user_public_key")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN user_public_key TEXT NOT NULL DEFAULT ''");
+      }
       const profilesWithoutIdentity = await db.getAllAsync<{ id: string; name: string }>(
         "SELECT id, name FROM profiles WHERE identity_id = '' OR identity_private_key = '' OR identity_public_key = ''",
       );
@@ -239,7 +335,7 @@ async function database() {
           profile.id,
         );
       }
-      await db.execAsync("PRAGMA user_version = 4");
+      await db.execAsync("PRAGMA user_version = 6");
       return db;
     });
   }
@@ -353,6 +449,79 @@ export async function listProfileDevices(profileId: string): Promise<StoredDevic
   return rows.map(deviceFromRow);
 }
 
+export async function listProfileMessages(profileId: string): Promise<StoredMessage[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<MessageRow>(
+    "SELECT * FROM messages WHERE profile_id = ? ORDER BY timestamp_ms ASC",
+    profileId,
+  );
+  return rows.map(messageFromRow);
+}
+
+export async function replaceProfileConversation(
+  profileId: string,
+  peerSerial: string,
+  messages: ReadonlyArray<EdgezConversationMessage>,
+): Promise<void> {
+  const db = await database();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      "DELETE FROM messages WHERE profile_id = ? AND peer_serial = ?",
+      profileId,
+      peerSerial,
+    );
+    for (const message of messages) {
+      await db.runAsync(
+        `INSERT INTO messages
+          (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        profileId,
+        message.messageUuid,
+        peerSerial,
+        message.text,
+        message.mine ? 1 : 0,
+        message.timestampMs,
+        message.status,
+        message.voiceBytes.length ? fromByteArray(message.voiceBytes) : "",
+        message.voiceCodec,
+        message.durationMs,
+      );
+    }
+  });
+}
+
+export async function saveProfileMessage(
+  profileId: string,
+  peerSerial: string,
+  message: EdgezConversationMessage,
+): Promise<void> {
+  const db = await database();
+  await db.runAsync(
+    `INSERT INTO messages
+      (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(profile_id, message_uuid) DO UPDATE SET
+       peer_serial = excluded.peer_serial,
+       text = excluded.text,
+       mine = excluded.mine,
+       timestamp_ms = excluded.timestamp_ms,
+       status = excluded.status,
+       voice_bytes = excluded.voice_bytes,
+       voice_codec = excluded.voice_codec,
+       duration_ms = excluded.duration_ms`,
+    profileId,
+    message.messageUuid,
+    peerSerial,
+    message.text,
+    message.mine ? 1 : 0,
+    message.timestampMs,
+    message.status,
+    message.voiceBytes.length ? fromByteArray(message.voiceBytes) : "",
+    message.voiceCodec,
+    message.durationMs,
+  );
+}
+
 export async function deleteProfileDevice(profileId: string, deviceId: string): Promise<void> {
   const db = await database();
   await db.runAsync("DELETE FROM devices WHERE profile_id = ? AND id = ?", profileId, deviceId);
@@ -376,7 +545,8 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
   if (existing) {
     await db.runAsync(
       `UPDATE devices
-       SET serial = ?, name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?, updated_at = ?
+       SET serial = ?, name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?,
+           device_type = ?, user_uuid = ?, last_seen_at = ?, mesh_mac_address = ?, user_public_key = ?, updated_at = ?
        WHERE id = ?`,
       details.serial,
       details.name,
@@ -385,6 +555,11 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
       details.locationSource,
       details.latitude,
       details.longitude,
+      details.deviceType,
+      details.userUuid,
+      details.lastSeenAt,
+      details.meshMacAddress,
+      details.userPublicKey,
       now,
       existing.id,
     );
@@ -393,8 +568,8 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
   const id = deviceId ?? localUuid();
   await db.runAsync(
     `INSERT INTO devices
-      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, device_type, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     details.profileId,
     details.serial,
@@ -404,6 +579,11 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
     details.locationSource,
     details.latitude,
     details.longitude,
+    details.deviceType,
+    details.userUuid,
+    details.lastSeenAt,
+    details.meshMacAddress,
+    details.userPublicKey,
     now,
     now,
   );

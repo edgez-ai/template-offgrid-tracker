@@ -1,8 +1,9 @@
 import "react-native-get-random-values";
-import { EdgezOrganicMap, EdgezProvisioningManager, edgezBleDeviceLabel, edgezNodeDisplayName, edgezNodeId, edgezNodeOpensConversation, isEdgezPublicChannel, useEdgezMeshSession } from "@edgez/react-native-sdk";
+import { EdgezOrganicMap, EdgezProvisioningManager, Interface, Mime, Operation, edgezBleDeviceLabel, edgezNodeDisplayName, edgezNodeId, edgezNodeOpensConversation, encodeNetworkPacket, isEdgezPublicChannel, useEdgezMeshSession } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { fromByteArray, toByteArray } from "base64-js";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import type { EdgezBleDevice, EdgezMapDownloadUpdate, EdgezMeshNode, EdgezMeshSession, EdgezMeshState, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
+import type { EdgezBleDevice, EdgezConversationMessage, EdgezMapDownloadUpdate, EdgezMeshNode, EdgezMeshSession, EdgezMeshState, EdgezOrganicMapRef, EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
@@ -17,14 +18,17 @@ import {
   deleteProfile,
   initializeProfileStore,
   listProfileDevices,
+  listProfileMessages,
   listProfiles,
   profileDeviceUuid,
   profileIdentity,
   saveProfileDevice,
+  saveProfileMessage,
+  replaceProfileConversation,
   setActiveProfile,
   updateProfile,
 } from "./profile-store";
-import type { ProfileDetails, StoredDevice, StoredProfile } from "./profile-store";
+import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile } from "./profile-store";
 
 type ProfileDraft = Omit<ProfileDetails, "halowChannel"> & { halowChannel: string; halowBandwidthMHz: string };
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -58,6 +62,68 @@ function coordinatesFromLocation(location: string) {
 
 function normalizedDeviceSerial(value: string) {
   return value.replace(/[^0-9a-f]/gi, "").toUpperCase();
+}
+
+function nodeNumFromSerial(value: string): bigint | null {
+  const normalized = normalizedDeviceSerial(value);
+  return normalized.length === 12 ? BigInt(`0x${normalized}`) : null;
+}
+
+function storedDeviceNode(device: StoredDevice): EdgezMeshNode | null {
+  const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
+  if (nodeNum === null || !device.userPublicKey) return null;
+  const publicKey = toByteArray(device.userPublicKey);
+  if (publicKey.length !== 32) return null;
+  return {
+    nodeNum,
+    userUuid: device.userUuid,
+    displayName: device.name,
+    route: "CACHED",
+    lastSeenMs: Date.parse(device.lastSeenAt) || 0,
+    marker: "default",
+    publicKey,
+    latitude: device.latitude ?? undefined,
+    longitude: device.longitude ?? undefined,
+    deviceType: device.deviceType,
+    geoFenceName: "",
+    geoIndex: 0,
+    sleeping: false,
+    enabled: true,
+  };
+}
+
+function localMessageId() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return {
+    uuid,
+    high: BigInt(`0x${hex.slice(0, 16)}`),
+    low: BigInt(`0x${hex.slice(16)}`),
+  };
+}
+
+function messagesByNode(messages: ReadonlyArray<StoredMessage>) {
+  const conversations = new Map<bigint, EdgezConversationMessage[]>();
+  for (const message of messages) {
+    const nodeNum = nodeNumFromSerial(message.peerSerial);
+    if (nodeNum === null) continue;
+    conversations.set(nodeNum, [...conversations.get(nodeNum) ?? [], {
+      nodeNum,
+      text: message.text,
+      mine: message.mine,
+      timestampMs: message.timestampMs,
+      messageUuid: message.messageUuid,
+      status: message.status,
+      voiceBytes: message.voiceBytes,
+      voiceCodec: message.voiceCodec,
+      durationMs: message.durationMs,
+    }]);
+  }
+  return conversations;
 }
 
 type BleLinkStatus = {
@@ -98,6 +164,20 @@ function ActiveProfileBleLink({
     setSetupError("");
     void (async () => {
       if (!profile.bleDeviceId) return;
+      const [storedMessages, storedDevices] = await Promise.all([
+        listProfileMessages(profile.id),
+        listProfileDevices(profile.id),
+      ]);
+      const cachedNodes = new Map<bigint, EdgezMeshNode>();
+      for (const device of storedDevices) {
+        const node = storedDeviceNode(device);
+        if (node) cachedNodes.set(node.nodeNum, node);
+      }
+      if (storedMessages.length) {
+        session.restoreCachedMeshData({ nodes: cachedNodes, conversations: messagesByNode(storedMessages) });
+      } else if (cachedNodes.size) {
+        session.restoreCachedMeshData({ nodes: cachedNodes });
+      }
       const channel = channelsForCountry(profile.country).find(({ number }) => number === profile.halowChannel);
       const coordinates = coordinatesFromLocation(profile.location);
       await session.initializeMesh({
@@ -921,6 +1001,11 @@ function ProvisioningFlow({
         locationSource: deviceLocationChoice,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
+        deviceType: "Unspecified",
+        userUuid: "",
+        lastSeenAt: "",
+        meshMacAddress: selectedDevice.serial,
+        userPublicKey: "",
       }, deviceId);
       await onProvisioned();
       await provisioningManager.disconnect(selectedDevice);
@@ -1253,30 +1338,110 @@ function SettingsPage({
 
 function MeshMessages({
   visible,
+  profileId,
   session,
   meshState,
+  devices,
+  messages,
+  initialPeerSerial,
+  onMessagesChanged,
   onClose,
 }: {
   visible: boolean;
+  profileId: string;
   session: EdgezMeshSession | null;
   meshState: EdgezMeshState | null;
+  devices: StoredDevice[];
+  messages: StoredMessage[];
+  initialPeerSerial: string | null;
+  onMessagesChanged: () => Promise<void>;
   onClose: () => void;
 }) {
-  const peers = [...(meshState?.nodes.values() ?? [])].filter(edgezNodeOpensConversation);
-  const [selectedNode, setSelectedNode] = useState<bigint | null>(null);
+  const userDevices = devices.filter((device) => {
+    const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
+    const liveNode = nodeNum === null ? undefined : meshState?.nodes.get(nodeNum);
+    if (liveNode) return edgezNodeOpensConversation(liveNode);
+    const type = device.deviceType.trim().toLowerCase();
+    return !type || type === "unspecified" || type === "user" || type === "device_type_user";
+  });
+  const channelPeers = [...(meshState?.nodes.values() ?? [])]
+      .filter((node) => isEdgezPublicChannel(node.nodeNum) && node.enabled !== false)
+      .map((node) => ({
+        id: `channel-${node.nodeNum}`,
+        name: edgezNodeDisplayName(node),
+        serial: edgezNodeId(node.nodeNum).toUpperCase(),
+        nodeNum: node.nodeNum,
+        publicChannel: true,
+      }));
+  const userPeers = userDevices.map((device) => ({
+      id: device.id,
+      name: device.name,
+      serial: device.meshMacAddress || device.serial,
+      nodeNum: nodeNumFromSerial(device.meshMacAddress || device.serial),
+      publicChannel: false,
+    }));
+  const peers = [...channelPeers, ...userPeers];
+  const [selectedPeerSerial, setSelectedPeerSerial] = useState<string | null>(null);
+  const [channelsOpen, setChannelsOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const selected = peers.find(({ nodeNum }) => nodeNum === selectedNode) ?? peers[0] ?? null;
-  const conversation = selected ? meshState?.conversations.get(selected.nodeNum) ?? [] : [];
+  const selectedPeer = selectedPeerSerial
+    ? peers.find((peer) => normalizedDeviceSerial(peer.serial) === normalizedDeviceSerial(selectedPeerSerial)) ?? null
+    : null;
+  const selectedNodeNum = selectedPeer?.nodeNum ?? null;
+  const selectedNode = selectedNodeNum === null ? null : meshState?.nodes.get(selectedNodeNum) ?? null;
+  const conversation = selectedPeer
+    ? messages.filter((item) => normalizedDeviceSerial(item.peerSerial) === normalizedDeviceSerial(selectedPeer.serial))
+    : [];
+
+  useEffect(() => {
+    if (visible) setSelectedPeerSerial(initialPeerSerial);
+  }, [initialPeerSerial, visible]);
 
   const send = async () => {
     const text = message.trim();
-    if (!session || !selected || !text || sending) return;
+    if (!session || !selectedNode || !selectedPeer || !text || sending) return;
     setSending(true);
     setError("");
     try {
-      await session.sendTextMessage(selected.nodeNum, text);
+      if (selectedPeer.publicChannel) {
+        const from = meshState?.status?.macAddress;
+        if (!from) throw new Error("Local HaLow address is not ready.");
+        const id = localMessageId();
+        const packet = encodeNetworkPacket({
+          from,
+          to: selectedNode.nodeNum,
+          operation: Operation.request,
+          interface: Interface.halow,
+          msg: {
+            messageIdHigh: id.high,
+            messageIdLow: id.low,
+            sequence: 1,
+            mime: Mime.text,
+            payload: new TextEncoder().encode(text),
+          },
+        });
+        await session.sdk.transport.invoke("sendPacket", {
+          label: `Public channel message to ${selectedPeer.name}`,
+          packet: Array.from(packet),
+          waitForDrainMs: 3000,
+        });
+        await saveProfileMessage(profileId, selectedPeer.serial, {
+          nodeNum: selectedNode.nodeNum,
+          text,
+          mine: true,
+          timestampMs: Date.now(),
+          messageUuid: id.uuid,
+          status: "Sent",
+          voiceBytes: new Uint8Array(),
+          voiceCodec: 0,
+          durationMs: 0,
+        });
+        await onMessagesChanged();
+      } else {
+        await session.sendTextMessage(selectedNode.nodeNum, text);
+      }
       setMessage("");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not send the mesh message.");
@@ -1285,13 +1450,39 @@ function MeshMessages({
     }
   };
 
+  const conversationRow = (peer: (typeof peers)[number]) => {
+    const peerMessages = messages.filter((item) =>
+      normalizedDeviceSerial(item.peerSerial) === normalizedDeviceSerial(peer.serial));
+    const latest = peerMessages[peerMessages.length - 1];
+    return (
+      <Pressable
+        key={peer.id}
+        style={styles.messageConversationRow}
+        onPress={() => setSelectedPeerSerial(peer.serial)}
+        accessibilityRole="button"
+      >
+        <View style={styles.messageConversationIcon}>
+          <Ionicons name={peer.publicChannel ? "people-outline" : "person-outline"} size={20} color="#0a8c87" />
+        </View>
+        <View style={styles.messageConversationBody}>
+          <Text style={styles.messagePeerName}>{peer.name}</Text>
+          <Text style={styles.messagePreview} numberOfLines={1}>{latest?.text || (peer.publicChannel ? "Send to everyone on this channel" : "Start a mesh conversation")}</Text>
+        </View>
+        <View style={styles.messageConversationMeta}>
+          <Text style={styles.messageTime}>{latest ? new Date(latest.timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}</Text>
+          <Ionicons name="chevron-forward" size={17} color="#718783" />
+        </View>
+      </Pressable>
+    );
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.messagesPage}>
         <View style={styles.settingsHeader}>
           <View>
             <Text style={styles.settingsEyebrow}>OFFGRID MESSAGES</Text>
-            <Text style={styles.settingsTitle}>Mesh messages</Text>
+            <Text style={styles.settingsTitle}>{selectedPeer ? selectedPeer.name : "Messages"}</Text>
           </View>
           <Pressable onPress={onClose} accessibilityRole="button">
             <Text style={styles.settingsClose}>CLOSE</Text>
@@ -1303,27 +1494,41 @@ function MeshMessages({
               <Text style={styles.messageEmptyTitle}>Waiting for another profile</Text>
               <Text style={styles.settingsMuted}>Peers appear here after their periodic beacon reaches this device over BATMAN.</Text>
             </View>
+          ) : !selectedPeer ? (
+            <>
+              <Pressable
+                style={styles.messageSectionHeader}
+                onPress={() => setChannelsOpen((open) => !open)}
+                accessibilityRole="button"
+                accessibilityState={{ expanded: channelsOpen }}
+              >
+                <View>
+                  <Text style={styles.messageSectionTitle}>Channels</Text>
+                  <Text style={styles.messageSectionCount}>{channelPeers.length} public channels</Text>
+                </View>
+                <Ionicons name={channelsOpen ? "chevron-up" : "chevron-down"} size={20} color="#0a8c87" />
+              </Pressable>
+              {channelsOpen ? <View style={styles.messageConversationList}>{channelPeers.map(conversationRow)}</View> : null}
+              {userPeers.length ? (
+                <>
+                  <Text style={styles.settingsSectionLabel}>PEOPLE</Text>
+                  <View style={styles.messageConversationList}>{userPeers.map(conversationRow)}</View>
+                </>
+              ) : null}
+            </>
           ) : (
             <>
-              <Text style={styles.settingsSectionLabel}>RECIPIENT</Text>
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.messagePeerList}>
-                {peers.map((peer) => (
-                  <Pressable
-                    key={peer.nodeNum.toString()}
-                    style={[styles.messagePeer, selected?.nodeNum === peer.nodeNum && styles.messagePeerSelected]}
-                    onPress={() => setSelectedNode(peer.nodeNum)}
-                    accessibilityRole="button"
-                  >
-                    <Text style={[styles.messagePeerName, selected?.nodeNum === peer.nodeNum && styles.messagePeerNameSelected]}>{edgezNodeDisplayName(peer)}</Text>
-                    <Text style={styles.messagePeerId}>{peer.nodeNum.toString(16).padStart(12, "0").toUpperCase()}</Text>
-                  </Pressable>
-                ))}
-              </ScrollView>
+              <Pressable style={styles.messageBackButton} onPress={() => setSelectedPeerSerial(null)} accessibilityRole="button">
+                <Ionicons name="chevron-back" size={18} color="#0a8c87" />
+                <Text style={styles.settingsOutlineText}>ALL CONVERSATIONS</Text>
+              </Pressable>
               <View style={styles.conversationCard}>
                 {!conversation.length ? <Text style={styles.settingsMuted}>No messages yet.</Text> : conversation.map((item) => (
                   <View key={item.messageUuid} style={[styles.messageBubble, item.mine ? styles.messageBubbleMine : styles.messageBubblePeer]}>
                     <Text style={styles.messageText}>{item.text}</Text>
-                    <Text style={styles.messageStatus}>{item.mine ? item.status || "Sending" : edgezNodeDisplayName(selected as EdgezMeshNode)}</Text>
+                    <Text style={styles.messageStatus}>
+                      {item.mine ? item.status || "Sending" : selectedPeer.name} · {new Date(item.timestampMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </Text>
                   </View>
                 ))}
               </View>
@@ -1336,14 +1541,15 @@ function MeshMessages({
                 multiline
               />
               <Pressable
-                style={[styles.messageSendButton, (!message.trim() || sending || !meshState?.bleReady) && styles.disabledButton]}
-                disabled={!message.trim() || sending || !meshState?.bleReady}
+                style={[styles.messageSendButton, (!message.trim() || sending || !meshState?.bleReady || !selectedNode) && styles.disabledButton]}
+                disabled={!message.trim() || sending || !meshState?.bleReady || !selectedNode}
                 onPress={() => void send()}
                 accessibilityRole="button"
               >
                 {sending ? <ActivityIndicator color="white" /> : <Text style={styles.profileSaveText}>SEND OVER MESH</Text>}
               </Pressable>
-              {!meshState?.bleReady ? <Text style={styles.settingsError}>BLE control channel is not ready.</Text> : null}
+              {!selectedNode ? <Text style={styles.settingsError}>Wait for a fresh beacon from this user before sending.</Text> : null}
+              {selectedNode && !meshState?.bleReady ? <Text style={styles.settingsError}>BLE control channel is not ready.</Text> : null}
               {error ? <Text style={styles.settingsError}>{error}</Text> : null}
             </>
           )}
@@ -1353,11 +1559,63 @@ function MeshMessages({
   );
 }
 
+function DeviceDetail({
+  device,
+  liveNode,
+  onClose,
+  onMessage,
+}: {
+  device: StoredDevice | null;
+  liveNode: EdgezMeshNode | null;
+  onClose: () => void;
+  onMessage: (device: StoredDevice) => void;
+}) {
+  if (!device) return null;
+  const canMessage = liveNode
+    ? edgezNodeOpensConversation(liveNode)
+    : ["", "unspecified", "user", "device_type_user"].includes(device.deviceType.trim().toLowerCase());
+  return (
+    <Modal visible animationType="slide" onRequestClose={onClose}>
+      <SafeAreaView style={styles.messagesPage}>
+        <View style={styles.settingsHeader}>
+          <View>
+            <Text style={styles.settingsEyebrow}>OFFGRID DEVICE</Text>
+            <Text style={styles.settingsTitle}>{device.name}</Text>
+          </View>
+          <Pressable onPress={onClose} accessibilityRole="button"><Text style={styles.settingsClose}>CLOSE</Text></Pressable>
+        </View>
+        <ScrollView contentContainerStyle={styles.deviceDetailContent}>
+          <View style={styles.deviceDetailHero}>
+            <View style={styles.deviceDetailIcon}><Ionicons name={canMessage ? "person-outline" : "radio-outline"} size={28} color="#0a8c87" /></View>
+            <Text style={styles.deviceDetailName}>{device.name}</Text>
+            <Text style={styles.nodeSerial}>{device.serial}</Text>
+          </View>
+          <View style={styles.deviceDetailCard}>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>TYPE</Text><Text style={styles.deviceDetailValue}>{device.deviceType || "Unspecified"}</Text></View>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>HARDWARE</Text><Text style={styles.deviceDetailValue}>{device.kind.toUpperCase()}</Text></View>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>ROUTE</Text><Text style={styles.deviceDetailValue}>{liveNode?.route || "Offline"}</Text></View>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>STATE</Text><Text style={styles.deviceDetailValue}>{liveNode ? (liveNode.sleeping ? "Sleeping" : "Awake") : "Not currently visible"}</Text></View>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>LAST SEEN</Text><Text style={styles.deviceDetailValue}>{device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : "Unknown"}</Text></View>
+            <View style={styles.deviceDetailRow}><Text style={styles.deviceDetailLabel}>LOCATION</Text><Text style={styles.deviceDetailValue}>{device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "Not shared"}</Text></View>
+          </View>
+          {canMessage ? (
+            <Pressable style={styles.messageSendButton} onPress={() => onMessage(device)} accessibilityRole="button">
+              <Text style={styles.profileSaveText}>START NEW CONVERSATION</Text>
+            </Pressable>
+          ) : null}
+        </ScrollView>
+      </SafeAreaView>
+    </Modal>
+  );
+}
+
 function SwipeableDeviceRow({
   device,
+  onOpen,
   onRemove,
 }: {
   device: StoredDevice;
+  onOpen: (device: StoredDevice) => void;
   onRemove: (device: StoredDevice) => void;
 }) {
   const translateX = useRef(new Animated.Value(0)).current;
@@ -1401,6 +1659,7 @@ function SwipeableDeviceRow({
         style={[styles.nodeCard, { transform: [{ translateX }] }]}
         {...panResponder.panHandlers}
       >
+        <Pressable style={styles.nodeOpen} onPress={() => onOpen(device)} accessibilityRole="button">
         <View style={styles.nodeIcon}>
           <Ionicons name={device.kind === "h7608" ? "git-network-outline" : "radio-outline"} size={21} color="#0a8c87" />
         </View>
@@ -1414,6 +1673,7 @@ function SwipeableDeviceRow({
           </Text>
         </View>
         <Text style={styles.nodeKind}>{device.kind.toUpperCase()}</Text>
+        </Pressable>
       </Animated.View>
     </View>
   );
@@ -1422,18 +1682,22 @@ function SwipeableDeviceRow({
 function HomeMap({
   profile,
   devices,
+  messages,
   bleStatus,
   meshLink,
   onAddDevice,
   onRemoveDevice,
+  onMessagesChanged,
   onOpenSettings,
 }: {
   profile: StoredProfile;
   devices: StoredDevice[];
+  messages: StoredMessage[];
   bleStatus: BleLinkStatus;
   meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;
   onAddDevice: () => void;
   onRemoveDevice: (device: StoredDevice) => void;
+  onMessagesChanged: () => Promise<void>;
   onOpenSettings: () => void;
 }) {
   const map = useRef<EdgezOrganicMapRef>(null);
@@ -1448,6 +1712,8 @@ function HomeMap({
   const [viewMode, setViewMode] = useState<"map" | "list">("map");
   const [debugOpen, setDebugOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
+  const [selectedDevice, setSelectedDevice] = useState<StoredDevice | null>(null);
+  const [conversationPeer, setConversationPeer] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
@@ -1461,6 +1727,10 @@ function HomeMap({
     })),
     ...(currentLocation ? [{ id: "current-location", label: "You", icon: "gps" as const, ...currentLocation }] : []),
   ];
+
+  const openDevice = (device: StoredDevice) => {
+    setSelectedDevice(device);
+  };
 
   const toggleMapTheme = () => {
     const nextTheme = mapTheme === "day" ? "night" : "day";
@@ -1531,7 +1801,7 @@ function HomeMap({
                 <Text style={styles.nodeMeta}>Devices appear after a beacon is received over the HaLow mesh.</Text>
               </View>
             ) : devices.map((device) => (
-              <SwipeableDeviceRow key={device.id} device={device} onRemove={onRemoveDevice} />
+              <SwipeableDeviceRow key={device.id} device={device} onOpen={openDevice} onRemove={onRemoveDevice} />
             ))}
           </ScrollView>
         ) : null}
@@ -1717,9 +1987,27 @@ function HomeMap({
       />
       <MeshMessages
         visible={messagesOpen}
+        profileId={profile.id}
         session={meshLink?.session ?? null}
         meshState={meshLink?.state ?? null}
-        onClose={() => setMessagesOpen(false)}
+        devices={devices}
+        messages={messages}
+        initialPeerSerial={conversationPeer}
+        onMessagesChanged={onMessagesChanged}
+        onClose={() => { setMessagesOpen(false); setConversationPeer(null); }}
+      />
+      <DeviceDetail
+        device={selectedDevice}
+        liveNode={selectedDevice ? (() => {
+          const nodeNum = nodeNumFromSerial(selectedDevice.meshMacAddress || selectedDevice.serial);
+          return nodeNum === null ? null : meshLink?.state.nodes.get(nodeNum) ?? null;
+        })() : null}
+        onClose={() => setSelectedDevice(null)}
+        onMessage={(device) => {
+          setSelectedDevice(null);
+          setConversationPeer(device.meshMacAddress || device.serial);
+          setMessagesOpen(true);
+        }}
       />
     </SafeAreaView>
   );
@@ -1729,6 +2017,7 @@ export default function App() {
   const [profiles, setProfiles] = useState<StoredProfile[]>([]);
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
+  const [profileMessages, setProfileMessages] = useState<StoredMessage[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileManagerOpen, setProfileManagerOpen] = useState(false);
@@ -1745,13 +2034,17 @@ export default function App() {
   });
   const [meshLink, setMeshLink] = useState<{ session: EdgezMeshSession; state: EdgezMeshState } | null>(null);
   const persistedNodeFingerprint = useRef("");
+  const persistedMessageFingerprint = useRef("");
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
-    const availableDevices = currentProfile ? await listProfileDevices(currentProfile.id) : [];
+    const [availableDevices, availableMessages] = currentProfile
+      ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
+      : [[], []];
     setProfiles(availableProfiles);
     setProfile(currentProfile);
     setProfileDevices(availableDevices);
+    setProfileMessages(availableMessages);
     return currentProfile;
   };
 
@@ -1771,10 +2064,13 @@ export default function App() {
         availableProfiles = await listProfiles();
       }
       const currentProfile = await activeProfile();
-      const availableDevices = currentProfile ? await listProfileDevices(currentProfile.id) : [];
+      const [availableDevices, availableMessages] = currentProfile
+        ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
+        : [[], []];
       setProfiles(availableProfiles);
       setProfile(currentProfile);
       setProfileDevices(availableDevices);
+      setProfileMessages(availableMessages);
     })()
       .catch((caught) => setSettingsError(caught instanceof Error ? caught.message : "Could not open the local profile database."))
       .finally(() => setProfileLoaded(true));
@@ -1797,7 +2093,7 @@ export default function App() {
         for (const node of discovered) {
           const serial = edgezNodeId(node.nodeNum).toUpperCase();
           const existing = existingDevices.find((device) =>
-            normalizedDeviceSerial(device.serial) === normalizedDeviceSerial(serial));
+            normalizedDeviceSerial(device.meshMacAddress || device.serial) === normalizedDeviceSerial(serial));
           const hasLocation = node.latitude !== undefined && node.longitude !== undefined;
           await saveProfileDevice({
             profileId: profile.id,
@@ -1808,6 +2104,11 @@ export default function App() {
             locationSource: hasLocation ? "gps" : existing?.locationSource ?? "none",
             latitude: hasLocation ? node.latitude as number : existing?.latitude ?? null,
             longitude: hasLocation ? node.longitude as number : existing?.longitude ?? null,
+            deviceType: node.deviceType || existing?.deviceType || "Unspecified",
+            userUuid: node.userUuid || existing?.userUuid || "",
+            lastSeenAt: new Date(node.lastSeenMs).toISOString(),
+            meshMacAddress: edgezNodeId(node.nodeNum).toUpperCase(),
+            userPublicKey: node.publicKey.length ? fromByteArray(node.publicKey) : existing?.userPublicKey ?? "",
           }, existing?.id);
         }
         persistedNodeFingerprint.current = fingerprint;
@@ -1818,6 +2119,27 @@ export default function App() {
     }, 250);
     return () => clearTimeout(timer);
   }, [meshLink?.state.nodes, profile]);
+
+  useEffect(() => {
+    if (!profile || !meshLink) return;
+    const conversations = [...meshLink.state.conversations.entries()];
+    if (!conversations.length) return;
+    const fingerprint = `${profile.id}:` + conversations.map(([nodeNum, items]) =>
+      `${nodeNum}:${items.map((item) => `${item.messageUuid}:${item.status}`).join(",")}`).sort().join("|");
+    if (persistedMessageFingerprint.current === fingerprint) return;
+    const timer = setTimeout(() => {
+      void (async () => {
+        for (const [nodeNum, items] of conversations) {
+          await replaceProfileConversation(profile.id, edgezNodeId(nodeNum).toUpperCase(), items);
+        }
+        persistedMessageFingerprint.current = fingerprint;
+        setProfileMessages(await listProfileMessages(profile.id));
+      })().catch((caught) => {
+        setSettingsError(caught instanceof Error ? caught.message : "Could not save mesh messages.");
+      });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [meshLink?.state.conversations, profile]);
 
   const saveInitialProfile = async (details: ProfileDetails) => {
     await createProfile(details);
@@ -1862,10 +2184,13 @@ export default function App() {
               try {
                 const nextProfile = await deleteProfile(profile.id);
                 const availableProfiles = await listProfiles();
-                const availableDevices = nextProfile ? await listProfileDevices(nextProfile.id) : [];
+                const [availableDevices, availableMessages] = nextProfile
+                  ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id)])
+                  : [[], []];
                 setProfiles(availableProfiles);
                 setProfile(nextProfile);
                 setProfileDevices(availableDevices);
+                setProfileMessages(availableMessages);
                 if (!nextProfile) setSettingsOpen(false);
               } catch (caught) {
                 setSettingsError(caught instanceof Error ? caught.message : "Could not delete the profile.");
@@ -1923,10 +2248,12 @@ export default function App() {
             key={`${profile.id}:${profile.location}`}
             profile={profile}
             devices={profileDevices}
+            messages={profileMessages}
             bleStatus={bleStatus}
             meshLink={meshLink}
             onAddDevice={() => setProvisioningOpen(true)}
             onRemoveDevice={requestRemoveDevice}
+            onMessagesChanged={async () => setProfileMessages(await listProfileMessages(profile.id))}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
@@ -2111,6 +2438,7 @@ const styles = StyleSheet.create({
   nodeRemoveAction: { position: "absolute", top: 0, right: 0, bottom: 0, width: nodeSwipeActionWidth, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: "#b9472f" },
   nodeRemoveText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
   nodeCard: { minHeight: 86, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 14, backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 12 },
+  nodeOpen: { flex: 1, flexDirection: "row", alignItems: "center", gap: 12 },
   nodeEmptyCard: { padding: 20, borderRadius: 14, backgroundColor: "#e9f7f5", gap: 5 },
   nodeIcon: { width: 42, height: 42, borderRadius: 21, alignItems: "center", justifyContent: "center", backgroundColor: "#e9f7f5" },
   nodeBody: { flex: 1, gap: 3 },
@@ -2221,6 +2549,17 @@ const styles = StyleSheet.create({
   messagePeerName: { color: "#385753", fontSize: 13, fontWeight: "900" },
   messagePeerNameSelected: { color: "#0a8c87" },
   messagePeerId: { color: "#718783", fontSize: 9 },
+  messageConversationList: { gap: 9 },
+  messageSectionHeader: { minHeight: 68, paddingHorizontal: 15, borderWidth: 1, borderColor: "#b9dad6", borderRadius: 14, backgroundColor: "#e9f7f5", flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  messageSectionTitle: { color: "#0a3037", fontSize: 16, fontWeight: "900" },
+  messageSectionCount: { color: "#718783", fontSize: 10, marginTop: 3 },
+  messageConversationRow: { minHeight: 76, padding: 13, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 14, backgroundColor: "white", flexDirection: "row", alignItems: "center", gap: 11 },
+  messageConversationIcon: { width: 42, height: 42, borderRadius: 21, backgroundColor: "#e9f7f5", alignItems: "center", justifyContent: "center" },
+  messageConversationBody: { flex: 1, gap: 4 },
+  messageConversationMeta: { alignItems: "flex-end", gap: 6 },
+  messagePreview: { color: "#718783", fontSize: 11 },
+  messageTime: { color: "#718783", fontSize: 9 },
+  messageBackButton: { minHeight: 42, alignSelf: "flex-start", flexDirection: "row", alignItems: "center", gap: 4 },
   conversationCard: { minHeight: 220, padding: 12, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 8 },
   messageBubble: { maxWidth: "86%", paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12, gap: 3 },
   messageBubbleMine: { alignSelf: "flex-end", backgroundColor: "#ccefeb" },
@@ -2229,6 +2568,14 @@ const styles = StyleSheet.create({
   messageStatus: { color: "#718783", fontSize: 8, textTransform: "uppercase" },
   messageInput: { minHeight: 72, maxHeight: 140, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, color: "#0a3037", backgroundColor: "white", textAlignVertical: "top" },
   messageSendButton: { minHeight: 52, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
+  deviceDetailContent: { padding: 22, paddingBottom: 42, gap: 14 },
+  deviceDetailHero: { alignItems: "center", paddingVertical: 18, gap: 5 },
+  deviceDetailIcon: { width: 62, height: 62, borderRadius: 31, backgroundColor: "#e9f7f5", alignItems: "center", justifyContent: "center", marginBottom: 5 },
+  deviceDetailName: { color: "#0a3037", fontSize: 24, fontWeight: "900" },
+  deviceDetailCard: { borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", paddingHorizontal: 15 },
+  deviceDetailRow: { minHeight: 55, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 18, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#dce6e5" },
+  deviceDetailLabel: { color: "#718783", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
+  deviceDetailValue: { flex: 1, color: "#0a3037", fontSize: 12, fontWeight: "700", textAlign: "right" },
   mapAttribution: {
     position: "absolute",
     left: 10,
