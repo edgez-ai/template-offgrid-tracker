@@ -11,6 +11,7 @@ import { DeviceDetail, SwipeableDeviceRow } from "./DeviceComponents";
 import { MeshMessages } from "./MeshMessages";
 import { BleDebugModal } from "./SettingsScreens";
 import { styles } from "./app-styles";
+import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, nodeNumFromSerial } from "./mesh-utils";
 import { listProfileMessages } from "./profile-store";
 import type { StoredDevice, StoredMessage, StoredProfile } from "./profile-store";
@@ -52,11 +53,31 @@ export function HomeMap({
   const [locating, setLocating] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
+  const mapIconForDevice = (device: StoredDevice) => {
+    switch (device.deviceType.trim().toLowerCase()) {
+      case "user":
+      case "person":
+      case "hiker":
+      case "explorer": return "person" as const;
+      case "dog": return "dog" as const;
+      case "sheep": return "sheep" as const;
+      case "cow": return "cow" as const;
+      case "horse": return "horse" as const;
+      case "tracker":
+      case "unknown": return "tracker" as const;
+      case "gateway": return "gateway" as const;
+      case "beacon": return "beacon" as const;
+      case "sensor": return "sensor" as const;
+      case "relay": return "router" as const;
+      default: return device.kind === "h7608" ? "gateway" as const : "tracker" as const;
+    }
+  };
   const mapNodes = [
     ...locatedDevices.map((device) => ({
       id: device.id,
       label: device.name,
-      icon: device.kind === "h7608" ? "gateway" as const : "tracker" as const,
+      icon: mapIconForDevice(device),
+      marker: device.marker || "default",
       latitude: device.latitude as number,
       longitude: device.longitude as number,
     })),
@@ -82,11 +103,8 @@ export function HomeMap({
     try {
       const permission = await Location.requestForegroundPermissionsAsync();
       if (permission.status !== "granted") throw new Error("Location permission is needed to show your current position.");
-      const position = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const coordinates = {
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-      };
+      if (!await Location.hasServicesEnabledAsync()) throw new Error("Turn on phone Location to show your current position.");
+      const coordinates = await compatibleCurrentLocation();
       setCurrentLocation(coordinates);
       map.current?.setCamera({ ...coordinates, zoom: Math.max(mapZoom.current, 15) });
     } catch (caught) {
@@ -291,4 +309,3 @@ export function HomeMap({
     </SafeAreaView>
   );
 }
-

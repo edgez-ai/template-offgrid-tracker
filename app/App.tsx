@@ -138,6 +138,7 @@ export default function App() {
             latitude: hasLocation ? node.latitude as number : existing?.latitude ?? null,
             longitude: hasLocation ? node.longitude as number : existing?.longitude ?? null,
             deviceType: node.deviceType || existing?.deviceType || "Unspecified",
+            marker: node.marker || existing?.marker || "default",
             userUuid: node.userUuid || existing?.userUuid || "",
             lastSeenAt: new Date(node.lastSeenMs).toISOString(),
             meshMacAddress: edgezNodeId(node.nodeNum).toUpperCase(),
@@ -277,15 +278,17 @@ export default function App() {
         <>
           {!provisioningOpen ? (
             <ActiveProfileBleLink
-              key={`${runtimeProfile.id}:${runtimeProfile.bleDeviceId}`}
+              key={`ble:${runtimeProfile.id}:${runtimeProfile.bleDeviceId}`}
               profile={runtimeProfile}
               locationMode={sharedSettings?.locationMode ?? "off"}
+              iconType={sharedSettings?.iconType ?? "person"}
+              iconColor={sharedSettings?.iconColor ?? "blue"}
               onStatusChange={setBleStatus}
               onMeshChange={setMeshLink}
             />
           ) : null}
           <HomeMap
-            key={`${runtimeProfile.id}:${runtimeProfile.location}`}
+            key={`home:${runtimeProfile.id}:${runtimeProfile.location}`}
             profile={runtimeProfile}
             devices={profileDevices}
             messages={profileMessages}
@@ -324,6 +327,8 @@ export default function App() {
                   identityPublicKey: runtimeProfile.identityPublicKey,
                   location: runtimeProfile.location,
                   locationMode: runtimeProfile.location ? "fixed" : "off",
+                  iconType: "person",
+                  iconColor: "blue",
                   bleDeviceId: runtimeProfile.bleDeviceId,
                   bleDeviceName: runtimeProfile.bleDeviceName,
                 }}

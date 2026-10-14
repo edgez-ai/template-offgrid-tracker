@@ -874,7 +874,13 @@ esp_err_t edgez_ble_control_start(void)
     uint8_t mac[6] = {0};
     char name[24] = "EZ_DEVICE";
 #if CONFIG_IDF_TARGET_ESP32P4
-    const esp_err_t mac_err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    esp_err_t mac_err = esp_wifi_get_mac(WIFI_IF_STA, mac);
+    if (mac_err != ESP_OK) {
+        /* ESP-Hosted may not have exposed the C6 station interface yet. The
+         * local Bluetooth identity is always available and matches the device
+         * address Android uses for the realtime control connection. */
+        mac_err = esp_read_mac(mac, ESP_MAC_BT);
+    }
 #else
     const esp_err_t mac_err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
 #endif

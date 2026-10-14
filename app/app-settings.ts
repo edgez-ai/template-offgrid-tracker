@@ -1,6 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createProfileIdentity } from "./profile-store";
 import type { ProfileDetails } from "./profile-store";
+import { beaconIconColors, beaconIconTypes } from "./beacon-options";
+import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 
 export type LocationMode = "off" | "fixed" | "live";
 
@@ -13,7 +15,11 @@ export type SharedProfileSettings = Pick<
   | "location"
   | "bleDeviceId"
   | "bleDeviceName"
-> & { locationMode: LocationMode };
+> & {
+  locationMode: LocationMode;
+  iconType: BeaconIconType;
+  iconColor: BeaconIconColor;
+};
 
 const sharedSettingsStorageKey = "offgrid-tracker.settings.v1";
 
@@ -38,7 +44,11 @@ function parsedSharedSettings(value: unknown): SharedProfileSettings | null {
         : settings.location
           ? "fixed"
           : "off";
-  return { ...settings, locationMode } as SharedProfileSettings;
+  const storedIconType = settings.iconType as string | undefined;
+  const legacyIconType = storedIconType === "user" ? "person" : storedIconType;
+  const iconType = beaconIconTypes.includes(legacyIconType as BeaconIconType) ? legacyIconType as BeaconIconType : "person";
+  const iconColor = beaconIconColors.includes(settings.iconColor as BeaconIconColor) ? settings.iconColor as BeaconIconColor : "blue";
+  return { ...settings, locationMode, iconType, iconColor } as SharedProfileSettings;
 }
 
 function fromProfile(profile?: ProfileDetails | null): SharedProfileSettings {
@@ -55,6 +65,8 @@ function fromProfile(profile?: ProfileDetails | null): SharedProfileSettings {
     ...identity,
     location: profile?.location ?? "",
     locationMode: profile?.location ? "fixed" : "off",
+    iconType: "person",
+    iconColor: "blue",
     bleDeviceId: profile?.bleDeviceId ?? "",
     bleDeviceName: profile?.bleDeviceName ?? "",
   };
@@ -67,7 +79,8 @@ export async function loadSharedProfileSettings(fallback?: ProfileDetails | null
       const parsed: unknown = JSON.parse(stored);
       const settings = parsedSharedSettings(parsed);
       if (settings) {
-        if (!(parsed as Partial<SharedProfileSettings>).locationMode) await saveSharedProfileSettings(settings);
+        const legacy = parsed as Partial<SharedProfileSettings>;
+        if (!legacy.locationMode || !legacy.iconType || !legacy.iconColor) await saveSharedProfileSettings(settings);
         return settings;
       }
     } catch {

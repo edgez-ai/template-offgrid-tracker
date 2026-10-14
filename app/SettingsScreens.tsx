@@ -1,4 +1,5 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
@@ -9,6 +10,8 @@ import { ProfileBleDevicePicker, ProfileLocationPicker } from "./ProfileScreens"
 import type { LocationMode, SharedProfileSettings } from "./app-settings";
 import type { StoredProfile } from "./profile-store";
 import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
+import { beaconColorValues, beaconIconColors, beaconIconLabels, beaconIconNames, beaconIconTypes } from "./beacon-options";
+import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 
 export function BleDebugModal({
   visible,
@@ -102,6 +105,8 @@ export function SettingsPage({
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
   const [blePickerOpen, setBlePickerOpen] = useState(false);
   const [identityName, setIdentityName] = useState(sharedSettings.identityName);
+  const [iconType, setIconType] = useState<BeaconIconType>(sharedSettings.iconType);
+  const [iconColor, setIconColor] = useState<BeaconIconColor>(sharedSettings.iconColor);
   const [locationMode, setLocationMode] = useState<LocationMode>(sharedSettings.locationMode);
   const [location, setLocation] = useState(sharedSettings.location);
   const [bleDeviceId, setBleDeviceId] = useState(sharedSettings.bleDeviceId);
@@ -113,6 +118,8 @@ export function SettingsPage({
 
   useEffect(() => {
     setIdentityName(sharedSettings.identityName);
+    setIconType(sharedSettings.iconType);
+    setIconColor(sharedSettings.iconColor);
     setLocationMode(sharedSettings.locationMode);
     setLocation(sharedSettings.location);
     setBleDeviceId(sharedSettings.bleDeviceId);
@@ -136,6 +143,8 @@ export function SettingsPage({
         identityId: sharedSettings.identityId,
         identityPrivateKey: sharedSettings.identityPrivateKey,
         identityPublicKey: sharedSettings.identityPublicKey,
+        iconType,
+        iconColor,
         locationMode,
         location,
         bleDeviceId,
@@ -256,6 +265,46 @@ export function SettingsPage({
                 autoCapitalize="words"
                 autoCorrect={false}
               />
+              <Text style={styles.settingsFieldLabel}>ICON TYPE</Text>
+              <View style={styles.beaconIconOptions} accessibilityRole="radiogroup">
+                {beaconIconTypes.map((type) => {
+                  const selected = iconType === type;
+                  return (
+                    <Pressable
+                      key={type}
+                      style={[styles.beaconIconOption, selected && styles.beaconIconOptionSelected]}
+                      onPress={() => setIconType(type)}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected }}
+                      accessibilityLabel={beaconIconLabels[type]}
+                    >
+                      <View style={[styles.beaconIconGlyph, selected && { backgroundColor: `${beaconColorValues[iconColor]}22` }]}>
+                        <MaterialCommunityIcons name={beaconIconNames[type]} size={24} color={selected ? beaconColorValues[iconColor] : "#59716f"} />
+                      </View>
+                      {selected ? (
+                        <View style={styles.beaconIconCheck}>
+                          <Ionicons name="checkmark" size={10} color="white" />
+                        </View>
+                      ) : null}
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <Text style={styles.settingsFieldLabel}>ICON COLOR</Text>
+              <View style={styles.beaconColorOptions} accessibilityRole="radiogroup">
+                {beaconIconColors.map((color) => (
+                  <Pressable
+                    key={color}
+                    style={[styles.beaconColorOption, iconColor === color && styles.beaconColorOptionSelected]}
+                    onPress={() => setIconColor(color)}
+                    accessibilityRole="radio"
+                    accessibilityState={{ selected: iconColor === color }}
+                    accessibilityLabel={color}
+                  >
+                    <View style={[styles.beaconColorSwatch, { backgroundColor: beaconColorValues[color] }]} />
+                  </Pressable>
+                ))}
+              </View>
               <Text style={styles.settingsFieldLabel}>IDENTITY ID</Text>
               <View style={styles.settingsReadOnlyField}>
                 <Text style={styles.settingsReadOnlyText} selectable>{sharedSettings.identityId}</Text>

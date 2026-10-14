@@ -37,6 +37,7 @@ export type DeviceDetails = {
   latitude: number | null;
   longitude: number | null;
   deviceType: string;
+  marker: string;
   userUuid: string;
   lastSeenAt: string;
   meshMacAddress: string;
@@ -91,6 +92,7 @@ type DeviceRow = {
   latitude: number | null;
   longitude: number | null;
   device_type: string;
+  marker: string;
   user_uuid: string;
   last_seen_at: string;
   mesh_mac_address: string;
@@ -172,6 +174,7 @@ function deviceFromRow(row: DeviceRow): StoredDevice {
     latitude: row.latitude,
     longitude: row.longitude,
     deviceType: row.device_type,
+    marker: row.marker,
     userUuid: row.user_uuid,
     lastSeenAt: row.last_seen_at,
     meshMacAddress: row.mesh_mac_address,
@@ -256,6 +259,7 @@ async function database() {
           latitude REAL,
           longitude REAL,
           device_type TEXT NOT NULL DEFAULT 'Unspecified',
+          marker TEXT NOT NULL DEFAULT 'default',
           user_uuid TEXT NOT NULL DEFAULT '',
           last_seen_at TEXT NOT NULL DEFAULT '',
           mesh_mac_address TEXT NOT NULL DEFAULT '',
@@ -308,6 +312,9 @@ async function database() {
       if (!deviceColumnNames.has("device_type")) {
         await db.execAsync("ALTER TABLE devices ADD COLUMN device_type TEXT NOT NULL DEFAULT 'Unspecified'");
       }
+      if (!deviceColumnNames.has("marker")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN marker TEXT NOT NULL DEFAULT 'default'");
+      }
       if (!deviceColumnNames.has("user_uuid")) {
         await db.execAsync("ALTER TABLE devices ADD COLUMN user_uuid TEXT NOT NULL DEFAULT ''");
       }
@@ -335,7 +342,7 @@ async function database() {
           profile.id,
         );
       }
-      await db.execAsync("PRAGMA user_version = 6");
+      await db.execAsync("PRAGMA user_version = 7");
       return db;
     });
   }
@@ -546,7 +553,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
     await db.runAsync(
       `UPDATE devices
        SET serial = ?, name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?,
-           device_type = ?, user_uuid = ?, last_seen_at = ?, mesh_mac_address = ?, user_public_key = ?, updated_at = ?
+           device_type = ?, marker = ?, user_uuid = ?, last_seen_at = ?, mesh_mac_address = ?, user_public_key = ?, updated_at = ?
        WHERE id = ?`,
       details.serial,
       details.name,
@@ -556,6 +563,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
       details.latitude,
       details.longitude,
       details.deviceType,
+      details.marker,
       details.userUuid,
       details.lastSeenAt,
       details.meshMacAddress,
@@ -568,8 +576,8 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
   const id = deviceId ?? localUuid();
   await db.runAsync(
     `INSERT INTO devices
-      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, device_type, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, device_type, marker, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     details.profileId,
     details.serial,
@@ -580,6 +588,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
     details.latitude,
     details.longitude,
     details.deviceType,
+    details.marker,
     details.userUuid,
     details.lastSeenAt,
     details.meshMacAddress,

@@ -32,7 +32,7 @@ export function storedDeviceNode(device: StoredDevice): EdgezMeshNode | null {
     displayName: device.name,
     route: "CACHED",
     lastSeenMs: Date.parse(device.lastSeenAt) || 0,
-    marker: "default",
+    marker: device.marker || "default",
     publicKey,
     latitude: device.latitude ?? undefined,
     longitude: device.longitude ?? undefined,

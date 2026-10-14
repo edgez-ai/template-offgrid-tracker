@@ -221,6 +221,7 @@ export function ProvisioningFlow({
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
         deviceType: "Unspecified",
+        marker: "default",
         userUuid: "",
         lastSeenAt: "",
         meshMacAddress: selectedDevice.serial,
@@ -358,4 +359,3 @@ export function ProvisioningFlow({
     </SafeAreaView>
   );
 }
-
