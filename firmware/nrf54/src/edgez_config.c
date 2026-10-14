@@ -14,6 +14,7 @@
 #include "edgez_battery.h"
 #include "edgez_gps.h"
 #include "edgez_imu.h"
+#include "edgez_mesh_relay.h"
 #include "edgez_reboot.h"
 #include "usb_control.pb.h"
 
@@ -24,6 +25,7 @@ LOG_MODULE_REGISTER(edgez_config, LOG_LEVEL_INF);
 #define EDGEZ_VENDOR_LEN 5
 #define EDGEZ_DEFAULT_INTERVAL_SECONDS 30
 #define EDGEZ_PROFILE_SETTINGS_KEY "edgez/profile/v1"
+#define EDGEZ_COUNTRY_SETTINGS_KEY "edgez/country/v1"
 #define EDGEZ_PROFILE_MAGIC 0x455A5031U
 #define EDGEZ_PROFILE_VERSION 1U
 #define EDGEZ_PROVISIONING_COMMIT_GRACE_MS 5000
@@ -41,13 +43,18 @@ K_MUTEX_DEFINE(config_lock);
 static ai_edgez_halow_DeviceSettings settings;
 static uint32_t mesh_frequency_khz;
 static uint32_t mesh_bandwidth_mhz;
+static char country_code[3];
 static uint32_t config_generation = 1;
-static bool halow_ready;
+static bool halow_initialized;
+static bool halow_link_up;
+static uint8_t halow_mac[6];
 static int64_t runtime_start_not_before_ms;
 static atomic_t halow_beacon_build_count;
 static atomic_t halow_beacon_last_ies_len;
 static uint8_t beacon_vendor_ies[EDGEZ_VENDOR_IES_MAX_LEN];
 static size_t beacon_vendor_ies_len;
+
+static uint64_t mac_to_node_id(const uint8_t mac[6]);
 static struct k_spinlock beacon_vendor_ies_lock;
 
 /*
@@ -207,7 +214,11 @@ static int save_persisted_profile_locked(void)
 		LOG_INF("Persistent HaLow profile saved device_type=%d mesh_id=%s frequency=%u kHz bandwidth=%u MHz bytes=%u",
 			settings.device_type, settings.mesh_id, mesh_frequency_khz,
 			mesh_bandwidth_mhz, stored.settings_len);
-		edgez_request_reboot(EDGEZ_REBOOT_REASON_SETTINGS_SAVED);
+			edgez_request_reboot(EDGEZ_REBOOT_REASON_SETTINGS_SAVED);
+		if (settings_save_one(EDGEZ_COUNTRY_SETTINGS_KEY, country_code,
+				      sizeof(country_code)) != 0) {
+			LOG_WRN("Persistent country save failed country=%s", country_code);
+		}
 	} else {
 		LOG_ERR("Persistent HaLow profile settings write failed key=%s bytes=%u rc=%d",
 			EDGEZ_PROFILE_SETTINGS_KEY,
@@ -275,6 +286,13 @@ static int load_persisted_profile_locked(void)
 	mesh_bandwidth_mhz = stored.mesh_bandwidth_mhz;
 	settings.mesh_frequency_khz = mesh_frequency_khz;
 	settings.mesh_bandwidth_mhz = mesh_bandwidth_mhz;
+	char loaded_country[3] = {0};
+	ssize_t country_len = settings_load_one(EDGEZ_COUNTRY_SETTINGS_KEY,
+						loaded_country, sizeof(loaded_country));
+	if (country_len == sizeof(loaded_country) && loaded_country[0] &&
+	    loaded_country[1] && loaded_country[2] == '\0') {
+		memcpy(country_code, loaded_country, sizeof(country_code));
+	}
 	LOG_INF("Persistent HaLow profile loaded device_type=%d mesh_id=%s frequency=%u kHz bandwidth=%u MHz",
 		settings.device_type, settings.mesh_id, mesh_frequency_khz,
 		mesh_bandwidth_mhz);
@@ -306,8 +324,12 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 	settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
 	settings.beacon_interval_seconds = EDGEZ_DEFAULT_INTERVAL_SECONDS;
 	settings.max_hop = 2;
+	copy_string(country_code, sizeof(country_code), CONFIG_WIFI_MORSEMICRO_REGION);
 	mesh_frequency_khz = 0;
 	mesh_bandwidth_mhz = 0;
+	halow_initialized = false;
+	halow_link_up = false;
+	memset(halow_mac, 0, sizeof(halow_mac));
 	config_generation = 1;
 	runtime_start_not_before_ms = 0;
 	atomic_set(&halow_beacon_build_count, 0);
@@ -330,6 +352,7 @@ void edgez_config_get_profile(struct edgez_halow_profile *profile)
 		return;
 	}
 	k_mutex_lock(&config_lock, K_FOREVER);
+	copy_string(profile->country_code, sizeof(profile->country_code), country_code);
 	copy_string(profile->mesh_id, sizeof(profile->mesh_id), settings.mesh_id);
 	copy_string(profile->passphrase, sizeof(profile->passphrase), settings.passphrase);
 	profile->mesh_frequency_khz = mesh_frequency_khz;
@@ -395,7 +418,25 @@ uint32_t edgez_config_generation(void)
 
 void edgez_config_set_halow_ready(bool ready)
 {
-	halow_ready = ready;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	halow_initialized = ready;
+	halow_link_up = ready;
+	k_mutex_unlock(&config_lock);
+}
+
+void edgez_config_set_halow_link(bool link_up)
+{
+	k_mutex_lock(&config_lock, K_FOREVER);
+	halow_link_up = halow_initialized && link_up;
+	k_mutex_unlock(&config_lock);
+}
+
+void edgez_config_set_halow_mac(const uint8_t mac[6])
+{
+	if (!mac) return;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	memcpy(halow_mac, mac, sizeof(halow_mac));
+	k_mutex_unlock(&config_lock);
 }
 
 bool edgez_config_halow_beacon_started(void)
@@ -445,6 +486,22 @@ static void response_base(const ai_edgez_halow_NetworkPacket *request,
 	response->to = request->from;
 	response->operation = ai_edgez_halow_Operation_RESPONSE;
 	response->interface = ai_edgez_halow_Interface_HALOW;
+}
+
+static void fill_status_locked(ai_edgez_halow_HaLowInterfaceStatus *status)
+{
+	status->supported = true;
+	status->stack_initialized = halow_initialized;
+	status->mesh_mode = true;
+	status->link_up = halow_link_up;
+	status->route_ready = halow_link_up;
+	status->ready_for_report = halow_link_up;
+	status->ethertype = 0x88B5;
+	copy_string(status->mesh_id, sizeof(status->mesh_id), settings.mesh_id);
+	status->mac_address = mac_to_node_id(halow_mac);
+	/* nRF54 delegates license enforcement to the mobile client. */
+	status->license_status =
+		ai_edgez_halow_LicenseStatus_LICENSE_STATUS_AUTHORIZED;
 }
 
 int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
@@ -577,6 +634,9 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			LOG_INF("BLE HaLowInitConfig is an empty status/license probe; preserving persisted profile generation=%u",
 				config_generation);
 		} else {
+			if (strlen(init->country_code) == 2U) {
+				copy_string(country_code, sizeof(country_code), init->country_code);
+			}
 			copy_string(settings.mesh_id, sizeof(settings.mesh_id), init->mesh_id);
 			copy_string(settings.passphrase, sizeof(settings.passphrase), init->passphrase);
 			copy_string(settings.user_name, sizeof(settings.user_name), init->user_name);
@@ -620,6 +680,32 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 		}
 		k_mutex_unlock(&config_lock);
 		response.which_body = ai_edgez_halow_NetworkPacket_status_tag;
+	} else if (request.which_body == ai_edgez_halow_NetworkPacket_msg_tag ||
+		   request.which_body == ai_edgez_halow_NetworkPacket_beacon_tag ||
+		   request.which_body == ai_edgez_halow_NetworkPacket_report_tag ||
+		   request.which_body == ai_edgez_halow_NetworkPacket_payload_tag) {
+		uint8_t destination[6];
+		bool public_channel = request.to >= UINT64_C(38801) &&
+			request.to <= UINT64_C(38809) &&
+			((request.to - UINT64_C(38801)) % 2U) == 0U;
+		bool broadcast = request.to == 0 || public_channel ||
+			request.which_body == ai_edgez_halow_NetworkPacket_beacon_tag ||
+			request.which_body == ai_edgez_halow_NetworkPacket_report_tag ||
+			request.which_body == ai_edgez_halow_NetworkPacket_payload_tag;
+		if (!broadcast) {
+			uint64_t node = request.to;
+			for (int i = 5; i >= 0; --i) {
+				destination[i] = (uint8_t)(node & 0xffU);
+				node >>= 8;
+			}
+		}
+		int relay_rc = edgez_nrf_relay_send(broadcast ? NULL : destination,
+						 payload, payload_len);
+		if (relay_rc) return relay_rc;
+		LOG_INF("BLE NetworkPacket relayed over BATMAN body=%u route=%s bytes=%u",
+			request.which_body, broadcast ? "broadcast" : "unicast",
+			(unsigned int)payload_len);
+		return 0;
 	} else if (request.which_body == ai_edgez_halow_NetworkPacket_status_tag ||
 		   request.which_body == 0) {
 		response.which_body = ai_edgez_halow_NetworkPacket_status_tag;
@@ -628,20 +714,10 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	}
 
 	if (response.which_body == ai_edgez_halow_NetworkPacket_status_tag) {
-		response.body.status.supported = true;
-		response.body.status.stack_initialized = halow_ready;
-		response.body.status.mesh_mode = true;
-		response.body.status.link_up = halow_ready;
-		response.body.status.route_ready = halow_ready;
-		response.body.status.ready_for_report = halow_ready;
-		/* nRF54 delegates license enforcement to the mobile client. */
-		response.body.status.license_status =
-			ai_edgez_halow_LicenseStatus_LICENSE_STATUS_AUTHORIZED;
 		k_mutex_lock(&config_lock, K_FOREVER);
-		copy_string(response.body.status.mesh_id, sizeof(response.body.status.mesh_id),
-			    settings.mesh_id);
+		fill_status_locked(&response.body.status);
 		LOG_INF("BLE status response supported=1 stack_initialized=%u link_up=%u license=%u mesh_id=\"%s\" frequency=%u kHz bandwidth=%u MHz",
-			halow_ready, halow_ready,
+			halow_initialized, halow_link_up,
 			response.body.status.license_status, settings.mesh_id,
 			mesh_frequency_khz, mesh_bandwidth_mhz);
 		k_mutex_unlock(&config_lock);
@@ -655,6 +731,71 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	*response_len = output.bytes_written;
 	LOG_INF("BLE NetworkPacket response body=%u operation=%u len=%u",
 		response.which_body, response.operation, (unsigned int)*response_len);
+	return 0;
+}
+
+static uint64_t mac_to_node_id(const uint8_t mac[6])
+{
+	uint64_t value = 0;
+	for (size_t i = 0; i < 6; ++i) value = (value << 8) | mac[i];
+	return value;
+}
+
+int edgez_config_build_status_packet(uint8_t *out, size_t out_cap,
+				     size_t *out_len)
+{
+	ai_edgez_halow_NetworkPacket packet = ai_edgez_halow_NetworkPacket_init_zero;
+	pb_ostream_t stream;
+
+	if (!out || !out_len) return -EINVAL;
+	packet.operation = ai_edgez_halow_Operation_RESPONSE;
+	packet.interface = ai_edgez_halow_Interface_HALOW;
+	packet.which_body = ai_edgez_halow_NetworkPacket_status_tag;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	packet.from = mac_to_node_id(halow_mac);
+	fill_status_locked(&packet.body.status);
+	k_mutex_unlock(&config_lock);
+	stream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
+		return -EMSGSIZE;
+	}
+	*out_len = stream.bytes_written;
+	return 0;
+}
+
+int edgez_config_build_network_beacon(const uint8_t current_mac[6],
+				      uint8_t *out, size_t out_cap,
+				      size_t *out_len)
+{
+	ai_edgez_halow_NetworkPacket packet = ai_edgez_halow_NetworkPacket_init_zero;
+	pb_ostream_t stream;
+
+	if (!current_mac || !out || !out_len) return -EINVAL;
+	packet.from = mac_to_node_id(current_mac);
+	packet.operation = ai_edgez_halow_Operation_BROADCAST;
+	packet.interface = ai_edgez_halow_Interface_HALOW;
+	packet.which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	packet.body.beacon.user_id_high = settings.user_id_high;
+	packet.body.beacon.user_id_low = settings.user_id_low;
+	copy_string(packet.body.beacon.user_name, sizeof(packet.body.beacon.user_name),
+		    settings.user_name);
+	packet.body.beacon.user_public_key.size = settings.user_public_key.size;
+	memcpy(packet.body.beacon.user_public_key.bytes,
+	       settings.user_public_key.bytes,
+	       settings.user_public_key.size);
+	if (settings.share_location) {
+		packet.body.beacon.latitude = settings.latitude;
+		packet.body.beacon.longitude = settings.longitude;
+	}
+	packet.body.beacon.marker = settings.marker;
+	packet.body.beacon.device_type = settings.device_type;
+	k_mutex_unlock(&config_lock);
+	stream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
+		return -EMSGSIZE;
+	}
+	*out_len = stream.bytes_written;
 	return 0;
 }
 

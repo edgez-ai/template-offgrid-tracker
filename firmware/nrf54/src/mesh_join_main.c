@@ -12,12 +12,21 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/random/random.h>
 
 #include "edgez_diagnostics.h"
+#include "edgez_batman_adv_lite.h"
+#include "edgez_ble.h"
+#include "edgez_config.h"
+#include "edgez_mesh_data_frame.h"
+#include "edgez_mesh_msdu.h"
+#include "edgez_mesh_relay.h"
+#include "edgez_mesh_zephyr.h"
 #include "edgez_mesh_sae_provider.h"
 #include "edgez_rf_api.h"
 #include "edgez_umac_mesh_runtime.h"
 #include "edgez_reboot.h"
+#include "livestocking_config.h"
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 #include "mmhal_wlan.h"
@@ -31,10 +40,6 @@ extern enum mmwlan_status mmdrv_set_dynamic_ps_timeout(uint32_t timeout_ms);
 
 LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 
-#define EDGEZ_MESH_ID "edgez"
-#define EDGEZ_MESH_PASSPHRASE "edgez123"
-#define EDGEZ_MESH_FREQUENCY_HZ 915000000U
-#define EDGEZ_MESH_BANDWIDTH_MHZ 2U
 #define EDGEZ_MESH_PRIMARY_BANDWIDTH_MHZ 1U
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
@@ -54,6 +59,19 @@ static uint32_t tx_status_count;
 static uint32_t tx_failure_count;
 static uint32_t previous_operation_failures;
 static uint32_t previous_handler_failures;
+static uint32_t applied_generation;
+static struct edgez_halow_profile applied_profile;
+static bool mesh_started;
+static bool mesh_secure;
+static uint16_t open_data_sequence;
+static uint32_t open_mesh_sequence;
+static uintptr_t open_tx_token;
+K_MUTEX_DEFINE(batman_state_lock);
+K_MUTEX_DEFINE(batman_tx_lock);
+#define EDGEZ_OPEN_DATA_FRAME_MAX (EDGEZ_MESH_QOS_4ADDR_HEADER_LEN + \
+	EDGEZ_MESH_CONTROL_MAX_LEN + EDGEZ_RFC1042_HEADER_LEN + \
+	EDGEZ_BATADV_MAX_PACKET_LEN)
+static uint8_t open_data_frame[EDGEZ_OPEN_DATA_FRAME_MAX];
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 enum mesh_ps_phase {
@@ -106,23 +124,51 @@ void edgez_request_reboot(uint32_t reason)
 	LOG_WRN("Reboot request ignored by join-only validation image");
 }
 
-static int join_drop_data(void *ctx, const struct edgez_umac_rx_frame *radio,
-			  const struct edgez_mesh_rx_data *frame)
+static int deliver_msdu(const uint8_t destination[6], const uint8_t source[6],
+			const uint8_t transmitter[6], const uint8_t *payload,
+			size_t payload_length)
+{
+	struct edgez_mesh_msdu msdu;
+	uint8_t ethernet[EDGEZ_ETHERNET_HEADER_LEN + EDGEZ_BATADV_MAX_PACKET_LEN];
+	size_t ethernet_length = 0;
+	int rc = edgez_mesh_msdu_decode(&msdu, destination, source, payload,
+					payload_length);
+	if (rc == EDGEZ_UMAC_OK) {
+		rc = edgez_mesh_msdu_to_ethernet(&msdu, ethernet, sizeof(ethernet),
+						 &ethernet_length);
+	}
+	if (rc == EDGEZ_UMAC_OK) {
+		(void)edgez_nrf_mesh_receive_ethernet(ethernet, ethernet_length,
+						      transmitter);
+	}
+	return rc;
+}
+
+static int join_receive_data(void *ctx, const struct edgez_umac_rx_frame *radio,
+			     const struct edgez_mesh_rx_data *frame)
 {
 	ARG_UNUSED(ctx);
 	ARG_UNUSED(radio);
-	ARG_UNUSED(frame);
-	return EDGEZ_UMAC_OK;
+	return deliver_msdu(frame->destination, frame->source, frame->transmitter,
+			    frame->payload, frame->payload_length);
 }
 
-static int join_drop_protected_data(
+static int join_receive_protected_data(
 	void *ctx, const struct edgez_umac_rx_frame *radio,
 	const struct edgez_mesh_rx_protected_data *frame)
 {
 	ARG_UNUSED(ctx);
 	ARG_UNUSED(radio);
-	ARG_UNUSED(frame);
-	return EDGEZ_UMAC_OK;
+	uint8_t plaintext[EDGEZ_BATADV_MAX_PACKET_LEN];
+	size_t plaintext_length = 0;
+	uint64_t packet_number = 0;
+	int rc = edgez_mesh_sae_provider_decrypt_data(
+		&sae_provider, frame, plaintext, sizeof(plaintext),
+		&plaintext_length, &packet_number);
+	ARG_UNUSED(packet_number);
+	return rc == EDGEZ_UMAC_OK ?
+		deliver_msdu(frame->destination, frame->source, frame->transmitter,
+			     plaintext, plaintext_length) : rc;
 }
 
 static int join_drop_qos_null(void *ctx,
@@ -166,8 +212,8 @@ static void join_tx_status(void *ctx,
 }
 
 static const struct edgez_umac_mesh_runtime_events join_events = {
-	.data = join_drop_data,
-	.protected_data = join_drop_protected_data,
+	.data = join_receive_data,
+	.protected_data = join_receive_protected_data,
 	.qos_null = join_drop_qos_null,
 	.unsupported = join_ignore_unsupported,
 	.tx_status = join_tx_status,
@@ -199,6 +245,135 @@ static bool has_established_peer(void)
 		}
 	}
 	return false;
+}
+
+static size_t batman_snapshot_peers(void *ctx, uint8_t (*peers)[6],
+				    size_t capacity)
+{
+	struct edgez_umac_mesh_runtime *runtime = ctx;
+	size_t count = 0;
+
+	for (size_t i = 0; i < EDGEZ_UMAC_MAX_PEERS && count < capacity; ++i) {
+		const struct edgez_umac_peer *peer = &runtime->umac.peers[i];
+		if (peer->in_use && peer->state == EDGEZ_UMAC_PEER_AUTHORIZED) {
+			memcpy(peers[count++], peer->mac_addr, 6);
+		}
+	}
+	return count;
+}
+
+static int batman_transmit(void *ctx, const uint8_t *frame, size_t frame_len,
+			   const uint8_t receiver[6])
+{
+	ARG_UNUSED(ctx);
+	int rc;
+
+	k_mutex_lock(&batman_tx_lock, K_FOREVER);
+	if (mesh_secure) {
+		rc = edgez_mesh_sae_provider_transmit_ethernet(
+			&sae_provider, receiver, frame, frame_len, 0);
+	} else {
+		const struct edgez_umac_peer *peer =
+			edgez_umac_peer_find(&mesh_runtime.umac, receiver);
+		if (!peer || peer->state != EDGEZ_UMAC_PEER_AUTHORIZED) {
+			k_mutex_unlock(&batman_tx_lock);
+			return -ENOENT;
+		}
+		struct edgez_mesh_data_header header = {
+			.sequence_number = open_data_sequence++ & 0x0fffU,
+			.tid = 0,
+			.protected_frame = false,
+			.mesh_control = {
+				.address_extension = EDGEZ_MESH_AE_ADDR5_ADDR6,
+				.ttl = 31U,
+				.sequence_number = open_mesh_sequence++,
+			},
+		};
+		size_t encoded_length = 0;
+		memcpy(header.receiver, receiver, 6);
+		memcpy(header.transmitter, mesh_runtime.radio_info.mac_addr, 6);
+		memcpy(header.destination, frame, 6);
+		memcpy(header.source, mesh_runtime.radio_info.mac_addr, 6);
+		memcpy(header.mesh_control.address5, frame, 6);
+		memcpy(header.mesh_control.address6, frame + 6, 6);
+		rc = edgez_mesh_data_frame_encode(open_data_frame,
+						  sizeof(open_data_frame), &header,
+						  frame, frame_len, &encoded_length);
+		if (rc == EDGEZ_UMAC_OK) {
+			const struct edgez_umac_tx_request request = {
+				.token = open_tx_token++,
+				.frame = open_data_frame,
+				.frame_length = encoded_length,
+				.frame_type = EDGEZ_UMAC_TX_DATA,
+				.aid = peer->aid,
+				.tid = 0,
+				.mcs = 0,
+				.attempts = 2,
+				.bandwidth_mhz = (uint8_t)applied_profile.mesh_bandwidth_mhz,
+				.immediate_status = true,
+			};
+			rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
+		}
+	}
+	k_mutex_unlock(&batman_tx_lock);
+	return rc == EDGEZ_UMAC_OK ? 0 : -EIO;
+}
+
+static uint32_t batman_clock_ms(void *ctx)
+{
+	ARG_UNUSED(ctx);
+	return k_uptime_get_32();
+}
+
+static uint32_t batman_random(void *ctx)
+{
+	ARG_UNUSED(ctx);
+	return sys_rand32_get();
+}
+
+static void batman_lock(void *ctx)
+{
+	ARG_UNUSED(ctx);
+	k_mutex_lock(&batman_state_lock, K_FOREVER);
+}
+
+static void batman_unlock(void *ctx)
+{
+	ARG_UNUSED(ctx);
+	k_mutex_unlock(&batman_state_lock);
+}
+
+static const struct edgez_nrf_mesh_transport batman_transport = {
+	.peers = batman_snapshot_peers,
+	.transmit = batman_transmit,
+	.clock_ms = batman_clock_ms,
+	.random = batman_random,
+	.lock = batman_lock,
+	.unlock = batman_unlock,
+	.ctx = &mesh_runtime,
+};
+
+static uint32_t compressed_ssid(const uint8_t *data, size_t length)
+{
+	uint32_t crc = UINT32_C(0xffffffff);
+	for (size_t i = 0; i < length; ++i) {
+		crc ^= data[i];
+		for (unsigned bit = 0; bit < 8; ++bit) {
+			uint32_t mask = (uint32_t)-(int32_t)(crc & 1U);
+			crc = (crc >> 1U) ^ (UINT32_C(0xedb88320) & mask);
+		}
+	}
+	return ~crc;
+}
+
+static bool same_radio_profile(const struct edgez_halow_profile *a,
+			       const struct edgez_halow_profile *b)
+{
+	return strcmp(a->country_code, b->country_code) == 0 &&
+		strcmp(a->mesh_id, b->mesh_id) == 0 &&
+		strcmp(a->passphrase, b->passphrase) == 0 &&
+		a->mesh_frequency_khz == b->mesh_frequency_khz &&
+		a->mesh_bandwidth_mhz == b->mesh_bandwidth_mhz;
 }
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
@@ -392,22 +567,54 @@ static void report_peers(void)
 	}
 }
 
-static int start_join_only_mesh(void)
+static int start_mesh_profile(const struct edgez_halow_profile *profile,
+			      bool reconfigure)
 {
-	static const uint8_t mesh_id[] = EDGEZ_MESH_ID;
-	static const uint8_t passphrase[] = EDGEZ_MESH_PASSPHRASE;
+	size_t mesh_id_length = strlen(profile->mesh_id);
+	size_t passphrase_length = strlen(profile->passphrase);
+	size_t old_peer_count = 0;
+	bool secure = passphrase_length > 0;
+	int status;
+
+	if (mesh_id_length == 0 || mesh_id_length > 32 ||
+	    strlen(profile->country_code) != 2 || profile->mesh_frequency_khz == 0 ||
+	    profile->mesh_bandwidth_mhz == 0) return EDGEZ_UMAC_INVALID_ARGUMENT;
+	if (reconfigure) {
+		old_peer_count = edgez_umac_peer_count(&mesh_runtime.umac);
+		(void)edgez_nrf_mesh_reset_and_pause();
+		edgez_nrf_relay_reset();
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+		(void)set_mesh_power_save(false);
+		mesh_ps_phase = MESH_PS_WAITING;
+#endif
+		status = edgez_umac_mesh_runtime_stop(&mesh_runtime);
+		if (status != EDGEZ_UMAC_OK) {
+			LOG_ERR("mesh runtime stop failed during profile switch: %d", status);
+			return status;
+		}
+		edgez_rf_unbind_umac();
+		edgez_mesh_sae_provider_deinit(&sae_provider);
+		memset(&mesh_runtime, 0, sizeof(mesh_runtime));
+		memset(&sae_provider, 0, sizeof(sae_provider));
+		open_data_sequence = 0;
+		open_mesh_sequence = 0;
+		open_tx_token = 0;
+		LOG_INF("Profile switch disconnected %u peer(s) and cleared BATMAN routes",
+			(unsigned int)old_peer_count);
+	}
+
 	struct edgez_umac_mesh_runtime_config config = {
 		.radio = edgez_rf_driver_ops(),
-		.country_code = "US",
 		.channel = {
-			.operating_frequency_hz = EDGEZ_MESH_FREQUENCY_HZ,
-			.operating_bw_mhz = EDGEZ_MESH_BANDWIDTH_MHZ,
+			.operating_frequency_hz = profile->mesh_frequency_khz * 1000U,
+			.operating_bw_mhz = profile->mesh_bandwidth_mhz,
 			.primary_bw_mhz = EDGEZ_MESH_PRIMARY_BANDWIDTH_MHZ,
 			.primary_1mhz_channel_index = 0U,
 		},
-		.mesh_id_length = sizeof(mesh_id) - 1U,
+		.mesh_id_length = mesh_id_length,
 		.beacon_interval_tu = EDGEZ_MESH_BEACON_INTERVAL_TU,
-		.compressed_ssid = 0x4544475aU,
+		.compressed_ssid = compressed_ssid((const uint8_t *)profile->mesh_id,
+						  mesh_id_length),
 		.mcs = 0U,
 		.attempts = 2U,
 		.rate_control = {
@@ -416,34 +623,34 @@ static int start_join_only_mesh(void)
 			.maximum_mcs = 7U,
 			.successes_to_increase = 4U,
 		},
-		.secure = true,
+		.secure = secure,
 		.events = join_events,
 	};
-	memcpy(config.mesh_id, mesh_id, sizeof(mesh_id) - 1U);
+	memcpy(config.country_code, profile->country_code, 2);
+	config.country_code[2] = '\0';
+	memcpy(config.mesh_id, profile->mesh_id, mesh_id_length);
 
 	const struct edgez_mesh_sae_provider_config security_config = {
 		.umac = &mesh_runtime.umac,
-		.password = passphrase,
-		.password_length = sizeof(passphrase) - 1U,
-		.mesh_id = mesh_id,
-		.mesh_id_length = sizeof(mesh_id) - 1U,
+		.password = (const uint8_t *)profile->passphrase,
+		.password_length = passphrase_length,
+		.mesh_id = (const uint8_t *)profile->mesh_id,
+		.mesh_id_length = mesh_id_length,
 		.mcs = config.mcs,
 		.attempts = config.attempts,
 		.bandwidth_mhz = config.channel.operating_bw_mhz,
 	};
 
-	int status = edgez_mesh_sae_provider_init(&sae_provider, &security_config);
-	if (status != EDGEZ_UMAC_OK) {
-		LOG_ERR("SAE provider init failed: %d", status);
+	status = EDGEZ_UMAC_OK;
+	if (secure) {
+		status = edgez_mesh_sae_provider_init(&sae_provider, &security_config);
+		if (status != EDGEZ_UMAC_OK) LOG_ERR("SAE provider init failed: %d", status);
 	}
-	if (status == EDGEZ_UMAC_OK) {
+	if (status == EDGEZ_UMAC_OK && secure) {
 		config.security = edgez_mesh_sae_provider_ops();
 		config.security_ctx = &sae_provider;
-		status = edgez_umac_mesh_runtime_init(&mesh_runtime, &config);
-		if (status != EDGEZ_UMAC_OK) {
-			LOG_ERR("mesh runtime init failed: %d", status);
-		}
 	}
+	if (status == EDGEZ_UMAC_OK) status = edgez_umac_mesh_runtime_init(&mesh_runtime, &config);
 	if (status == EDGEZ_UMAC_OK) {
 		status = edgez_rf_bind_umac(&mesh_runtime.umac);
 		if (status != EDGEZ_UMAC_OK) {
@@ -463,11 +670,29 @@ static int start_join_only_mesh(void)
 		return status;
 	}
 
-	edgez_mesh_sae_provider_set_local_address(
-		&sae_provider, mesh_runtime.radio_info.mac_addr);
-	LOG_INF("join-only mesh active id=%s security=SAE country=US frequency=%u Hz bandwidth=%u MHz",
-		EDGEZ_MESH_ID, EDGEZ_MESH_FREQUENCY_HZ,
-		EDGEZ_MESH_BANDWIDTH_MHZ);
+	if (secure) {
+		edgez_mesh_sae_provider_set_local_address(
+			&sae_provider, mesh_runtime.radio_info.mac_addr);
+	}
+	mesh_secure = secure;
+	applied_profile = *profile;
+	if (!reconfigure) {
+		status = edgez_nrf_mesh_init(mesh_runtime.radio_info.mac_addr,
+					     &batman_transport, 1000U);
+		if (status == 0) status = edgez_nrf_relay_init(mesh_runtime.radio_info.mac_addr);
+		if (status != 0) return status;
+	} else {
+		edgez_nrf_mesh_resume();
+	}
+	mesh_started = true;
+	applied_generation = edgez_config_generation();
+	edgez_config_set_halow_mac(mesh_runtime.radio_info.mac_addr);
+	edgez_config_set_halow_ready(true);
+	edgez_config_set_halow_link(has_established_peer());
+	LOG_INF("mesh active id=%s security=%s country=%s frequency=%u kHz bandwidth=%u MHz generation=%u",
+		profile->mesh_id, secure ? "SAE" : "open", profile->country_code,
+		profile->mesh_frequency_khz, profile->mesh_bandwidth_mhz,
+		applied_generation);
 	LOG_INF("radio backend=%s chip=0x%08" PRIx32
 		" vif=%u mac=%02x:%02x:%02x:%02x:%02x:%02x",
 		mesh_runtime.umac.driver->name, mesh_runtime.radio_info.chip_id,
@@ -484,28 +709,90 @@ int main(void)
 	edgez_diagnostics_set_sink(join_diagnostic_sink, NULL);
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
 #endif
-	LOG_INF("EdgeZ nRF54 join-only image; extender/IP services disabled");
-	if (!edgez_halow_power_is_ready()) {
-		LOG_ERR("HC01 power was not initialized before Morse device startup");
-		return 0;
-	}
-	if (start_join_only_mesh() != EDGEZ_UMAC_OK) {
-		return 0;
-	}
+	LOG_INF("EdgeZ nRF54 BLE + BATMAN application; IP services disabled");
+	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
+	livestock_config_init();
+	if (edgez_ble_start() != 0) LOG_ERR("BLE control service failed to start");
 
 	uint32_t next_report = k_uptime_get_32();
 	uint32_t next_mesh_tick = next_report;
+	uint32_t next_start_attempt = next_report;
+	uint32_t next_beacon = next_report;
+	uint32_t next_link_check = next_report;
+	uint32_t next_ble_status = next_report;
 	while (true) {
 		const uint32_t now = k_uptime_get_32();
-		if ((int32_t)(now - next_mesh_tick) >= 0) {
+		struct edgez_halow_profile profile = {0};
+		edgez_config_get_profile(&profile);
+
+		if (!mesh_started && edgez_config_should_autostart() &&
+		    (int32_t)(now - next_start_attempt) >= 0) {
+			next_start_attempt = now + 5000U;
+			if (!edgez_halow_power_is_ready()) {
+				LOG_WRN("HaLow profile ready, but the radio power rail is unavailable");
+			} else if (start_mesh_profile(&profile, false) != EDGEZ_UMAC_OK) {
+				LOG_ERR("HaLow profile start failed; retrying in 5 seconds");
+			}
+		}
+
+		if (mesh_started && edgez_config_generation() != applied_generation) {
+			if (same_radio_profile(&profile, &applied_profile)) {
+				applied_profile = profile;
+				applied_generation = edgez_config_generation();
+				LOG_INF("Identity/beacon settings updated without resetting HaLow generation=%u",
+					applied_generation);
+			} else {
+				edgez_config_set_halow_ready(false);
+				if (start_mesh_profile(&profile, true) != EDGEZ_UMAC_OK) {
+					LOG_ERR("HaLow profile reconfiguration failed");
+				}
+			}
+		}
+
+		if (mesh_started && (int32_t)(now - next_mesh_tick) >= 0) {
 			edgez_umac_mesh_runtime_tick(&mesh_runtime, now);
+			edgez_nrf_mesh_tick();
 			next_mesh_tick = now + EDGEZ_MESH_TICK_MS;
 		}
+		if (mesh_started && (int32_t)(now - next_link_check) >= 0) {
+			edgez_config_set_halow_link(has_established_peer());
+			next_link_check = now + 500U;
+		}
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
-		mesh_power_save_tick(now);
+		if (mesh_started) mesh_power_save_tick(now);
 #endif
-		if ((int32_t)(now - next_report) >= 0) {
+		if (mesh_started && (int32_t)(now - next_beacon) >= 0) {
+			uint8_t beacon[512];
+			size_t beacon_len = 0;
+			uint32_t interval = MAX(profile.beacon_interval_seconds, 5U) * 1000U;
+			if (edgez_config_build_network_beacon(mesh_runtime.radio_info.mac_addr,
+							 beacon, sizeof(beacon), &beacon_len) == 0) {
+				int rc = edgez_nrf_relay_send(NULL, beacon, beacon_len);
+				if (rc == 0) {
+					LOG_INF("Periodic NetworkPacket beacon broadcast bytes=%u",
+						(unsigned int)beacon_len);
+					next_beacon = now + interval;
+				} else {
+					next_beacon = now + 3000U;
+				}
+			} else {
+				next_beacon = now + 3000U;
+			}
+		}
+		if ((int32_t)(now - next_ble_status) >= 0) {
+			uint8_t status_packet[256];
+			size_t status_len = 0;
+			if (edgez_ble_is_connected() &&
+			    edgez_config_build_status_packet(status_packet,
+						     sizeof(status_packet), &status_len) == 0) {
+				(void)edgez_ble_notify_packet(status_packet, status_len);
+			}
+			next_ble_status = now + 5000U;
+		}
+		if (mesh_started && (int32_t)(now - next_report) >= 0) {
 			report_peers();
+			LOG_INF("BATMAN routes=%u BLE=%s", (unsigned)edgez_nrf_mesh_route_count(),
+				edgez_ble_is_connected() ? "connected" : "disconnected");
 			next_report = now + EDGEZ_MESH_REPORT_MS;
 		}
 		k_msleep(

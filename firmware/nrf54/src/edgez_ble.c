@@ -24,9 +24,10 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 #define EDGEZ_FRAME_MAX_LEN (EDGEZ_FRAME_HEADER_LEN + EDGEZ_FRAME_MAX_PAYLOAD)
 #define EDGEZ_BLE_NOTIFY_RETRY_DELAY K_MSEC(10)
 #define EDGEZ_BLE_NOTIFY_MAX_RETRIES 10
+#define EDGEZ_BLE_TX_QUEUE_DEPTH 4
 #define PROVISIONING_CONFIG_MAX_LEN 1024
 #define PROVISIONING_CONFIRMATION_ID_MAX_LEN 64
-#define PROVISIONING_NAME_PREFIX "PROV_"
+#define PROVISIONING_NAME_PREFIX "EZ_"
 
 /* Direct nRF54 provisioning protocol: chunked JSON write and persisted result. */
 #define LIVESTOCK_SERVICE_UUID BT_UUID_128_ENCODE(0xa3631000, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
@@ -46,12 +47,18 @@ static struct bt_uuid_16 edgez_service_uuid = BT_UUID_INIT_16(0xfff0);
 static struct bt_uuid_16 edgez_rx_uuid = BT_UUID_INIT_16(0xfff1);
 static struct bt_uuid_16 edgez_tx_uuid = BT_UUID_INIT_16(0xfff2);
 extern const struct bt_gatt_service_static edgez_svc;
+struct edgez_ble_tx_item {
+	uint16_t length;
+	uint8_t payload[EDGEZ_FRAME_MAX_PAYLOAD];
+};
+K_MSGQ_DEFINE(edgez_ble_tx_queue, sizeof(struct edgez_ble_tx_item),
+	      EDGEZ_BLE_TX_QUEUE_DEPTH, 4);
 static struct bt_conn *current_conn;
 static uint8_t rx_buffer[EDGEZ_FRAME_MAX_LEN * 2];
 static size_t rx_length;
 static uint8_t tx_frame[EDGEZ_FRAME_MAX_LEN];
-static uint8_t pending_response[EDGEZ_FRAME_MAX_PAYLOAD];
-static size_t pending_response_len;
+static struct edgez_ble_tx_item pending_response;
+static bool pending_response_active;
 static uint8_t pending_response_retries;
 static uint8_t battery_level = 100;
 static bool bt_ready;
@@ -105,16 +112,16 @@ static int send_response(const uint8_t *payload, size_t payload_len)
 
 static int queue_response(const uint8_t *payload, size_t payload_len)
 {
-	if (!payload || payload_len == 0 || payload_len > sizeof(pending_response)) {
+	struct edgez_ble_tx_item item;
+
+	if (!payload || payload_len == 0 || payload_len > sizeof(item.payload)) {
 		return -EINVAL;
 	}
-	if (pending_response_len != 0) {
-		return -EBUSY;
+	item.length = (uint16_t)payload_len;
+	memcpy(item.payload, payload, payload_len);
+	if (k_msgq_put(&edgez_ble_tx_queue, &item, K_NO_WAIT) != 0) {
+		return -ENOBUFS;
 	}
-
-	memcpy(pending_response, payload, payload_len);
-	pending_response_len = payload_len;
-	pending_response_retries = 0;
 	LOG_INF("BLE response queued payload_len=%u frame_len=%u",
 		(unsigned int)payload_len,
 		(unsigned int)(payload_len + EDGEZ_FRAME_HEADER_LEN));
@@ -122,16 +129,25 @@ static int queue_response(const uint8_t *payload, size_t payload_len)
 	return 0;
 }
 
+int edgez_ble_notify_packet(const uint8_t *payload, size_t payload_len)
+{
+	return queue_response(payload, payload_len);
+}
+
 static void response_notify_work_handler(struct k_work *work)
 {
 	int rc;
 
 	ARG_UNUSED(work);
-	if (pending_response_len == 0) {
-		return;
+	if (!pending_response_active) {
+		if (k_msgq_get(&edgez_ble_tx_queue, &pending_response, K_NO_WAIT) != 0) {
+			return;
+		}
+		pending_response_active = true;
+		pending_response_retries = 0;
 	}
 
-	rc = send_response(pending_response, pending_response_len);
+	rc = send_response(pending_response.payload, pending_response.length);
 	if ((rc == -ENOMEM || rc == -EAGAIN) &&
 	    pending_response_retries++ < EDGEZ_BLE_NOTIFY_MAX_RETRIES) {
 		LOG_WRN("BLE response notify busy rc=%d retry=%u/%u", rc,
@@ -143,9 +159,12 @@ static void response_notify_work_handler(struct k_work *work)
 		LOG_WRN("EdgeZ BLE response notify failed: %d", rc);
 	} else {
 		LOG_INF("EdgeZ BLE response notified len=%u",
-			(unsigned int)pending_response_len);
+			(unsigned int)pending_response.length);
 	}
-	pending_response_len = 0;
+	pending_response_active = false;
+	if (k_msgq_num_used_get(&edgez_ble_tx_queue) > 0) {
+		(void)k_work_reschedule(&response_notify_work, EDGEZ_BLE_NOTIFY_RETRY_DELAY);
+	}
 }
 
 static void process_rx_frames(void)
@@ -397,7 +416,8 @@ static void connected(struct bt_conn *conn, uint8_t err)
 	provisioning_config_expected = 0;
 	provisioning_config_received = 0;
 	strcpy(provisioning_config_status, "{\"pending\":true}");
-	pending_response_len = 0;
+	pending_response_active = false;
+	k_msgq_purge(&edgez_ble_tx_queue);
 	tx_notify_enabled = false;
 	LOG_INF("EdgeZ BLE provisioning client connected peer=%s; no pairing required",
 		conn_addr_str(conn, addr, sizeof(addr)));
@@ -417,7 +437,8 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 	rx_length = 0;
 	provisioning_config_expected = 0;
 	provisioning_config_received = 0;
-	pending_response_len = 0;
+	pending_response_active = false;
+	k_msgq_purge(&edgez_ble_tx_queue);
 	(void)k_work_cancel_delayable(&response_notify_work);
 	tx_notify_enabled = false;
 	advertising = false;

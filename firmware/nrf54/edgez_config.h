@@ -8,6 +8,7 @@
 #define EDGEZ_VENDOR_IES_MAX_LEN 267
 
 struct edgez_halow_profile {
+	char country_code[3];
 	char mesh_id[33];
 	char passphrase[65];
 	uint32_t mesh_frequency_khz;
@@ -29,6 +30,8 @@ int edgez_config_apply_provisioning(const char *mesh_id, const char *passphrase,
 void edgez_config_get_profile(struct edgez_halow_profile *profile);
 uint32_t edgez_config_generation(void);
 void edgez_config_set_halow_ready(bool ready);
+void edgez_config_set_halow_link(bool link_up);
+void edgez_config_set_halow_mac(const uint8_t mac[6]);
 bool edgez_config_halow_beacon_started(void);
 uint32_t edgez_config_halow_beacon_build_count(void);
 size_t edgez_config_halow_beacon_last_ies_len(void);
@@ -42,5 +45,10 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			       size_t *response_len);
 int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 				  const uint8_t current_mac[6], size_t *out_len);
+int edgez_config_build_network_beacon(const uint8_t current_mac[6],
+				      uint8_t *out, size_t out_cap,
+				      size_t *out_len);
+int edgez_config_build_status_packet(uint8_t *out, size_t out_cap,
+				     size_t *out_len);
 
 #endif

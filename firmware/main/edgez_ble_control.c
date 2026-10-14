@@ -6,7 +6,6 @@
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "esp_mac.h"
-#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -24,7 +23,7 @@
 #include "pb_encode.h"
 #include "usb_control.pb.h"
 #if CONFIG_DAB_START_NETWORK_PACKET_RELAY
-#include "edgez_mqtt.hpp"
+#include "edgez_halow_mesh_service.h"
 #endif
 
 #define EDGEZ_CONTROL_SERVICE_UUID 0xfff0
@@ -251,7 +250,7 @@ static esp_err_t relay_network_packet(const ai_edgez_halow_NetworkPacket *packet
         packet->which_body == ai_edgez_halow_NetworkPacket_report_tag ||
         packet->which_body == ai_edgez_halow_NetworkPacket_payload_tag;
     if (!broadcast) node_id_to_mac(packet->to, destination);
-    return edgez_mqtt_send_network_packet(
+    return edgez_halow_mesh_packet_send(
         broadcast ? NULL : destination, payload, length);
 }
 
@@ -295,7 +294,7 @@ static esp_err_t broadcast_beacon(void)
         return ESP_ERR_INVALID_SIZE;
     }
     free(packet);
-    return edgez_mqtt_send_network_packet(NULL, encoded, stream.bytes_written);
+    return edgez_halow_mesh_packet_send(NULL, encoded, stream.bytes_written);
 }
 
 void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
@@ -358,7 +357,22 @@ static void apply_init(const ai_edgez_halow_HaLowInitConfig *init)
         ESP_LOGI(TAG, "Empty INIT probe received; preserving device profile");
         return;
     }
+    bool apply_mesh_profile = false;
+    bool reconfigure_mesh = false;
     xSemaphoreTake(state_lock, portMAX_DELAY);
+    const bool complete_mesh_profile = init->country_code[0] != '\0' &&
+        init->mesh_id[0] != '\0';
+    const bool mesh_profile_changed = complete_mesh_profile &&
+        (strcmp(control_state.country_code, init->country_code) != 0 ||
+         strcmp(control_state.mesh_id, init->mesh_id) != 0 ||
+         strcmp(control_state.passphrase, init->passphrase) != 0 ||
+         (init->mesh_frequency_khz != 0 &&
+          control_state.frequency_khz != init->mesh_frequency_khz) ||
+         (init->mesh_bandwidth_mhz != 0 &&
+          control_state.bandwidth_mhz != init->mesh_bandwidth_mhz));
+    reconfigure_mesh = control_state.stack_initialized &&
+        mesh_profile_changed;
+    apply_mesh_profile = !control_state.stack_initialized || reconfigure_mesh;
     if (init->country_code[0] != '\0') {
         strlcpy(control_state.country_code, init->country_code,
                 sizeof(control_state.country_code));
@@ -389,7 +403,15 @@ static void apply_init(const ai_edgez_halow_HaLowInitConfig *init)
     }
     xSemaphoreGive(state_lock);
 
-    if (init->country_code[0] != '\0' && init->mesh_id[0] != '\0' &&
+    if (reconfigure_mesh) {
+        ESP_LOGI(TAG,
+                 "New realtime mesh profile queued for HaLow reconfiguration: country='%s' mesh='%s' frequency_khz=%lu bandwidth_mhz=%lu",
+                 init->country_code, init->mesh_id,
+                 (unsigned long)init->mesh_frequency_khz,
+                 (unsigned long)init->mesh_bandwidth_mhz);
+    }
+    if (apply_mesh_profile && init->country_code[0] != '\0' &&
+        init->mesh_id[0] != '\0' &&
         mesh_init_signal != NULL) {
         xSemaphoreGive(mesh_init_signal);
     }
@@ -401,7 +423,22 @@ static void apply_device_settings(const ai_edgez_halow_DeviceSettings *settings)
         ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_SET) {
         return;
     }
+    bool reconfigure_mesh = false;
     xSemaphoreTake(state_lock, portMAX_DELAY);
+    const bool complete_mesh_profile = settings->mesh_id[0] != '\0' &&
+        settings->mesh_frequency_khz != 0 &&
+        settings->mesh_bandwidth_mhz != 0;
+    const bool mesh_profile_changed =
+        (settings->mesh_id[0] != '\0' &&
+         strcmp(control_state.mesh_id, settings->mesh_id) != 0) ||
+        ((settings->passphrase[0] != '\0' || complete_mesh_profile) &&
+         strcmp(control_state.passphrase, settings->passphrase) != 0) ||
+        (settings->mesh_frequency_khz != 0 &&
+         control_state.frequency_khz != settings->mesh_frequency_khz) ||
+        (settings->mesh_bandwidth_mhz != 0 &&
+         control_state.bandwidth_mhz != settings->mesh_bandwidth_mhz);
+    reconfigure_mesh = control_state.stack_initialized &&
+        mesh_profile_changed;
     if (settings->mesh_id[0] != '\0') {
         strlcpy(control_state.mesh_id, settings->mesh_id,
                 sizeof(control_state.mesh_id));
@@ -435,11 +472,19 @@ static void apply_device_settings(const ai_edgez_halow_DeviceSettings *settings)
         control_state.bandwidth_mhz =
             (uint8_t)settings->mesh_bandwidth_mhz;
     }
-    if (settings->passphrase[0] != '\0') {
+    if (settings->passphrase[0] != '\0' || complete_mesh_profile) {
         strlcpy(control_state.passphrase, settings->passphrase,
                 sizeof(control_state.passphrase));
     }
     xSemaphoreGive(state_lock);
+    if (reconfigure_mesh) {
+        ESP_LOGI(TAG,
+                 "Device settings queued a HaLow profile reconfiguration: mesh='%s' frequency_khz=%lu bandwidth_mhz=%lu",
+                 settings->mesh_id,
+                 (unsigned long)settings->mesh_frequency_khz,
+                 (unsigned long)settings->mesh_bandwidth_mhz);
+        if (mesh_init_signal != NULL) xSemaphoreGive(mesh_init_signal);
+    }
 }
 
 static esp_err_t handle_packet(const uint8_t *payload, size_t length)
@@ -629,6 +674,31 @@ static const struct ble_gatt_svc_def control_services[] = {
 
 static int start_advertising(void);
 
+#if CONFIG_IDF_TARGET_ESP32P4
+static int set_p4_device_name(void)
+{
+    uint8_t address[6];
+    const int address_rc = ble_hs_id_copy_addr(own_address_type, address, NULL);
+    if (address_rc != 0) {
+        ESP_LOGE(TAG, "Could not read hosted BLE identity address: %d", address_rc);
+        return address_rc;
+    }
+
+    /* NimBLE stores Bluetooth addresses least-significant byte first. Match
+     * the address order shown by Android when constructing EZ_<MAC>. */
+    char name[24];
+    snprintf(name, sizeof(name), "EZ_%02X%02X%02X%02X%02X%02X",
+             address[5], address[4], address[3], address[2], address[1], address[0]);
+    const int name_rc = ble_svc_gap_device_name_set(name);
+    if (name_rc != 0) {
+        ESP_LOGE(TAG, "Could not set hosted BLE device name: %d", name_rc);
+        return name_rc;
+    }
+    ESP_LOGI(TAG, "Hosted BLE identity name %s", name);
+    return 0;
+}
+#endif
+
 static int gap_event(struct ble_gap_event *event, void *argument)
 {
     (void)argument;
@@ -745,6 +815,11 @@ static void host_sync(void)
         ESP_LOGE(TAG, "Could not determine BLE address type: %d", rc);
         return;
     }
+#if CONFIG_IDF_TARGET_ESP32P4
+    if (set_p4_device_name() != 0) {
+        return;
+    }
+#endif
     (void)start_advertising();
 }
 
@@ -871,19 +946,10 @@ esp_err_t edgez_ble_control_start(void)
         return ESP_FAIL;
     }
 
-    uint8_t mac[6] = {0};
     char name[24] = "EZ_DEVICE";
-#if CONFIG_IDF_TARGET_ESP32P4
-    esp_err_t mac_err = esp_wifi_get_mac(WIFI_IF_STA, mac);
-    if (mac_err != ESP_OK) {
-        /* ESP-Hosted may not have exposed the C6 station interface yet. The
-         * local Bluetooth identity is always available and matches the device
-         * address Android uses for the realtime control connection. */
-        mac_err = esp_read_mac(mac, ESP_MAC_BT);
-    }
-#else
+#if !CONFIG_IDF_TARGET_ESP32P4
+    uint8_t mac[6] = {0};
     const esp_err_t mac_err = esp_read_mac(mac, ESP_MAC_WIFI_STA);
-#endif
     if (mac_err == ESP_OK) {
         snprintf(name, sizeof(name), "EZ_%02X%02X%02X%02X%02X%02X",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
@@ -891,6 +957,7 @@ esp_err_t edgez_ble_control_start(void)
         ESP_LOGW(TAG, "Could not read BLE identity MAC: %s",
                  esp_err_to_name(mac_err));
     }
+#endif
     rc = ble_svc_gap_device_name_set(name);
     if (rc != 0) {
         ESP_LOGE(TAG, "Could not set BLE device name: %d", rc);

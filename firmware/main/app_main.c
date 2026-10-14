@@ -38,7 +38,7 @@ esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
 #include "factory_reset_button.h"
 #endif
 
-#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_START_NETWORK_PACKET_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY
 #include "edgez_mqtt.hpp"
 #endif
 #if CONFIG_DAB_START_MQTT_RELAY
@@ -57,6 +57,7 @@ esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
 #include <string.h>
 
 static const char *TAG = "halow";
+static bool mesh_service_started;
 
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_HALOW_BLE_PROVISIONING
 /* ESP-IDF 5.5's NimBLE host calls this teardown hook. ESP-Hosted 1.4's VHCI
@@ -227,13 +228,26 @@ static esp_err_t start_mesh(void)
 #endif
 
     edgez_halow_mesh_service_info_t service_info = {0};
-    err = edgez_halow_mesh_service_start(&service_config, &service_info);
+    const bool reconfigure = mesh_service_started;
+    err = reconfigure
+              ? edgez_halow_mesh_service_reconfigure(&service_config,
+                                                      &service_info)
+              : edgez_halow_mesh_service_start(&service_config,
+                                                &service_info);
     if (err != ESP_OK) {
         return err;
     }
+    mesh_service_started = true;
 #if CONFIG_HALOW_BLE_PROVISIONING
     edgez_ble_control_note_mesh_started(service_info.mac);
 #endif
+
+    if (reconfigure) {
+        ESP_LOGI(TAG,
+                 "HaLow mesh reconfigured in place for realtime profile '%s'",
+                 service_config.mesh_id);
+        return ESP_OK;
+    }
 
 #if CONFIG_OFFGRID_MESH_PS_TEST
     err = mesh_ps_test_start();
@@ -244,7 +258,7 @@ static esp_err_t start_mesh(void)
     }
 #endif
 
-#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_START_NETWORK_PACKET_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY
     char device_serial[13] = {0};
     snprintf(device_serial, sizeof(device_serial),
              "%02x%02x%02x%02x%02x%02x",
@@ -262,13 +276,6 @@ static esp_err_t start_mesh(void)
         return err;
     }
     edgez_mqtt_set_local_mac(service_info.mac);
-#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
-    edgez_mqtt_register_network_packet_cb(
-        edgez_ble_control_receive_mesh_packet, NULL);
-    ESP_LOGI(TAG,
-             "Unified NetworkPacket L2 relay ready (kind=2, broadcast/unicast)");
-#endif
-#if CONFIG_DAB_START_MQTT_RELAY
     if (mqtt_gateway) {
         ESP_LOGI(TAG,
                  "BATMAN-IV + MQTT relay ready as gateway; advertisement starts when MQTT is online");
@@ -276,6 +283,18 @@ static esp_err_t start_mesh(void)
         ESP_LOGI(TAG,
                  "BATMAN-IV + MQTT relay ready as leaf; waiting for gateway advertisement");
     }
+#endif
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    err = edgez_halow_mesh_packet_transport_start(service_info.mac);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not start BATMAN packet transport: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+    edgez_halow_mesh_packet_register_receive_cb(
+        edgez_ble_control_receive_mesh_packet, NULL);
+    ESP_LOGI(TAG,
+             "Unified NetworkPacket L2 relay ready (kind=2, broadcast/unicast)");
 #endif
 #if CONFIG_DAB_START_MQTT_RELAY && CONFIG_HALOW_BLE_PROVISIONING
     if (provisioned_config.client_id[0] != '\0') {
@@ -301,7 +320,6 @@ static esp_err_t start_mesh(void)
 #elif CONFIG_DAB_START_MQTT_RELAY
     ESP_LOGW(TAG,
              "Local cloud reporting requires a provisioned Appwrite clientId");
-#endif
 #endif
 #if CONFIG_DAB_WIFI_EXTENDER
 #if CONFIG_HALOW_BLE_PROVISIONING
@@ -332,13 +350,14 @@ static void halow_init_task(void *arg)
 #endif
 #if CONFIG_HALOW_MESH_AUTO_JOIN
 #if CONFIG_HALOW_BLE_PROVISIONING
-    esp_err_t mesh_err;
     while (true) {
-        mesh_err = start_mesh();
+        const esp_err_t mesh_err = start_mesh();
         if (mesh_err == ESP_OK) {
-            break;
+            ESP_LOGI(TAG,
+                     "HaLow profile active; waiting for a different realtime profile");
+            continue;
         }
-        ESP_LOGE(TAG, "Failed to start HaLow mesh: %s (%d)",
+        ESP_LOGE(TAG, "Failed to start or reconfigure HaLow mesh: %s (%d)",
                  esp_err_to_name(mesh_err), (int)mesh_err);
         ESP_LOGI(TAG, "Waiting for another realtime INIT_HALOW request");
     }
