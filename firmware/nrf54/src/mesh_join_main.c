@@ -8,16 +8,27 @@
  */
 
 #include <inttypes.h>
+#include <errno.h>
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
+#include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/reboot.h>
+
+#include "pb_decode.h"
+#include "pb_encode.h"
 
 #include "edgez_diagnostics.h"
 #include "edgez_batman_adv_lite.h"
 #include "edgez_ble.h"
+#include "edgez_battery.h"
 #include "edgez_config.h"
+#include "edgez_gps.h"
+#include "edgez_imu.h"
 #include "edgez_mesh_channel_policy.h"
 #include "edgez_mesh_data_frame.h"
 #include "edgez_mesh_msdu.h"
@@ -29,6 +40,7 @@
 #include "edgez_umac_mesh_runtime.h"
 #include "edgez_reboot.h"
 #include "livestocking_config.h"
+#include "usb_control.pb.h"
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 #include "mmhal_wlan.h"
@@ -46,6 +58,13 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
+#define EDGEZ_SENSOR_PAWR_ATTEMPTS 3U
+#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 2000U
+#define EDGEZ_SENSOR_RETRY_DELAY_MS 150U
+#define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
+#define EDGEZ_BUTTON_DEBOUNCE_MS 50U
+#define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
+#define EDGEZ_USER_NODE DT_PATH(zephyr_user)
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 #define EDGEZ_PS_BASELINE_MS 30000U
@@ -67,18 +86,124 @@ static uint32_t applied_generation;
 static struct edgez_halow_profile applied_profile;
 static bool mesh_started;
 static bool mesh_secure;
+static bool sensor_radio_only;
 static uint16_t open_data_sequence;
 static uint32_t open_mesh_sequence;
 static uintptr_t open_tx_token;
 static uintptr_t pawr_tx_token;
 static uint16_t pawr_sequence_number;
 static uint32_t pawr_request_id;
+static bool mesh_services_initialized;
+static struct k_spinlock sensor_pawr_lock;
+static uint32_t sensor_pawr_expected_hash;
+static bool sensor_pawr_waiting;
+K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
+static const struct gpio_dt_spec user_button =
+	GPIO_DT_SPEC_GET(EDGEZ_USER_NODE, key_gpios);
+static bool user_button_ready;
+#endif
 K_MUTEX_DEFINE(batman_state_lock);
 K_MUTEX_DEFINE(batman_tx_lock);
 #define EDGEZ_OPEN_DATA_FRAME_MAX (EDGEZ_MESH_QOS_4ADDR_HEADER_LEN + \
 	EDGEZ_MESH_CONTROL_MAX_LEN + EDGEZ_RFC1042_HEADER_LEN + \
 	EDGEZ_BATADV_MAX_PACKET_LEN)
 static uint8_t open_data_frame[EDGEZ_OPEN_DATA_FRAME_MAX];
+
+static bool profile_uses_sensor_mode(const struct edgez_halow_profile *profile);
+
+static uint64_t mac_to_u64(const uint8_t mac[6])
+{
+	uint64_t value = 0U;
+
+	for (size_t i = 0; i < 6U; ++i) {
+		value = (value << 8U) | mac[i];
+	}
+	return value;
+}
+
+static int acknowledge_pawr_beacon(const struct edgez_pawr_action_view *action,
+				   const uint8_t *beacon, size_t beacon_len)
+{
+	uint8_t response[EDGEZ_PAWR_HEADER_LENGTH];
+	uint8_t frame[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(response)];
+	size_t response_len = 0U;
+	size_t frame_len = 0U;
+
+	if (!edgez_pawr_encode_response(response, sizeof(response),
+			edgez_pawr_payload_hash(beacon, beacon_len), &response_len) ||
+	    !edgez_pawr_encode_action_frame(frame, sizeof(frame),
+			pawr_sequence_number++, mesh_runtime.radio_info.mac_addr,
+			action->source, response, response_len, &frame_len)) {
+		return -EMSGSIZE;
+	}
+
+	const struct edgez_umac_tx_request request = {
+		.token = pawr_tx_token++,
+		.frame = frame,
+		.frame_length = frame_len,
+		.frame_type = EDGEZ_UMAC_TX_MANAGEMENT,
+		.aid = 0U,
+		.tid = 8U,
+		.mcs = mesh_runtime.config.mcs,
+		.attempts = mesh_runtime.config.attempts,
+		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
+		.short_guard = mesh_runtime.config.short_guard,
+		.immediate_status = true,
+	};
+	return edgez_umac_transmit(&mesh_runtime.umac, &request) == EDGEZ_UMAC_OK ?
+		0 : -EIO;
+}
+
+static int route_pawr_beacon(const uint8_t source[6], const uint8_t *beacon,
+			     size_t beacon_len)
+{
+	ai_edgez_halow_NetworkPacket *packet =
+		k_calloc(1U, sizeof(ai_edgez_halow_NetworkPacket));
+	uint8_t encoded[512];
+	int rc;
+
+	if (!packet) {
+		return -ENOMEM;
+	}
+	pb_istream_t input = pb_istream_from_buffer(beacon, beacon_len);
+	packet->from = mac_to_u64(source);
+	packet->operation = ai_edgez_halow_Operation_BROADCAST;
+	packet->interface = ai_edgez_halow_Interface_HALOW;
+	packet->which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
+	if (!pb_decode(&input, ai_edgez_halow_Beacon_fields,
+		       &packet->body.beacon)) {
+		LOG_WRN("PAwR Beacon decode failed: %s", PB_GET_ERROR(&input));
+		k_free(packet);
+		return -EINVAL;
+	}
+	pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
+	if (!pb_encode(&output, ai_edgez_halow_NetworkPacket_fields, packet)) {
+		LOG_WRN("PAwR NetworkPacket encode failed: %s", PB_GET_ERROR(&output));
+		k_free(packet);
+		return -EMSGSIZE;
+	}
+	k_free(packet);
+
+	if (edgez_ble_can_notify()) {
+		rc = edgez_ble_notify_packet(encoded, output.bytes_written);
+		if (rc == 0) {
+			LOG_INF("PAwR Beacon routed via BLE bytes=%u packet=%u",
+				(unsigned)beacon_len, (unsigned)output.bytes_written);
+			return 0;
+		}
+		LOG_WRN("PAwR Beacon BLE forwarding failed rc=%d; using HaLow mesh", rc);
+	}
+
+	rc = edgez_nrf_relay_send(NULL, encoded, output.bytes_written);
+	if (rc == 0) {
+		LOG_INF("PAwR Beacon routed via HaLow mesh bytes=%u packet=%u",
+			(unsigned)beacon_len, (unsigned)output.bytes_written);
+	} else {
+		LOG_WRN("PAwR Beacon HaLow mesh broadcast failed rc=%d", rc);
+	}
+	return rc;
+}
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 enum mesh_ps_phase {
@@ -96,6 +221,7 @@ static uint32_t mesh_ps_baseline_x10;
 #endif
 
 extern bool edgez_halow_power_is_ready(void);
+extern int edgez_halow_power_set(bool enabled);
 
 #if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 static void join_diagnostic_sink(void *ctx,
@@ -129,6 +255,78 @@ void edgez_request_reboot(uint32_t reason)
 {
 	ARG_UNUSED(reason);
 	LOG_WRN("Reboot request ignored by join-only validation image");
+}
+
+static int reset_settings_storage(void)
+{
+	const struct flash_area *storage;
+	int rc = flash_area_open(PARTITION_ID(storage_partition), &storage);
+
+	if (rc != 0) {
+		return rc;
+	}
+	LOG_WRN("Erasing settings storage partition (%u bytes)",
+		(unsigned)storage->fa_size);
+	rc = flash_area_erase(storage, 0, storage->fa_size);
+	flash_area_close(storage);
+	return rc;
+}
+
+static void configure_user_button(void)
+{
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
+	if (!gpio_is_ready_dt(&user_button)) {
+		LOG_WRN("KEY GPIO is not ready");
+		return;
+	}
+	int rc = gpio_pin_configure_dt(&user_button, GPIO_INPUT);
+
+	if (rc != 0) {
+		LOG_WRN("KEY GPIO configuration failed rc=%d", rc);
+		return;
+	}
+	user_button_ready = true;
+	LOG_INF("Hold KEY for %u seconds to clear settings",
+		EDGEZ_BUTTON_RESET_HOLD_MS / 1000U);
+#endif
+}
+
+static void poll_user_button(void)
+{
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
+	static bool was_pressed;
+	static int64_t pressed_at_ms;
+
+	if (!user_button_ready) {
+		return;
+	}
+	int pressed = gpio_pin_get_dt(&user_button);
+	if (pressed < 0) {
+		LOG_ERR("KEY read failed rc=%d", pressed);
+		user_button_ready = false;
+		return;
+	}
+	int64_t now_ms = k_uptime_get();
+	if (pressed && !was_pressed) {
+		pressed_at_ms = now_ms;
+		LOG_INF("KEY pressed");
+	} else if (!pressed && was_pressed) {
+		int64_t held_ms = now_ms - pressed_at_ms;
+
+		if (held_ms >= EDGEZ_BUTTON_RESET_HOLD_MS) {
+			int rc = reset_settings_storage();
+
+			if (rc == 0) {
+				LOG_WRN("settings erased after KEY hold; rebooting unprovisioned");
+				sys_reboot(SYS_REBOOT_COLD);
+			}
+			LOG_ERR("settings erase failed rc=%d", rc);
+		} else if (held_ms >= EDGEZ_BUTTON_DEBOUNCE_MS) {
+			LOG_INF("KEY short press");
+		}
+	}
+	was_pressed = pressed != 0;
+#endif
 }
 
 static int deliver_msdu(const uint8_t destination[6], const uint8_t source[6],
@@ -194,14 +392,58 @@ static int join_ignore_unsupported(void *ctx,
 	ARG_UNUSED(ctx);
 	struct edgez_pawr_action_view action;
 	struct edgez_pawr_request_view request;
+	uint32_t response_hash;
 
-	if (radio && edgez_pawr_decode_action_frame(
-			radio->data, radio->length, &action) &&
-	    edgez_pawr_decode_request(
-			action.payload, action.payload_length, &request) &&
+	if (!radio || !edgez_pawr_decode_action_frame(
+			radio->data, radio->length, &action)) {
+		return EDGEZ_UMAC_OK;
+	}
+	if (edgez_pawr_decode_request(action.payload, action.payload_length,
+				      &request) &&
 	    request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
 		(void)edgez_nrf_mesh_receive_pawr(
 			request.payload, request.payload_length, action.source);
+		return EDGEZ_UMAC_OK;
+	}
+	if (edgez_pawr_decode_request(action.payload, action.payload_length,
+				      &request) &&
+	    request.type == EDGEZ_PAWR_REQUEST_BEACON) {
+		LOG_INF("PAwR beacon request=%u from=%02x:%02x:%02x:%02x:%02x:%02x RSSI=%d dBm bytes=%u",
+			request.request_id, action.source[0], action.source[1],
+			action.source[2], action.source[3], action.source[4],
+			action.source[5], radio->rssi_dbm,
+			(unsigned)request.payload_length);
+		int rc = acknowledge_pawr_beacon(&action, request.payload,
+					 request.payload_length);
+		if (rc != 0) {
+			LOG_WRN("PAwR beacon acknowledgement failed rc=%d", rc);
+		}
+		if (!profile_uses_sensor_mode(&applied_profile)) {
+			rc = route_pawr_beacon(action.source, request.payload,
+					       request.payload_length);
+			if (rc != 0) {
+				LOG_WRN("PAwR Beacon routing exhausted rc=%d", rc);
+			}
+		}
+		return EDGEZ_UMAC_OK;
+	}
+	if (edgez_pawr_decode_response(action.payload, action.payload_length,
+				       &response_hash)) {
+		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+		bool matched = sensor_pawr_waiting &&
+			response_hash == sensor_pawr_expected_hash;
+
+		if (matched) {
+			sensor_pawr_waiting = false;
+		}
+		k_spin_unlock(&sensor_pawr_lock, key);
+		if (matched) {
+			LOG_INF("sensor PAwR response hash=%08x from=%02x:%02x:%02x:%02x:%02x:%02x RSSI=%d dBm",
+				response_hash, action.source[0], action.source[1],
+				action.source[2], action.source[3], action.source[4],
+				action.source[5], radio->rssi_dbm);
+			k_sem_give(&sensor_pawr_response_sem);
+		}
 	}
 	return EDGEZ_UMAC_OK;
 }
@@ -445,6 +687,97 @@ static bool same_radio_profile(const struct edgez_halow_profile *a,
 		a->mesh_bandwidth_mhz == b->mesh_bandwidth_mhz;
 }
 
+static bool profile_uses_sensor_mode(const struct edgez_halow_profile *profile)
+{
+	return profile->sleep_mode_enabled &&
+		(profile->device_type ==
+			ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
+		 profile->device_type ==
+			ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR);
+}
+
+static int sensor_pawr_send_once(uint32_t wake_interval_ms)
+{
+	static const uint8_t broadcast[6] = {
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+	};
+	uint8_t vendor_ies[EDGEZ_VENDOR_IES_MAX_LEN];
+	uint8_t beacon[EDGEZ_VENDOR_IES_MAX_LEN];
+	uint8_t packet[EDGEZ_PAWR_HEADER_LENGTH + EDGEZ_VENDOR_IES_MAX_LEN];
+	uint8_t action[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
+	size_t vendor_ies_len = 0U;
+	size_t beacon_len = 0U;
+	size_t packet_len = 0U;
+	size_t action_len = 0U;
+	uint32_t request_id = ++pawr_request_id;
+	uint32_t hash;
+	int rc;
+
+	/* Refresh GPS, battery and IMU values, then send only the protobuf payload
+	 * carried by the vendor IE. This is the same sleepy beacon contract used by
+	 * the ESP32 PAwR responder. */
+	rc = edgez_config_build_vendor_ies(vendor_ies, sizeof(vendor_ies),
+					   mesh_runtime.radio_info.mac_addr,
+					   &vendor_ies_len);
+	if (rc != 0 || edgez_config_copy_halow_beacon(
+				beacon, sizeof(beacon), &beacon_len) != 0) {
+		LOG_WRN("sensor PAwR payload unavailable rc=%d IE=%u", rc,
+			(unsigned)vendor_ies_len);
+		return rc != 0 ? rc : -EAGAIN;
+	}
+	hash = edgez_pawr_payload_hash(beacon, beacon_len);
+	if (!edgez_pawr_encode_typed_request(
+			packet, sizeof(packet), EDGEZ_PAWR_REQUEST_BEACON,
+			request_id, wake_interval_ms, beacon, beacon_len,
+			&packet_len) ||
+	    !edgez_pawr_encode_action_frame(
+			action, sizeof(action), pawr_sequence_number++,
+			mesh_runtime.radio_info.mac_addr, broadcast,
+			packet, packet_len, &action_len)) {
+		return -EMSGSIZE;
+	}
+
+	k_sem_reset(&sensor_pawr_response_sem);
+	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+	sensor_pawr_expected_hash = hash;
+	sensor_pawr_waiting = true;
+	k_spin_unlock(&sensor_pawr_lock, key);
+
+	const struct edgez_umac_tx_request request = {
+		.token = pawr_tx_token++,
+		.frame = action,
+		.frame_length = action_len,
+		.frame_type = EDGEZ_UMAC_TX_MANAGEMENT,
+		.aid = 0U,
+		.tid = 8U,
+		.mcs = mesh_runtime.config.mcs,
+		.attempts = mesh_runtime.config.attempts,
+		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
+		.short_guard = mesh_runtime.config.short_guard,
+		.immediate_status = true,
+	};
+	rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
+	if (rc != EDGEZ_UMAC_OK) {
+		key = k_spin_lock(&sensor_pawr_lock);
+		sensor_pawr_waiting = false;
+		k_spin_unlock(&sensor_pawr_lock, key);
+		LOG_WRN("sensor PAwR request=%u rejected rc=%d driver=%d",
+			request_id, rc, mesh_runtime.umac.last_driver_status);
+		return -EIO;
+	}
+	edgez_imu_note_halow_tx();
+	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums hash=%08x",
+		request_id, (unsigned)beacon_len, wake_interval_ms, hash);
+	if (k_sem_take(&sensor_pawr_response_sem,
+			       K_MSEC(EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS)) == 0) {
+		return 0;
+	}
+	key = k_spin_lock(&sensor_pawr_lock);
+	sensor_pawr_waiting = false;
+	k_spin_unlock(&sensor_pawr_lock, key);
+	return -ETIMEDOUT;
+}
+
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 static uint32_t busy_percent_x10(void)
 {
@@ -652,6 +985,45 @@ static void report_peers(void)
 	}
 }
 
+static int stop_mesh_profile(bool clear_routes)
+{
+	int status;
+
+	if (!mesh_started) {
+		return EDGEZ_UMAC_OK;
+	}
+	if (clear_routes && mesh_services_initialized && !sensor_radio_only) {
+		(void)edgez_nrf_mesh_reset_and_pause();
+		edgez_nrf_relay_reset();
+	}
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+	(void)set_mesh_power_save(false);
+	mesh_ps_phase = MESH_PS_WAITING;
+#endif
+	status = edgez_umac_mesh_runtime_stop(&mesh_runtime);
+	if (status != EDGEZ_UMAC_OK) {
+		/* runtime_stop leaves the UMAC in STOPPED state even when a driver
+		 * cleanup operation reports an error. Finish local cleanup so a sleepy
+		 * device can cut the rail and start from a clean runtime next cycle. */
+		LOG_WRN("mesh runtime stop completed with driver error: %d", status);
+	}
+	edgez_rf_unbind_umac();
+	if (mesh_secure) {
+		edgez_mesh_sae_provider_deinit(&sae_provider);
+	}
+	memset(&mesh_runtime, 0, sizeof(mesh_runtime));
+	memset(&sae_provider, 0, sizeof(sae_provider));
+	open_data_sequence = 0;
+	open_mesh_sequence = 0;
+	open_tx_token = 0;
+	mesh_secure = false;
+	sensor_radio_only = false;
+	mesh_started = false;
+	edgez_config_set_halow_ready(false);
+	edgez_config_set_halow_link(false);
+	return EDGEZ_UMAC_OK;
+}
+
 static int start_mesh_profile(const struct edgez_halow_profile *profile,
 			      bool reconfigure)
 {
@@ -666,26 +1038,12 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 	if (mesh_id_length == 0 || mesh_id_length > 32 ||
 	    strlen(profile->country_code) != 2 || profile->mesh_frequency_khz == 0 ||
 	    profile->mesh_bandwidth_mhz == 0) return EDGEZ_UMAC_INVALID_ARGUMENT;
-	if (reconfigure) {
+	if (reconfigure && mesh_started) {
 		old_peer_count = edgez_umac_peer_count(&mesh_runtime.umac);
-		(void)edgez_nrf_mesh_reset_and_pause();
-		edgez_nrf_relay_reset();
-#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
-		(void)set_mesh_power_save(false);
-		mesh_ps_phase = MESH_PS_WAITING;
-#endif
-		status = edgez_umac_mesh_runtime_stop(&mesh_runtime);
+		status = stop_mesh_profile(true);
 		if (status != EDGEZ_UMAC_OK) {
-			LOG_ERR("mesh runtime stop failed during profile switch: %d", status);
 			return status;
 		}
-		edgez_rf_unbind_umac();
-		edgez_mesh_sae_provider_deinit(&sae_provider);
-		memset(&mesh_runtime, 0, sizeof(mesh_runtime));
-		memset(&sae_provider, 0, sizeof(sae_provider));
-		open_data_sequence = 0;
-		open_mesh_sequence = 0;
-		open_tx_token = 0;
 		LOG_INF("Profile switch disconnected %u peer(s) and cleared BATMAN routes",
 			(unsigned int)old_peer_count);
 	}
@@ -759,6 +1117,15 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 	if (status != EDGEZ_UMAC_OK) {
 		LOG_ERR("join-only mesh start failed: edgez=%d driver=%d",
 			status, mesh_runtime.umac.last_driver_status);
+		if (mesh_runtime.running) {
+			(void)edgez_umac_mesh_runtime_stop(&mesh_runtime);
+		}
+		edgez_rf_unbind_umac();
+		if (secure) {
+			edgez_mesh_sae_provider_deinit(&sae_provider);
+		}
+		memset(&mesh_runtime, 0, sizeof(mesh_runtime));
+		memset(&sae_provider, 0, sizeof(sae_provider));
 		return status;
 	}
 
@@ -767,17 +1134,22 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 			&sae_provider, mesh_runtime.radio_info.mac_addr);
 	}
 	mesh_secure = secure;
+	sensor_radio_only = false;
+	mesh_started = true;
 	applied_profile = *profile;
-	if (!reconfigure) {
+	if (!mesh_services_initialized) {
 		status = edgez_nrf_mesh_init(mesh_runtime.radio_info.mac_addr,
 					     &batman_transport,
 					     control_interval_ms);
 		if (status == 0) status = edgez_nrf_relay_init(mesh_runtime.radio_info.mac_addr);
-		if (status != 0) return status;
+		if (status != 0) {
+			(void)stop_mesh_profile(false);
+			return status;
+		}
+		mesh_services_initialized = true;
 	} else {
 		edgez_nrf_mesh_resume();
 	}
-	mesh_started = true;
 	applied_generation = edgez_config_generation();
 	edgez_config_set_halow_mac(mesh_runtime.radio_info.mac_addr);
 	edgez_config_set_halow_ready(true);
@@ -799,6 +1171,244 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 	return EDGEZ_UMAC_OK;
 }
 
+static int start_sensor_radio(const struct edgez_halow_profile *profile)
+{
+	size_t mesh_id_length = strlen(profile->mesh_id);
+	int status;
+
+	if (mesh_id_length == 0U || mesh_id_length > 32U ||
+	    strlen(profile->country_code) != 2U ||
+	    profile->mesh_frequency_khz == 0U ||
+	    profile->mesh_bandwidth_mhz == 0U) {
+		return EDGEZ_UMAC_INVALID_ARGUMENT;
+	}
+
+	struct edgez_umac_mesh_runtime_config config = {
+		.radio = edgez_rf_driver_ops(),
+		.channel = {
+			.operating_frequency_hz = profile->mesh_frequency_khz * 1000U,
+			.operating_bw_mhz = profile->mesh_bandwidth_mhz,
+			.primary_bw_mhz = EDGEZ_MESH_PRIMARY_BANDWIDTH_MHZ,
+			.primary_1mhz_channel_index = 0U,
+		},
+		.mesh_id_length = mesh_id_length,
+		.beacon_interval_tu = edgez_mesh_country_beacon_interval_tu(
+			profile->country_code, EDGEZ_MESH_BEACON_INTERVAL_TU),
+		.compressed_ssid = compressed_ssid((const uint8_t *)profile->mesh_id,
+						  mesh_id_length),
+		.mcs = 0U,
+		.attempts = 2U,
+		.rate_control = {
+			.enabled = true,
+			.initial_mcs = 0U,
+			.maximum_mcs = 2U,
+			.successes_to_increase = 4U,
+		},
+		.secure = false,
+		.events = join_events,
+	};
+	memcpy(config.country_code, profile->country_code, 2U);
+	config.country_code[2] = '\0';
+	memcpy(config.mesh_id, profile->mesh_id, mesh_id_length);
+
+	status = edgez_umac_mesh_runtime_init(&mesh_runtime, &config);
+	if (status == EDGEZ_UMAC_OK) {
+		status = edgez_rf_bind_umac(&mesh_runtime.umac);
+	}
+	if (status == EDGEZ_UMAC_OK) {
+		const struct edgez_umac_config radio_config = {
+			.country_code = {
+				profile->country_code[0], profile->country_code[1], '\0'
+			},
+			.channel = config.channel,
+			.beacon_interval_tu = config.beacon_interval_tu,
+			.dtim_period = 1U,
+			.compressed_ssid = config.compressed_ssid,
+			.rate_control = config.rate_control,
+			.enable_beaconing = false,
+		};
+		status = edgez_umac_start(&mesh_runtime.umac, &radio_config,
+					 &mesh_runtime.radio_info);
+	}
+	if (status != EDGEZ_UMAC_OK) {
+		LOG_ERR("PAwR-only radio start failed edgez=%d driver=%d", status,
+			mesh_runtime.umac.last_driver_status);
+		edgez_rf_unbind_umac();
+		memset(&mesh_runtime, 0, sizeof(mesh_runtime));
+		return status;
+	}
+
+	/* runtime_init installed the receive dispatcher. Mark it running so the
+	 * vendor-action callback is accepted, but deliberately skip the mesh
+	 * runtime start that enables beacons and peer discovery. */
+	mesh_runtime.running = true;
+	mesh_started = true;
+	mesh_secure = false;
+	sensor_radio_only = true;
+	applied_profile = *profile;
+	applied_generation = edgez_config_generation();
+	edgez_config_set_halow_mac(mesh_runtime.radio_info.mac_addr);
+	edgez_config_set_halow_ready(true);
+	edgez_config_set_halow_link(false);
+	LOG_INF("PAwR-only radio active beaconing=0 peering=0 country=%s frequency=%u kHz bandwidth=%u MHz",
+		profile->country_code, profile->mesh_frequency_khz,
+		profile->mesh_bandwidth_mhz);
+	return EDGEZ_UMAC_OK;
+}
+
+enum sensor_power_phase {
+	SENSOR_POWER_INACTIVE,
+	SENSOR_POWER_READY,
+	SENSOR_POWER_SLEEPING,
+};
+
+static struct {
+	enum sensor_power_phase phase;
+	uint32_t generation;
+	uint32_t cycle_started_ms;
+	uint32_t next_wake_ms;
+} sensor_power;
+
+static void sensor_begin_cycle(uint32_t now)
+{
+	sensor_power.cycle_started_ms = now;
+	sensor_power.phase = SENSOR_POWER_READY;
+}
+
+static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now)
+{
+	edgez_ble_stop();
+	/* Sensor mode intentionally does not use GPS. Drive the module's wake pin
+	 * inactive once on entry and do not initialize or poll its UART. */
+	edgez_gps_stop();
+	if (mesh_started) {
+		int rc = stop_mesh_profile(true);
+
+		if (rc != EDGEZ_UMAC_OK) {
+			LOG_WRN("sensor mode could not stop the active mesh rc=%d", rc);
+		}
+	}
+	if (!mesh_started && edgez_halow_power_is_ready()) {
+		int rc = edgez_halow_power_set(false);
+
+		if (rc != 0 && rc != -ENOTSUP) {
+			LOG_WRN("initial sensor HaLow power-off failed rc=%d", rc);
+		}
+	}
+	sensor_power.generation = edgez_config_generation();
+	sensor_begin_cycle(now);
+	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=disabled IMU=hardware-FIFO",
+		profile->device_type, EDGEZ_SENSOR_UPDATE_INTERVAL_MS / 1000U);
+}
+
+static void sensor_leave(void)
+{
+	sensor_power.phase = SENSOR_POWER_INACTIVE;
+	sensor_power.generation = 0U;
+	if (!edgez_halow_power_is_ready()) {
+		int rc = edgez_halow_power_set(true);
+
+		if (rc != 0) {
+			LOG_ERR("could not restore HaLow power after sensor mode rc=%d", rc);
+		}
+	}
+	LOG_INF("low-power sensor mode disabled; restoring persistent mesh mode");
+}
+
+static void sensor_finish_cycle(uint32_t now)
+{
+	uint32_t elapsed_ms = now - sensor_power.cycle_started_ms;
+
+	sensor_power.next_wake_ms = elapsed_ms < EDGEZ_SENSOR_UPDATE_INTERVAL_MS ?
+		sensor_power.cycle_started_ms + EDGEZ_SENSOR_UPDATE_INTERVAL_MS : now + 1000U;
+	sensor_power.phase = SENSOR_POWER_SLEEPING;
+	LOG_INF("sensor cycle complete; HaLow off for %u ms",
+		(unsigned)(sensor_power.next_wake_ms - now));
+}
+
+static void sensor_power_tick(const struct edgez_halow_profile *profile,
+			      uint32_t now)
+{
+	if (sensor_power.phase == SENSOR_POWER_INACTIVE) {
+		sensor_enter(profile, now);
+	}
+	if (sensor_power.generation != edgez_config_generation()) {
+		if (mesh_started) {
+			(void)stop_mesh_profile(true);
+		}
+		if (edgez_halow_power_is_ready()) {
+			(void)edgez_halow_power_set(false);
+		}
+		sensor_power.generation = edgez_config_generation();
+		sensor_begin_cycle(k_uptime_get_32());
+		LOG_INF("sensor profile changed; restarting wake cycle generation=%u",
+			sensor_power.generation);
+		return;
+	}
+
+	if (sensor_power.phase == SENSOR_POWER_SLEEPING) {
+		if ((int32_t)(now - sensor_power.next_wake_ms) >= 0) {
+			sensor_begin_cycle(now);
+		}
+		return;
+	}
+	if (sensor_power.phase != SENSOR_POWER_READY) {
+		return;
+	}
+
+	int rc = 0;
+	if (!mesh_started && !edgez_halow_power_is_ready()) {
+		rc = edgez_halow_power_set(true);
+	}
+	if (rc == 0 && !mesh_started) {
+		rc = start_sensor_radio(profile);
+	}
+	if (rc != EDGEZ_UMAC_OK) {
+		LOG_ERR("sensor HaLow wake failed rc=%d; retrying next cycle", rc);
+	} else {
+		/* Radio startup is synchronous. A short settle gives the connectionless
+		 * vendor-action receive callback time to arm; no mesh tick, beacon, scan,
+		 * or peering operation is run in sensor mode. */
+		k_msleep(100);
+		bool acknowledged = false;
+
+		for (unsigned attempt = 1U;
+		     attempt <= EDGEZ_SENSOR_PAWR_ATTEMPTS; ++attempt) {
+			rc = sensor_pawr_send_once(EDGEZ_SENSOR_UPDATE_INTERVAL_MS);
+			if (rc == 0) {
+				acknowledged = true;
+				break;
+			}
+			LOG_WRN("sensor PAwR attempt %u/%u failed rc=%d", attempt,
+				EDGEZ_SENSOR_PAWR_ATTEMPTS, rc);
+			if (attempt < EDGEZ_SENSOR_PAWR_ATTEMPTS) {
+				k_msleep(EDGEZ_SENSOR_RETRY_DELAY_MS);
+			}
+		}
+		LOG_INF("sensor telemetry %s after PAwR attempts",
+			acknowledged ? "acknowledged" : "unacknowledged");
+		int stop_rc = stop_mesh_profile(true);
+
+		if (stop_rc != EDGEZ_UMAC_OK) {
+			LOG_WRN("sensor mesh shutdown reported rc=%d; forcing rail cutoff",
+				stop_rc);
+		}
+	}
+	if (!mesh_started && edgez_halow_power_is_ready()) {
+		int power_rc = edgez_halow_power_set(false);
+
+		if (power_rc != 0 && power_rc != -ENOTSUP) {
+			LOG_WRN("sensor HaLow rail cutoff failed rc=%d", power_rc);
+		}
+	}
+	int battery_rc = edgez_battery_refresh_async();
+	if (battery_rc != 0 && battery_rc != -ENOTSUP &&
+	    battery_rc != -EALREADY) {
+		LOG_WRN("sensor battery refresh failed rc=%d", battery_rc);
+	}
+	sensor_finish_cycle(k_uptime_get_32());
+}
+
 int main(void)
 {
 #if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
@@ -806,6 +1416,17 @@ int main(void)
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
 #endif
 	LOG_INF("EdgeZ nRF54 BLE + BATMAN application; IP services disabled");
+	configure_user_button();
+	int sensor_rc = edgez_battery_init();
+	if (sensor_rc != 0) {
+		LOG_WRN("battery sensing unavailable rc=%d", sensor_rc);
+	}
+	sensor_rc = edgez_imu_init();
+	if (sensor_rc != 0) {
+		LOG_WRN("IMU unavailable rc=%d; sensor beacons will omit motion", sensor_rc);
+	} else {
+		LOG_INF("IMU initialized for low-power sensor sampling");
+	}
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	livestock_config_init();
 	if (edgez_ble_start() != 0) LOG_ERR("BLE control service failed to start");
@@ -821,6 +1442,31 @@ int main(void)
 		const uint32_t now = k_uptime_get_32();
 		struct edgez_halow_profile profile = {0};
 		edgez_config_get_profile(&profile);
+		poll_user_button();
+		const bool sensor_mode = edgez_config_should_autostart() &&
+			profile_uses_sensor_mode(&profile);
+
+		if (sensor_mode) {
+			sensor_power_tick(&profile, now);
+			edgez_ble_process();
+			if (sensor_power.phase == SENSOR_POWER_SLEEPING) {
+				const uint32_t sleep_now = k_uptime_get_32();
+				const int32_t remaining_ms =
+					(int32_t)(sensor_power.next_wake_ms - sleep_now);
+
+				/* Zephyr's tickless idle puts the nRF54L15 to sleep until
+				 * the next PAwR cycle or a hardware interrupt (including
+				 * the IMU FIFO watermark interrupt). */
+				k_msleep(remaining_ms > 0 ? remaining_ms : 1);
+			} else {
+				k_msleep(1);
+			}
+			continue;
+		}
+		if (sensor_power.phase != SENSOR_POWER_INACTIVE) {
+			sensor_leave();
+			next_start_attempt = k_uptime_get_32();
+		}
 
 		if (!mesh_started && edgez_config_should_autostart() &&
 		    (int32_t)(now - next_start_attempt) >= 0) {

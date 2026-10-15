@@ -397,6 +397,11 @@ export function SettingsPage({
               setBleDeviceName(device.name);
               setBlePickerOpen(false);
             }}
+            onClear={() => {
+              setBleDeviceId("");
+              setBleDeviceName("");
+              setBlePickerOpen(false);
+            }}
           />
         </Modal>
       ) : null}

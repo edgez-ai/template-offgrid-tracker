@@ -31,3 +31,10 @@ config OFFGRID_NRF54_MESH_PS_TEST
       Wait for an established 802.11s peer, sample a power-save-off
       baseline, then enable MM6108 dynamic power saving and report MM_BUSY
       duty while the mesh runtime continues to run.
+
+config OFFGRID_NRF54_IMU_ACCEL_ONLY
+    bool "Use accelerometer-only low-power IMU FIFO sampling"
+    default n
+    help
+      Keep the gyroscope powered down and collect only accelerometer samples
+      through the IMU hardware FIFO. Intended for battery-powered sensors.

@@ -1,3 +1,7 @@
+#include <zephyr/autoconf.h>
+
+#if !defined(CONFIG_WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY)
+
 #include "edgez_pawr.h"
 
 #include <errno.h>
@@ -144,3 +148,5 @@ bool edgez_pawr_wait_for_response(uint32_t timeout_ms)
 	k_spin_unlock(&state_lock, key);
 	return received;
 }
+
+#endif /* !CONFIG_WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY */

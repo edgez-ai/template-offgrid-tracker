@@ -6,6 +6,7 @@
 struct edgez_imu_sample {
 	float accel_m_s2[3];
 	float gyro_rad_s[3];
+	bool gyro_valid;
 };
 
 int edgez_imu_init(void);

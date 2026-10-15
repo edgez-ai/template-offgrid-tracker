@@ -45,10 +45,12 @@ export function ProfileBleDevicePicker({
   selectedDeviceId,
   onCancel,
   onSelect,
+  onClear,
 }: {
   selectedDeviceId: string;
   onCancel: () => void;
   onSelect: (device: EdgezBleDevice) => void;
+  onClear: () => void;
 }) {
   const [session, state] = useEdgezMeshSession();
   const [error, setError] = useState("");
@@ -100,6 +102,13 @@ export function ProfileBleDevicePicker({
     onSelect(device);
   };
 
+  const clear = async () => {
+    await session.stopBleScan().catch(() => undefined);
+    scanActiveRef.current = false;
+    setScanActive(false);
+    onClear();
+  };
+
   const devices = [...state.bleDevices.values()].sort((left, right) => right.rssi - left.rssi);
 
   return (
@@ -116,6 +125,17 @@ export function ProfileBleDevicePicker({
       </View>
       <ScrollView contentContainerStyle={styles.bleSelectionContent}>
         <Text style={styles.provisioningHelp}>Select the nearby EdgeZ device assigned to this profile.</Text>
+        {selectedDeviceId ? (
+          <Pressable
+            style={styles.bleClearSelectionButton}
+            onPress={() => void clear()}
+            accessibilityRole="button"
+            accessibilityLabel="Clear selected BLE device"
+          >
+            <Ionicons name="close-circle-outline" size={19} color="#b9472f" />
+            <Text style={styles.bleClearSelectionText}>CLEAR SELECTED DEVICE</Text>
+          </Pressable>
+        ) : null}
         <Pressable
           style={[styles.provisioningPrimary, (scanning || scanActive) && styles.disabledButton]}
           onPress={() => void scan()}

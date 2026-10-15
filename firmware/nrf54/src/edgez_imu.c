@@ -18,10 +18,17 @@ LOG_MODULE_REGISTER(edgez_imu, LOG_LEVEL_INF);
 #define EDGEZ_IMU_SETTLE_MS 100
 #define EDGEZ_IMU_RESTART_FAILURE_LIMIT 20U
 #define EDGEZ_IMU_HALOW_TX_QUIET_MS 100U
+#if defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+#define EDGEZ_IMU_FIFO_WATERMARK_SAMPLES 48U
+#define EDGEZ_IMU_FIFO_DMA_SAMPLES 48U
+#define EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE 3U
+#define EDGEZ_IMU_FIFO_BYTES_PER_SAMPLE 6U
+#else
 #define EDGEZ_IMU_FIFO_WATERMARK_SAMPLES 32U
 #define EDGEZ_IMU_FIFO_DMA_SAMPLES 16U
 #define EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE 6U
 #define EDGEZ_IMU_FIFO_BYTES_PER_SAMPLE 12U
+#endif
 #define EDGEZ_IMU_FIFO_WATERMARK_WORDS \
 	(EDGEZ_IMU_FIFO_WATERMARK_SAMPLES * EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE)
 #define EDGEZ_IMU_FIFO_DMA_WORDS \
@@ -120,8 +127,12 @@ bool edgez_imu_halow_tx_quiet(void)
 static int set_sampling_rate(int hz)
 {
 	uint8_t accel_ctrl = hz > 0 ? EDGEZ_IMU_ODR_12_5_HZ : 0U;
+#if defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+	uint8_t gyro_ctrl = 0U;
+#else
 	uint8_t gyro_ctrl = hz > 0 ?
 		EDGEZ_IMU_ODR_12_5_HZ | EDGEZ_IMU_GYRO_FS_125_DPS : 0U;
+#endif
 	int rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL1_XL_REG,
 				       accel_ctrl);
 
@@ -152,8 +163,7 @@ static int configure_fifo(void)
 		imu_irq_registered = true;
 	}
 
-	/* The FIFO watermark is expressed in 16-bit words. One synchronized
-	 * gyro + accelerometer sample occupies six words. */
+	/* The FIFO watermark is expressed in 16-bit words. */
 	rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_FIFO_CTRL1_REG,
 				     EDGEZ_IMU_FIFO_WATERMARK_WORDS & 0xffU);
 	if (rc == 0) {
@@ -162,8 +172,12 @@ static int configure_fifo(void)
 	}
 	if (rc == 0) {
 		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_FIFO_CTRL3_REG,
+#if defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+					     EDGEZ_IMU_FIFO_NO_DECIMATION);
+#else
 					     (EDGEZ_IMU_FIFO_NO_DECIMATION << 3) |
 					     EDGEZ_IMU_FIFO_NO_DECIMATION);
+#endif
 	}
 	if (rc == 0) {
 		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_INT1_CTRL_REG,
@@ -262,14 +276,18 @@ static int imu_configure(void)
 
 static void imu_sample_work_handler(struct k_work *work)
 {
-	struct edgez_imu_sample next_sample;
+	struct edgez_imu_sample next_sample = {0};
 	uint8_t fifo_status[4];
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
 	int16_t gyro_raw[3] = {0};
+#endif
 	int16_t accel_raw[3] = {0};
 	uint16_t available_words;
 	uint16_t words_to_read;
 	uint16_t fifo_pattern;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
 	uint8_t gyro_valid = 0U;
+#endif
 	uint8_t accel_valid = 0U;
 	uint32_t quiet_remaining_ms;
 	int rc;
@@ -307,9 +325,15 @@ static void imu_sample_work_handler(struct k_work *work)
 		goto sample_failed;
 	}
 
-	/* FIFO_PATTERN identifies the first 16-bit word in the transfer. Walking
-	 * it also keeps decoding correct after a continuous-mode overrun. */
+	/* FIFO_PATTERN identifies the first 16-bit word in the transfer. */
 	for (uint16_t i = 0; i < words_to_read; ++i) {
+#if defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+		uint8_t pattern = (uint8_t)((fifo_pattern + i) % 3U);
+		int16_t value = (int16_t)sys_get_le16(&fifo_raw[i * 2U]);
+
+		accel_raw[pattern] = value;
+		accel_valid |= BIT(pattern);
+#else
 		uint8_t pattern = (uint8_t)((fifo_pattern + i) % 6U);
 		int16_t value = (int16_t)sys_get_le16(&fifo_raw[i * 2U]);
 
@@ -320,17 +344,27 @@ static void imu_sample_work_handler(struct k_work *work)
 			accel_raw[pattern - 3U] = value;
 			accel_valid |= BIT(pattern - 3U);
 		}
+#endif
 	}
-	if (gyro_valid != 0x07U || accel_valid != 0x07U) {
+	if (accel_valid != 0x07U
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+	    || gyro_valid != 0x07U
+#endif
+	) {
 		rc = -EIO;
 		goto sample_failed;
 	}
 	for (size_t i = 0; i < 3; ++i) {
 		next_sample.accel_m_s2[i] =
 			(float)accel_raw[i] * EDGEZ_IMU_ACCEL_M_S2_PER_LSB;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
 		next_sample.gyro_rad_s[i] =
 			(float)gyro_raw[i] * EDGEZ_IMU_GYRO_RAD_S_PER_LSB;
+#endif
 	}
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY)
+	next_sample.gyro_valid = true;
+#endif
 	k_mutex_lock(&imu_lock, K_FOREVER);
 	latest_sample = next_sample;
 	imu_sample_valid = true;
@@ -389,8 +423,10 @@ int edgez_imu_init(void)
 	imu_sample_failure_count = 0;
 	init_failure_count = 0;
 	(void)k_work_schedule(&imu_sample_work, K_MSEC(EDGEZ_IMU_SETTLE_MS));
-	LOG_INF("6-axis IMU ready bus=%s addr=0x%02x rate=%d Hz FIFO watermark=%u samples EasyDMA batch=%u bytes",
-		imu_i2c.bus->name, imu_i2c.addr, EDGEZ_IMU_SAMPLE_RATE_HZ,
+	LOG_INF("IMU ready bus=%s addr=0x%02x mode=%s rate=%d Hz FIFO watermark=%u samples EasyDMA batch=%u bytes",
+		imu_i2c.bus->name, imu_i2c.addr,
+		IS_ENABLED(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY) ? "accelerometer-only" : "6-axis",
+		EDGEZ_IMU_SAMPLE_RATE_HZ,
 		EDGEZ_IMU_FIFO_WATERMARK_SAMPLES, EDGEZ_IMU_FIFO_BUFFER_BYTES);
 	return 0;
 }

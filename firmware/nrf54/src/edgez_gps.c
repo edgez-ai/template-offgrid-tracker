@@ -15,6 +15,7 @@
 LOG_MODULE_REGISTER(edgez_gps, LOG_LEVEL_INF);
 
 #define GPS_NODE DT_ALIAS(gps0)
+#define EDGEZ_USER_NODE DT_PATH(zephyr_user)
 #define GPS_RX_GPIO_NODE DT_NODELABEL(gpio1)
 #define GPS_RX_PIN 12U
 #define GPS_LINE_MAX 128U
@@ -58,6 +59,39 @@ static int64_t gps_last_value_log_ms;
 static int64_t gps_last_fix_publish_ms;
 static struct edgez_gps_fix latest_fix;
 static struct k_spinlock fix_lock;
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, gps_wake_gpios)
+static const struct gpio_dt_spec gps_wake =
+	GPIO_DT_SPEC_GET(EDGEZ_USER_NODE, gps_wake_gpios);
+static bool gps_wake_configured;
+
+static int gps_set_awake(bool awake)
+{
+	int rc;
+
+	if (!gpio_is_ready_dt(&gps_wake)) {
+		return -ENODEV;
+	}
+	if (!gps_wake_configured) {
+		rc = gpio_pin_configure_dt(&gps_wake, GPIO_OUTPUT_INACTIVE);
+		if (rc < 0) {
+			return rc;
+		}
+		gps_wake_configured = true;
+	}
+	rc = gpio_pin_set_dt(&gps_wake, awake ? 1 : 0);
+	if (rc == 0 && awake) {
+		/* Allow the L76K UART clock and first NMEA sentence to stabilize. */
+		k_msleep(100);
+	}
+	return rc;
+}
+#else
+static int gps_set_awake(bool awake)
+{
+	ARG_UNUSED(awake);
+	return 0;
+}
+#endif
 
 static void gps_uart_callback(const struct device *dev, struct uart_event *event,
 			      void *user_data)
@@ -326,13 +360,20 @@ int edgez_gps_init(void)
 	if (gps_ready) {
 		return 0;
 	}
+	config_rc = gps_set_awake(true);
+	if (config_rc < 0) {
+		LOG_WRN("L76K wake GPIO failed rc=%d", config_rc);
+		return config_rc;
+	}
 	if (!device_is_ready(gps_uart)) {
 		LOG_WRN("L76K UART device is not ready");
+		(void)gps_set_awake(false);
 		return -ENODEV;
 	}
 	config_rc = uart_callback_set(gps_uart, gps_uart_callback, NULL);
 	if (config_rc < 0) {
 		LOG_WRN("L76K async UART callback setup failed rc=%d", config_rc);
+		(void)gps_set_awake(false);
 		return config_rc;
 	}
 	line_len = 0;
@@ -357,9 +398,11 @@ int edgez_gps_init(void)
 	if (config_rc < 0) {
 		gps_ready = false;
 		LOG_WRN("L76K async UART RX enable failed rc=%d", config_rc);
+		(void)gps_set_awake(false);
 		return config_rc;
 	}
-	LOG_INF("L76K ready UART=uart21 baud=9600 MCU_TX=P1.11->L76K_RXD MCU_RX=P1.12<-L76K_TXD [swapped-pin test]");
+	LOG_INF("L76K ready UART=%s baud=9600 MCU_TX=P1.11->L76K_RXD MCU_RX=P1.12<-L76K_TXD",
+		gps_uart->name);
 	config_rc = uart_config_get(gps_uart, &config);
 	if (config_rc == 0) {
 		LOG_INF("L76K UART config baud=%u data_bits=%u stop_bits=%u parity=%u flow_ctrl=%u",
@@ -388,6 +431,7 @@ void edgez_gps_stop(void)
 		gps_ready = false;
 		(void)uart_rx_disable(gps_uart);
 	}
+	(void)gps_set_awake(false);
 	line_len = 0;
 	key = k_spin_lock(&fix_lock);
 	latest_fix = (struct edgez_gps_fix){0};

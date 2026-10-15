@@ -27,7 +27,7 @@ LOG_MODULE_REGISTER(edgez_ble, LOG_LEVEL_INF);
 #define EDGEZ_BLE_TX_QUEUE_DEPTH 4
 #define PROVISIONING_CONFIG_MAX_LEN 1024
 #define PROVISIONING_CONFIRMATION_ID_MAX_LEN 64
-#define PROVISIONING_NAME_PREFIX "EZ_"
+#define PROVISIONING_NAME_PREFIX "NRF_"
 
 /* Direct nRF54 provisioning protocol: chunked JSON write and persisted result. */
 #define LIVESTOCK_SERVICE_UUID BT_UUID_128_ENCODE(0xa3631000, 0xb82e, 0x44c2, 0x9b1d, 0xa790675b4ac1)
@@ -65,6 +65,7 @@ static bool bt_ready;
 static bool advertising;
 static bool provisioning_enabled;
 static bool tx_notify_enabled;
+static bool shutdown_requested;
 static char advertised_name[20];
 static const struct bt_le_conn_param stable_connection = {
 	.interval_min = 24, /* 30 ms */
@@ -490,6 +491,57 @@ bool edgez_ble_is_connected(void)
 	return current_conn != NULL;
 }
 
+void edgez_ble_stop(void)
+{
+	provisioning_enabled = false;
+	shutdown_requested = true;
+	(void)k_work_cancel_delayable(&restart_advertising_work);
+	(void)k_work_cancel_delayable(&response_notify_work);
+	pending_response_active = false;
+	k_msgq_purge(&edgez_ble_tx_queue);
+	tx_notify_enabled = false;
+	if (current_conn) {
+		int rc = bt_conn_disconnect(current_conn,
+					    BT_HCI_ERR_REMOTE_USER_TERM_CONN);
+
+		if (rc != 0 && rc != -ENOTCONN) {
+			LOG_WRN("BLE sensor-mode disconnect failed rc=%d", rc);
+		}
+	}
+}
+
+void edgez_ble_process(void)
+{
+	if (!shutdown_requested || current_conn) {
+		return;
+	}
+	if (advertising) {
+		int rc = bt_le_adv_stop();
+
+		if (rc != 0 && rc != -EALREADY) {
+			LOG_WRN("BLE advertising stop failed rc=%d", rc);
+			return;
+		}
+		advertising = false;
+	}
+	if (bt_ready) {
+		int rc = bt_disable();
+
+		if (rc != 0) {
+			LOG_WRN("BLE stack disable failed rc=%d", rc);
+			return;
+		}
+		bt_ready = false;
+		LOG_INF("BLE stack disabled for low-power sensor mode");
+	}
+	shutdown_requested = false;
+}
+
+bool edgez_ble_can_notify(void)
+{
+	return current_conn != NULL && tx_notify_enabled;
+}
+
 bool edgez_ble_is_enabled(void)
 {
 	return bt_ready && provisioning_enabled;
@@ -510,6 +562,7 @@ int edgez_ble_start(void)
 
 	LOG_INF("BLE provisioning startup begin ready=%u service=FFF0 rx=FFF1 tx=FFF2 max_payload=%u",
 		bt_ready, EDGEZ_FRAME_MAX_PAYLOAD);
+	shutdown_requested = false;
 	provisioning_enabled = true;
 	if (bt_ready) {
 		start_advertising();

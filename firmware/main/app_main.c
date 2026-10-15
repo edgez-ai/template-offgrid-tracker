@@ -21,6 +21,9 @@ void edgez_ble_control_note_mesh_link(int state);
 void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
                                             size_t length,
                                             void *arg);
+esp_err_t edgez_ble_control_route_pawr_beacon(const uint8_t source_mac[6],
+                                               const uint8_t *payload,
+                                               size_t length);
 #endif
 esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
                                                char mesh_id[33],
@@ -84,15 +87,26 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
              "PAwR beacon from %02x:%02x:%02x:%02x:%02x:%02x, RSSI=%d dBm, bytes=%u",
              source_mac[0], source_mac[1], source_mac[2], source_mac[3],
              source_mac[4], source_mac[5], (int)rssi_dbm, (unsigned)length);
-    const esp_err_t err = halow_pawr_ack_beacon(source_mac, beacon, length);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "PAwR acknowledgement failed: %s", esp_err_to_name(err));
-    }
 #if CONFIG_DAB_START_MQTT_RELAY
-    const esp_err_t telemetry_err = halow_telemetry_forward_beacon(beacon, length);
-    if (telemetry_err != ESP_OK && telemetry_err != ESP_ERR_NOT_FOUND) {
-        ESP_LOGW(TAG, "PAwR telemetry forwarding failed: %s",
-                 esp_err_to_name(telemetry_err));
+    if (edgez_mqtt_gateway_available()) {
+        const esp_err_t telemetry_err =
+            halow_telemetry_forward_beacon(beacon, length);
+        if (telemetry_err == ESP_OK) {
+            ESP_LOGI(TAG, "PAwR Beacon routed via MQTT");
+            return;
+        }
+        if (telemetry_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "PAwR MQTT forwarding failed: %s; trying local transports",
+                     esp_err_to_name(telemetry_err));
+        }
+    }
+#endif
+#if CONFIG_HALOW_BLE_PROVISIONING && CONFIG_DAB_START_NETWORK_PACKET_RELAY
+    const esp_err_t route_err = edgez_ble_control_route_pawr_beacon(
+        source_mac, beacon, length);
+    if (route_err != ESP_OK) {
+        ESP_LOGW(TAG, "PAwR Beacon routing exhausted: %s",
+                 esp_err_to_name(route_err));
     }
 #endif
 }

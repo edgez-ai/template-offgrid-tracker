@@ -405,6 +405,64 @@ void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
                  esp_err_to_name(err));
     }
 }
+
+esp_err_t edgez_ble_control_route_pawr_beacon(const uint8_t source_mac[6],
+                                               const uint8_t *payload,
+                                               size_t length)
+{
+    if (source_mac == NULL || payload == NULL || length == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ai_edgez_halow_NetworkPacket *packet = calloc(1, sizeof(*packet));
+    if (packet == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    pb_istream_t stream = pb_istream_from_buffer(payload, length);
+    packet->from = mac_to_u64(source_mac);
+    packet->operation = ai_edgez_halow_Operation_BROADCAST;
+    packet->interface = ai_edgez_halow_Interface_HALOW;
+    packet->which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
+    if (!pb_decode(&stream, ai_edgez_halow_Beacon_fields,
+                   &packet->body.beacon)) {
+        ESP_LOGW(TAG, "PAwR Beacon decode failed: %s",
+                 PB_GET_ERROR(&stream));
+        free(packet);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint8_t encoded[EDGEZ_MAX_PACKET_SIZE];
+    pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
+    if (!pb_encode(&output, ai_edgez_halow_NetworkPacket_fields, packet)) {
+        ESP_LOGW(TAG, "PAwR NetworkPacket encode failed: %s",
+                 PB_GET_ERROR(&output));
+        free(packet);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    free(packet);
+
+    esp_err_t err = notify_raw_packet(encoded, output.bytes_written);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "PAwR Beacon routed via BLE bytes=%u packet=%u",
+                 (unsigned)length, (unsigned)output.bytes_written);
+        return ESP_OK;
+    }
+    if (err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "PAwR Beacon BLE unavailable: %s; using HaLow mesh",
+                 esp_err_to_name(err));
+    }
+
+    err = edgez_halow_mesh_packet_send(NULL, encoded, output.bytes_written);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "PAwR Beacon routed via HaLow mesh bytes=%u packet=%u",
+                 (unsigned)length, (unsigned)output.bytes_written);
+    } else {
+        ESP_LOGW(TAG, "PAwR Beacon HaLow mesh broadcast failed: %s",
+                 esp_err_to_name(err));
+    }
+    return err;
+}
 #endif
 
 static esp_err_t send_status(const ai_edgez_halow_NetworkPacket *request)

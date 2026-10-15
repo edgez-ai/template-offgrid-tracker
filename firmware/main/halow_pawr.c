@@ -1,6 +1,5 @@
 #include "halow_pawr.h"
 
-#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -8,20 +7,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
+#include "edgez_halow_mesh_service.h"
 #include "edgez_pawr_protocol.h"
-#include "edgez_mesh.h"
-#include "mmwlan.h"
 
 #define PAWR_QUEUE_DEPTH 4U
 
 static const char *TAG = "halow_pawr";
-static const uint8_t EDGEZ_ACTION_OUI[MMWLAN_OUI_SIZE] = {'E', 'd', 'g'};
 
 struct pawr_action {
-    uint8_t source_mac[MMWLAN_MAC_ADDR_LEN];
+    uint8_t source_mac[6];
     int16_t rssi_dbm;
     uint16_t length;
-    uint8_t payload[MMWLAN_VENDOR_ACTION_MAX_PAYLOAD];
+    uint8_t payload[EDGEZ_PAWR_MAX_ACTION_PAYLOAD];
 };
 
 static QueueHandle_t action_queue;
@@ -37,41 +34,27 @@ static void pawr_worker(void *arg)
         if (xQueueReceive(action_queue, &action, portMAX_DELAY) != pdTRUE) {
             continue;
         }
-        struct edgez_pawr_request_view request;
-        if (!edgez_pawr_decode_request(action.payload, action.length, &request)) {
-            continue;
-        }
-        if (request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
-            (void)edgez_mesh_receive_pawr(request.payload,
-                                          request.payload_length,
-                                          action.source_mac);
-            continue;
-        }
-        if (request.type != EDGEZ_PAWR_REQUEST_BEACON) {
-            continue;
-        }
-        ESP_LOGI(TAG, "request=%" PRIu32 ", RSSI=%d dBm, payload=%u",
-                 request.request_id, (int)action.rssi_dbm,
-                 (unsigned)request.payload_length);
+        ESP_LOGI(TAG, "Beacon RSSI=%d dBm, payload=%u",
+                 (int)action.rssi_dbm, (unsigned)action.length);
         if (beacon_callback != NULL) {
             beacon_callback(action.source_mac,
-                            request.payload,
-                            request.payload_length,
+                            action.payload,
+                            action.length,
                             action.rssi_dbm,
                             beacon_callback_arg);
         }
     }
 }
 
-static void vendor_action_rx(const uint8_t source_mac[MMWLAN_MAC_ADDR_LEN],
-                             const uint8_t *payload,
-                             size_t payload_len,
-                             int16_t rssi_dbm,
-                             void *arg)
+static void pawr_beacon_rx(const uint8_t source_mac[6],
+                           const uint8_t *payload,
+                           size_t payload_len,
+                           int16_t rssi_dbm,
+                           void *arg)
 {
     (void)arg;
     if (action_queue == NULL || source_mac == NULL || payload == NULL ||
-        payload_len > MMWLAN_VENDOR_ACTION_MAX_PAYLOAD) {
+        payload_len > EDGEZ_PAWR_MAX_ACTION_PAYLOAD) {
         return;
     }
     struct pawr_action action = {
@@ -107,37 +90,7 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg)
         action_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    if (mmwlan_register_vendor_action_rx_cb(EDGEZ_ACTION_OUI, vendor_action_rx, NULL) !=
-        MMWLAN_SUCCESS) {
-        vTaskDelete(worker_task);
-        worker_task = NULL;
-        vQueueDelete(action_queue);
-        action_queue = NULL;
-        return ESP_FAIL;
-    }
+    edgez_halow_mesh_register_pawr_beacon_cb(pawr_beacon_rx, NULL);
     ESP_LOGI(TAG, "Wi-Fi HaLow PAwR responder ready");
     return ESP_OK;
-}
-
-esp_err_t halow_pawr_ack_beacon(const uint8_t destination_mac[6],
-                               const uint8_t *beacon,
-                               size_t length)
-{
-    if (destination_mac == NULL || beacon == NULL || length == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    uint8_t frame[EDGEZ_PAWR_HEADER_LENGTH];
-    size_t frame_length;
-    if (!edgez_pawr_encode_response(frame, sizeof(frame),
-                                    edgez_pawr_payload_hash(beacon, length),
-                                    &frame_length)) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    return mmwlan_send_vendor_action(destination_mac,
-                                     EDGEZ_ACTION_OUI,
-                                     frame,
-                                     frame_length) == MMWLAN_SUCCESS
-               ? ESP_OK
-               : ESP_FAIL;
 }

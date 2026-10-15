@@ -35,6 +35,33 @@ bool edgez_halow_power_is_ready(void)
 	return halow_power_ready;
 }
 
+int edgez_halow_power_set(bool enabled)
+{
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, halow_power_en_gpios)
+	if (!gpio_is_ready_dt(&halow_power_en)) {
+		return -ENODEV;
+	}
+	int status = gpio_pin_set_dt(&halow_power_en, enabled ? 1 : 0);
+
+	if (status < 0) {
+		LOG_ERR("failed to %s HaLow power rail: %d",
+			enabled ? "enable" : "disable", status);
+		return status;
+	}
+	/* MM8108 needs its supply and reset domain to settle before SPI access. */
+	k_msleep(enabled ? 500 : 100);
+	halow_power_ready = enabled;
+	LOG_INF("HaLow power rail %s", enabled ? "enabled" : "disabled");
+	return 0;
+#else
+	if (!enabled) {
+		return -ENOTSUP;
+	}
+	halow_power_ready = true;
+	return 0;
+#endif
+}
+
 static int edgez_halow_power_init(void)
 {
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, halow_power_en_gpios)
@@ -51,13 +78,10 @@ static int edgez_halow_power_init(void)
 	}
 	k_msleep(100);
 
-	status = gpio_pin_set_dt(&halow_power_en, 1);
+	status = edgez_halow_power_set(true);
 	if (status < 0) {
-		LOG_ERR("failed to enable HaLow power rail: %d", status);
 		return status;
 	}
-	k_msleep(500);
-	halow_power_ready = true;
 	LOG_INF("HaLow power ready before Morse init on GPIO %s pin %u",
 		halow_power_en.port->name, halow_power_en.pin);
 #else

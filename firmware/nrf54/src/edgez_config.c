@@ -883,29 +883,43 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 		if (imu_rc < 0) {
 			LOG_WRN("IMU beacon sample failed: %d", imu_rc);
 		} else {
-			static const ai_edgez_halow_SensorType imu_types[] = {
+			static const ai_edgez_halow_SensorType accel_types[] = {
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_X,
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_Y,
 				ai_edgez_halow_SensorType_SENSOR_ACCEL_Z,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_X,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_Y,
-				ai_edgez_halow_SensorType_SENSOR_GYRO_Z,
 			};
-			const float imu_values[] = {
+			const float accel_values[] = {
 				imu_sample.accel_m_s2[0], imu_sample.accel_m_s2[1],
-				imu_sample.accel_m_s2[2], imu_sample.gyro_rad_s[0],
-				imu_sample.gyro_rad_s[1], imu_sample.gyro_rad_s[2],
+				imu_sample.accel_m_s2[2],
 			};
 
 			for (size_t i = 0;
-			     i < ARRAY_SIZE(imu_types) && beacon.sensor_data_count < ARRAY_SIZE(beacon.sensor_data);
+			     i < ARRAY_SIZE(accel_types) && beacon.sensor_data_count < ARRAY_SIZE(beacon.sensor_data);
 			     i++) {
 				ai_edgez_halow_SensorData *entry =
 					&beacon.sensor_data[beacon.sensor_data_count++];
 
-				entry->type = imu_types[i];
+				entry->type = accel_types[i];
 				entry->which_value = ai_edgez_halow_SensorData_float_value_tag;
-				entry->value.float_value = imu_values[i];
+				entry->value.float_value = accel_values[i];
+			}
+			if (imu_sample.gyro_valid) {
+				static const ai_edgez_halow_SensorType gyro_types[] = {
+					ai_edgez_halow_SensorType_SENSOR_GYRO_X,
+					ai_edgez_halow_SensorType_SENSOR_GYRO_Y,
+					ai_edgez_halow_SensorType_SENSOR_GYRO_Z,
+				};
+
+				for (size_t i = 0;
+				     i < ARRAY_SIZE(gyro_types) && beacon.sensor_data_count < ARRAY_SIZE(beacon.sensor_data);
+				     i++) {
+					ai_edgez_halow_SensorData *entry =
+						&beacon.sensor_data[beacon.sensor_data_count++];
+
+					entry->type = gyro_types[i];
+					entry->which_value = ai_edgez_halow_SensorData_float_value_tag;
+					entry->value.float_value = imu_sample.gyro_rad_s[i];
+				}
 			}
 			LOG_DBG("IMU beacon sample accel=[%.3f %.3f %.3f] m/s2 gyro=[%.3f %.3f %.3f] rad/s",
 				(double)imu_sample.accel_m_s2[0], (double)imu_sample.accel_m_s2[1],

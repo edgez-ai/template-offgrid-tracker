@@ -17,6 +17,12 @@ type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 const provisioningPop = "abcd1234";
 const provisioningManager = new EdgezProvisioningManager();
 
+function provisioningDeviceLabel(device: EdgezProvisioningDevice) {
+  if (device.kind === "nrf54") return "nRF54";
+  if (device.kind === "h7608") return "H7608";
+  return "ESP32";
+}
+
 function ProvisioningPasswordField({
   value,
   onChangeText,
@@ -276,8 +282,13 @@ export function ProvisioningFlow({
             </Pressable>
             {devices.map((device) => (
               <Pressable key={`${device.kind}-${device.id}`} style={styles.provisioningDevice} onPress={() => selectDevice(device)} disabled={busy}>
-                <Text style={styles.provisioningDeviceName}>{device.name}</Text>
-                <Text style={styles.settingsMuted}>Serial {device.serial} · {device.kind.toUpperCase()}</Text>
+                <View style={styles.provisioningDeviceHeader}>
+                  <Text style={styles.provisioningDeviceName}>{device.name}</Text>
+                  <View style={[styles.provisioningTypeBadge, device.kind === "nrf54" && styles.provisioningTypeBadgeNrf]}>
+                    <Text style={[styles.provisioningTypeBadgeText, device.kind === "nrf54" && styles.provisioningTypeBadgeTextNrf]}>{provisioningDeviceLabel(device)}</Text>
+                  </View>
+                </View>
+                <Text style={styles.settingsMuted}>Serial {device.serial} · {device.transport === "softap" ? "Wi-Fi" : "Bluetooth"}</Text>
               </Pressable>
             ))}
           </>
@@ -286,8 +297,14 @@ export function ProvisioningFlow({
         {step === 2 && selectedDevice ? (
           <>
             <View style={styles.provisioningSummary}>
-              <Text style={styles.provisioningDeviceName}>{selectedDevice.name}</Text>
+              <View style={styles.provisioningDeviceHeader}>
+                <Text style={styles.provisioningDeviceName}>{selectedDevice.name}</Text>
+                <View style={[styles.provisioningTypeBadge, selectedDevice.kind === "nrf54" && styles.provisioningTypeBadgeNrf]}>
+                  <Text style={[styles.provisioningTypeBadgeText, selectedDevice.kind === "nrf54" && styles.provisioningTypeBadgeTextNrf]}>{provisioningDeviceLabel(selectedDevice)}</Text>
+                </View>
+              </View>
               <Text style={styles.settingsMuted}>Serial {selectedDevice.serial}</Text>
+              <Text style={styles.settingsMuted}>{selectedDevice.kind === "nrf54" ? "Device GPS location supported" : `Firmware target ${selectedDevice.firmwareTarget}`}</Text>
             </View>
             <Text style={styles.provisioningFieldLabel}>NAME</Text>
             <TextInput style={styles.provisioningInput} value={name} onChangeText={setName} placeholder="Device name" placeholderTextColor="#829693" maxLength={selectedDevice.deviceNameMaxLength} />
