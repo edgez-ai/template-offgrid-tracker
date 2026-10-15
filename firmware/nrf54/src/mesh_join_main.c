@@ -62,6 +62,7 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 2000U
 #define EDGEZ_SENSOR_RETRY_DELAY_MS 150U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
+#define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
 #define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
 #define EDGEZ_USER_NODE DT_PATH(zephyr_user)
@@ -1259,6 +1260,8 @@ static int start_sensor_radio(const struct edgez_halow_profile *profile)
 enum sensor_power_phase {
 	SENSOR_POWER_INACTIVE,
 	SENSOR_POWER_READY,
+	SENSOR_POWER_WAITING_GPS,
+	SENSOR_POWER_TRANSMIT,
 	SENSOR_POWER_SLEEPING,
 };
 
@@ -1267,6 +1270,7 @@ static struct {
 	uint32_t generation;
 	uint32_t cycle_started_ms;
 	uint32_t next_wake_ms;
+	uint32_t gps_deadline_ms;
 } sensor_power;
 
 static void sensor_begin_cycle(uint32_t now)
@@ -1278,8 +1282,8 @@ static void sensor_begin_cycle(uint32_t now)
 static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now)
 {
 	edgez_ble_stop();
-	/* Sensor mode intentionally does not use GPS. Drive the module's wake pin
-	 * inactive once on entry and do not initialize or poll its UART. */
+	/* Begin with GPS and its UART off. The power build wakes them only inside
+	 * the bounded reporting window and stops them again before tickless sleep. */
 	edgez_gps_stop();
 	if (mesh_started) {
 		int rc = stop_mesh_profile(true);
@@ -1297,12 +1301,14 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 	}
 	sensor_power.generation = edgez_config_generation();
 	sensor_begin_cycle(now);
-	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=disabled IMU=hardware-FIFO",
-		profile->device_type, EDGEZ_SENSOR_UPDATE_INTERVAL_MS / 1000U);
+	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=%s IMU=hardware-FIFO",
+		profile->device_type, EDGEZ_SENSOR_UPDATE_INTERVAL_MS / 1000U,
+		IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS) ? "cycled" : "disabled");
 }
 
 static void sensor_leave(void)
 {
+	edgez_gps_stop();
 	sensor_power.phase = SENSOR_POWER_INACTIVE;
 	sensor_power.generation = 0U;
 	if (!edgez_halow_power_is_ready()) {
@@ -1319,6 +1325,7 @@ static void sensor_finish_cycle(uint32_t now)
 {
 	uint32_t elapsed_ms = now - sensor_power.cycle_started_ms;
 
+	edgez_gps_stop();
 	sensor_power.next_wake_ms = elapsed_ms < EDGEZ_SENSOR_UPDATE_INTERVAL_MS ?
 		sensor_power.cycle_started_ms + EDGEZ_SENSOR_UPDATE_INTERVAL_MS : now + 1000U;
 	sensor_power.phase = SENSOR_POWER_SLEEPING;
@@ -1333,6 +1340,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		sensor_enter(profile, now);
 	}
 	if (sensor_power.generation != edgez_config_generation()) {
+		edgez_gps_stop();
 		if (mesh_started) {
 			(void)stop_mesh_profile(true);
 		}
@@ -1352,7 +1360,38 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		}
 		return;
 	}
-	if (sensor_power.phase != SENSOR_POWER_READY) {
+	if (sensor_power.phase == SENSOR_POWER_READY) {
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS)
+		int gps_rc = edgez_gps_init();
+
+		if (gps_rc == 0) {
+			sensor_power.gps_deadline_ms = now + EDGEZ_SENSOR_GPS_TIMEOUT_MS;
+			sensor_power.phase = SENSOR_POWER_WAITING_GPS;
+			LOG_INF("sensor GPS awake; waiting up to %u ms for fix",
+				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+			return;
+		}
+		LOG_WRN("sensor GPS wake failed rc=%d; sending without location", gps_rc);
+#endif
+		sensor_power.phase = SENSOR_POWER_TRANSMIT;
+	}
+	if (sensor_power.phase == SENSOR_POWER_WAITING_GPS) {
+		struct edgez_gps_fix fix;
+
+		edgez_gps_poll();
+		if (edgez_gps_get_fix(&fix)) {
+			LOG_INF("sensor GPS fix ready lat=%.6f lon=%.6f satellites=%u",
+				(double)fix.latitude, (double)fix.longitude, fix.satellites);
+			sensor_power.phase = SENSOR_POWER_TRANSMIT;
+		} else if ((int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
+			LOG_WRN("sensor GPS fix timeout after %u ms; sending without location",
+				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+			sensor_power.phase = SENSOR_POWER_TRANSMIT;
+		} else {
+			return;
+		}
+	}
+	if (sensor_power.phase != SENSOR_POWER_TRANSMIT) {
 		return;
 	}
 

@@ -255,9 +255,9 @@ static void publish_fix(float latitude, float longitude, uint8_t satellites)
 	fix_reported = true;
 	gps_last_fix_publish_ms = now;
 	gps_last_value_log_ms = now;
-	LOG_INF("L76K position latitude=%.6f longitude=%.6f satellites=%u%s",
+	LOG_INF("L76K position latitude=%.6f longitude=%.6f satellites=%u%s ttff_ms=%lld",
 		(double)latitude, (double)longitude, satellites,
-		first_fix ? " first_fix" : "");
+		first_fix ? " first_fix" : "", (long long)(now - gps_init_ms));
 }
 
 static void parse_sentence(char *line)

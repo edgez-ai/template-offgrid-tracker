@@ -838,7 +838,9 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 	float latitude_value = snapshot.latitude;
 	float longitude_value = snapshot.longitude;
 
-	if (snapshot.device_gps_enabled && edgez_gps_get_fix(&gps_fix)) {
+	if ((snapshot.device_gps_enabled ||
+	     IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS)) &&
+	    edgez_gps_get_fix(&gps_fix)) {
 		latitude_value = gps_fix.latitude;
 		longitude_value = gps_fix.longitude;
 		has_location = true;

@@ -48,3 +48,10 @@ config OFFGRID_NRF54_IMU_TIMER_DRAIN
       periodic FIFO work. The sensor continues batching accelerometer samples
       in hardware while the MCU remains in System ON idle; the application
       drains the FIFO synchronously after the reporting timer wakes it.
+
+config OFFGRID_NRF54_SENSOR_GPS
+    bool "Wake GPS during each low-power sensor reporting cycle"
+    default n
+    help
+      Wake the L76K and wait briefly for a fix before each sensor PAwR report,
+      then stop GPS and suspend its UART before returning to tickless sleep.
