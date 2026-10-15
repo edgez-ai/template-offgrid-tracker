@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Existing release tag to receive the mobile artifacts (empty uses latest)
+        description: Existing release tag to receive the mobile artifacts (optional)
         required: false
         type: string
       source_ref:
@@ -47,9 +47,15 @@ jobs:
         run: |
           tag="$REQUESTED_TAG"
           if [[ -z "$tag" ]]; then
-            tag="$(gh release view --json tagName --jq .tagName)"
+            tag="$(gh release view --json tagName --jq .tagName 2>/dev/null || true)"
           fi
-          gh release view "$tag" >/dev/null
+          if [[ -n "$tag" ]]; then
+            gh release view "$tag" >/dev/null
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            tag="build-${GITHUB_SHA::12}"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Check Android signing credentials
         env:
@@ -117,6 +123,7 @@ jobs:
           name: offgrid-tracker-mobile
           path: dist/mobile/*
       - name: Attach mobile builds to release
+        if: steps.release.outputs.exists == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
