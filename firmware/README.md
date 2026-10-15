@@ -117,6 +117,7 @@ pio run -e esp32-s3-pawr
 pio run -e heltec-hc33
 pio run -e heltec-hc33-mesh-ps
 pio run -e edgez-nrf54l15-fgh200m
+pio run -e edgez-nrf54l15-fgh200m-power
 pio run -e seeed-xiao-nrf54l15-hc01
 pio run -e seeed-xiao-nrf54l15-sense
 ```
@@ -136,8 +137,9 @@ pio run -e heltec-hc33-mesh-ps -t upload
 pio device monitor -b 115200
 ```
 
-The ESP32-S3 test must use a source checkout because the bundled protected
-mesh archives target ESP32-P4. At boot, verify that the log says
+The ESP32-S3 release prebuilt is available, but this diagnostic experiment uses
+a source checkout so its internal power-save logs are enabled. At boot, verify
+that the log says
 `Private EdgeZ UMAC started ... vif=0`. If it reports another VIF, set
 `CONFIG_OFFGRID_MESH_PS_VIF_ID` to that value in the test defaults before
 building.
@@ -156,8 +158,9 @@ through an 802.11s peer. This test uses the MM6108 chip-level dynamic power-save
 controls; the EdgeZ mesh UMAC does not currently advertise or negotiate the
 802.11s mesh power-save protocol.
 
-The nRF54 debug build compiles `edgez-halow-mesh` from source and requires its
-checkout to be selected globally rather than encoded in this repository:
+Normal ESP32 and nRF54 builds use the `edgez-halow-mesh` release prebuilt
+pinned inside their platform submodule. A debug build can instead compile a
+source checkout selected globally rather than encoded in this repository:
 
 ```sh
 export EDGEZ_HALOW_MESH_SOURCE_ROOT=/absolute/path/to/edgez-halow-mesh
@@ -166,16 +169,35 @@ pio run -e seeed-xiao-nrf54l15-sense
 ```
 
 This source integration enables EdgeZ diagnostics and routes them through the
-Zephyr logging backend. Protected release archives continue to exclude that
-diagnostic implementation.
+Zephyr logging backend. Unset `EDGEZ_HALOW_MESH_SOURCE_ROOT` to return to and
+verify the pinned release prebuilt. Protected release archives continue to
+exclude the diagnostic implementation.
 
 The FGH200M target is the EdgeZ nRF54L15 board with an MM8108 module. The
 Seeed board ID supplies the common nRF54L15 Zephyr/toolchain base only; the
 EdgeZ carrier wiring comes from its dedicated devicetree overlay. Both ESP-IDF
-and Zephyr builds compile their HaLow integrations directly from the `esp-halow`
-and `mm-iot-zephyr` `edgez` source branches; no prebuilt Morse module is used.
+and Zephyr obtain the Morse stack, firmware, BCF, public mesh API, and
+target-specific EdgeZ mesh archives from the pinned `esp-halow` and
+`mm-iot-zephyr` `edgez` submodules. Setting
+`EDGEZ_HALOW_MESH_SOURCE_ROOT` replaces only the EdgeZ mesh archives with a
+source checkout for diagnostics.
 Both targets use the nanopb 0.4.9.1 runtime from `shared/nanopb`; the ESP-IDF
 build exposes it as a component and the Zephyr build compiles the same sources.
+
+### FGH200M low-power sensor image
+
+`edgez-nrf54l15-fgh200m-power` is the current-measurement build for the EdgeZ
+nRF54L15 carrier and FGH200M/MM8108. It disables BLE after sensor provisioning,
+does not peer or run BATMAN, batches accelerometer-only LSM6DSL samples in the
+hardware FIFO, and uses a 15-second reporting cycle. Each cycle wakes the L76K
+GPS for at most 10 seconds, drains the IMU FIFO, powers the MM8108 rail, and
+sends the beacon through connectionless PAwR with up to three attempts. The
+report is still sent when GPS has no fix. GPS/UART and the HaLow rail are then
+stopped before Zephyr returns to tickless System ON idle.
+
+The power image deliberately disables logging, printk, console, and RTT. Use
+the regular `edgez-nrf54l15-fgh200m` image for runtime diagnostics; use a
+current meter rather than RTT to validate the power image.
 
 ### ESP-IDF CLI
 
@@ -225,7 +247,7 @@ button feature before using onboard Ethernet.
 On an unprovisioned device, both board profiles expose the same Espressif BLE
 provisioning contract as `edge-device-esp32-internal`:
 
-- BLE service name: `PROV_<12-character uppercase ESP32 Wi-Fi MAC>`
+- BLE service name: `EZ_<12-character uppercase HaLow MAC>`
 - Security: `NETWORK_PROV_SECURITY_1`
 - Proof of possession: `abcd1234`
 - Custom endpoint: `mqtt-config` (legacy wire name retained for SDK compatibility)
