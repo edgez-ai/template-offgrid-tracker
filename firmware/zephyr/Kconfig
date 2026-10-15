@@ -38,3 +38,13 @@ config OFFGRID_NRF54_IMU_ACCEL_ONLY
     help
       Keep the gyroscope powered down and collect only accelerometer samples
       through the IMU hardware FIFO. Intended for battery-powered sensors.
+
+config OFFGRID_NRF54_IMU_TIMER_DRAIN
+    bool "Drain the IMU FIFO only on the reporting timer wake"
+    depends on OFFGRID_NRF54_IMU_ACCEL_ONLY
+    default n
+    help
+      Do not route the FIFO watermark to an MCU interrupt and do not schedule
+      periodic FIFO work. The sensor continues batching accelerometer samples
+      in hardware while the MCU remains in System ON idle; the application
+      drains the FIFO synchronously after the reporting timer wakes it.

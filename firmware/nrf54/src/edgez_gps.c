@@ -10,6 +10,7 @@
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/ring_buffer.h>
 
 LOG_MODULE_REGISTER(edgez_gps, LOG_LEVEL_INF);
@@ -370,6 +371,11 @@ int edgez_gps_init(void)
 		(void)gps_set_awake(false);
 		return -ENODEV;
 	}
+	config_rc = pm_device_action_run(gps_uart, PM_DEVICE_ACTION_RESUME);
+	if (config_rc != 0 && config_rc != -EALREADY && config_rc != -ENOSYS) {
+		(void)gps_set_awake(false);
+		return config_rc;
+	}
 	config_rc = uart_callback_set(gps_uart, gps_uart_callback, NULL);
 	if (config_rc < 0) {
 		LOG_WRN("L76K async UART callback setup failed rc=%d", config_rc);
@@ -433,6 +439,21 @@ void edgez_gps_stop(void)
 	}
 	(void)gps_set_awake(false);
 	line_len = 0;
+	/* RX disable completes asynchronously. Allow it to release DMA before
+	 * suspending the UART and applying its sleep pin configuration. */
+	if (device_is_ready(gps_uart)) {
+		int rc = 0;
+		for (unsigned attempt = 0; attempt < 20U; ++attempt) {
+			rc = pm_device_action_run(gps_uart, PM_DEVICE_ACTION_SUSPEND);
+			if (rc != -EAGAIN && rc != -EBUSY) {
+				break;
+			}
+			k_msleep(1);
+		}
+		if (rc != 0 && rc != -EALREADY) {
+			LOG_WRN("GPS UART suspend failed rc=%d", rc);
+		}
+	}
 	key = k_spin_lock(&fix_lock);
 	latest_fix = (struct edgez_gps_fix){0};
 	k_spin_unlock(&fix_lock, key);

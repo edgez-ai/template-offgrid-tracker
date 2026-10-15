@@ -72,6 +72,11 @@
 	status = "disabled";
 };
 
+/* Inherited XIAO external UART is unused on the FGH200M carrier. */
+&uart21 {
+	status = "disabled";
+};
+
 &usr_btn {
 	gpios = <&gpio1 8 (GPIO_PULL_UP | GPIO_ACTIVE_LOW)>;
 	label = "KEY";

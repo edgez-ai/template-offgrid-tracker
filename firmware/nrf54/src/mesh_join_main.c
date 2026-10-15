@@ -1356,6 +1356,14 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		return;
 	}
 
+	/* The reporting timer is the only periodic MCU wake source in the power
+	 * build. Collect the samples accumulated by the IMU hardware FIFO before
+	 * powering HaLow, so IMU traffic cannot overlap radio startup or TX. */
+	int imu_rc = edgez_imu_drain_fifo();
+	if (imu_rc != 0 && imu_rc != -ENOTSUP && imu_rc != -EAGAIN) {
+		LOG_WRN("sensor timer-wake IMU FIFO drain failed rc=%d", imu_rc);
+	}
+
 	int rc = 0;
 	if (!mesh_started && !edgez_halow_power_is_ready()) {
 		rc = edgez_halow_power_set(true);
@@ -1450,6 +1458,12 @@ int main(void)
 			sensor_power_tick(&profile, now);
 			edgez_ble_process();
 			if (sensor_power.phase == SENSOR_POWER_SLEEPING) {
+				if (!edgez_ble_is_stopped()) {
+					/* Complete an asynchronous disconnect and controller
+					 * shutdown before entering the long timer sleep. */
+					k_msleep(20);
+					continue;
+				}
 				const uint32_t sleep_now = k_uptime_get_32();
 				const int32_t remaining_ms =
 					(int32_t)(sensor_power.next_wake_ms - sleep_now);

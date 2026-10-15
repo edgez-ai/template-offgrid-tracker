@@ -547,6 +547,12 @@ bool edgez_ble_is_enabled(void)
 	return bt_ready && provisioning_enabled;
 }
 
+bool edgez_ble_is_stopped(void)
+{
+	return !bt_ready && current_conn == NULL && !advertising &&
+	       !shutdown_requested;
+}
+
 void edgez_ble_update_battery(uint8_t level)
 {
 	battery_level = MIN(level, 100);

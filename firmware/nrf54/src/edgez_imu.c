@@ -73,22 +73,28 @@ static const struct i2c_dt_spec imu_i2c = I2C_DT_SPEC_GET(DT_ALIAS(imu0));
 static const struct i2c_dt_spec imu_i2c;
 #endif
 
-#if DT_HAS_ALIAS(imu0) && DT_NODE_HAS_PROP(DT_ALIAS(imu0), irq_gpios)
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN) && \
+	DT_HAS_ALIAS(imu0) && DT_NODE_HAS_PROP(DT_ALIAS(imu0), irq_gpios)
 static const struct gpio_dt_spec imu_irq =
 	GPIO_DT_SPEC_GET(DT_ALIAS(imu0), irq_gpios);
-#else
+#elif !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static const struct gpio_dt_spec imu_irq;
 #endif
 
 static bool imu_ready;
 static bool imu_sample_valid;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static bool imu_irq_registered;
 static uint32_t imu_sample_failure_count;
+#endif
 static atomic_t halow_last_tx_ms;
 static struct edgez_imu_sample latest_sample;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static struct gpio_callback imu_irq_callback;
+#endif
 static uint8_t fifo_raw[EDGEZ_IMU_FIFO_BUFFER_BYTES];
 
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static void imu_sample_work_handler(struct k_work *work);
 K_WORK_DELAYABLE_DEFINE(imu_sample_work, imu_sample_work_handler);
 
@@ -100,6 +106,7 @@ static void imu_irq_handler(const struct device *port,
 	ARG_UNUSED(pins);
 	(void)k_work_reschedule(&imu_sample_work, K_NO_WAIT);
 }
+#endif
 
 static uint32_t halow_tx_quiet_remaining_ms(void)
 {
@@ -147,6 +154,7 @@ static int configure_fifo(void)
 {
 	int rc;
 
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	if (!imu_irq.port || !gpio_is_ready_dt(&imu_irq)) {
 		return -ENODEV;
 	}
@@ -162,6 +170,7 @@ static int configure_fifo(void)
 		}
 		imu_irq_registered = true;
 	}
+#endif
 
 	/* The FIFO watermark is expressed in 16-bit words. */
 	rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_FIFO_CTRL1_REG,
@@ -181,7 +190,11 @@ static int configure_fifo(void)
 	}
 	if (rc == 0) {
 		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_INT1_CTRL_REG,
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+					     0U);
+#else
 					     EDGEZ_IMU_INT1_FIFO_THRESHOLD);
+#endif
 	}
 	if (rc == 0) {
 		rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_FIFO_CTRL5_REG,
@@ -189,7 +202,11 @@ static int configure_fifo(void)
 					     EDGEZ_IMU_FIFO_CONTINUOUS_MODE);
 	}
 	if (rc == 0) {
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+		return 0;
+#else
 		rc = gpio_pin_interrupt_configure_dt(&imu_irq, GPIO_INT_EDGE_TO_ACTIVE);
+#endif
 	}
 	return rc;
 }
@@ -274,6 +291,7 @@ static int imu_configure(void)
 	return rc;
 }
 
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static void imu_sample_work_handler(struct k_work *work)
 {
 	struct edgez_imu_sample next_sample = {0};
@@ -396,6 +414,7 @@ schedule_fallback:
 	(void)k_work_schedule(&imu_sample_work,
 			      K_MSEC(EDGEZ_IMU_FIFO_FALLBACK_MS));
 }
+#endif
 
 int edgez_imu_init(void)
 {
@@ -420,9 +439,13 @@ int edgez_imu_init(void)
 		return rc;
 	}
 	imu_ready = true;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	imu_sample_failure_count = 0;
+#endif
 	init_failure_count = 0;
+#if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	(void)k_work_schedule(&imu_sample_work, K_MSEC(EDGEZ_IMU_SETTLE_MS));
+#endif
 	LOG_INF("IMU ready bus=%s addr=0x%02x mode=%s rate=%d Hz FIFO watermark=%u samples EasyDMA batch=%u bytes",
 		imu_i2c.bus->name, imu_i2c.addr,
 		IS_ENABLED(CONFIG_OFFGRID_NRF54_IMU_ACCEL_ONLY) ? "accelerometer-only" : "6-axis",
@@ -434,6 +457,80 @@ int edgez_imu_init(void)
 bool edgez_imu_is_ready(void)
 {
 	return imu_ready;
+}
+
+int edgez_imu_drain_fifo(void)
+{
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+	struct edgez_imu_sample next_sample = {0};
+	bool captured_sample = false;
+
+	if (!imu_ready) {
+		return -ENODEV;
+	}
+
+	/* Fifteen seconds at 12.5 Hz is about 188 samples. Drain in bounded
+	 * EasyDMA-sized chunks and retain the newest complete XYZ tuple. */
+	for (unsigned int batch = 0U; batch < 16U; ++batch) {
+		uint8_t fifo_status[4];
+		int16_t accel_raw[3] = {0};
+		uint8_t accel_valid = 0U;
+		uint16_t available_words;
+		uint16_t words_to_read;
+		uint16_t fifo_pattern;
+		int rc = i2c_burst_read_dt(&imu_i2c, EDGEZ_IMU_FIFO_STATUS1_REG,
+					    fifo_status, sizeof(fifo_status));
+
+		if (rc < 0) {
+			return rc;
+		}
+		available_words = fifo_status[0] |
+			((uint16_t)(fifo_status[1] & 0x07U) << 8);
+		fifo_pattern = fifo_status[2] |
+			((uint16_t)(fifo_status[3] & 0x03U) << 8);
+		words_to_read = MIN(available_words, EDGEZ_IMU_FIFO_DMA_WORDS);
+		if (words_to_read < EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE) {
+			break;
+		}
+
+		rc = i2c_burst_read_dt(&imu_i2c, EDGEZ_IMU_FIFO_DATA_OUT_L_REG,
+					   fifo_raw,
+					   words_to_read * sizeof(uint16_t));
+		if (rc < 0) {
+			return rc;
+		}
+		for (uint16_t i = 0U; i < words_to_read; ++i) {
+			uint8_t pattern = (uint8_t)((fifo_pattern + i) % 3U);
+			int16_t value =
+				(int16_t)sys_get_le16(&fifo_raw[i * sizeof(uint16_t)]);
+
+			accel_raw[pattern] = value;
+			accel_valid |= BIT(pattern);
+		}
+		if (accel_valid == 0x07U) {
+			for (size_t i = 0U; i < 3U; ++i) {
+				next_sample.accel_m_s2[i] =
+					(float)accel_raw[i] * EDGEZ_IMU_ACCEL_M_S2_PER_LSB;
+			}
+			captured_sample = true;
+		}
+		if (available_words - words_to_read <
+		    EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE) {
+			break;
+		}
+	}
+
+	if (!captured_sample) {
+		return -EAGAIN;
+	}
+	k_mutex_lock(&imu_lock, K_FOREVER);
+	latest_sample = next_sample;
+	imu_sample_valid = true;
+	k_mutex_unlock(&imu_lock);
+	return 0;
+#else
+	return -ENOTSUP;
+#endif
 }
 
 int edgez_imu_read(struct edgez_imu_sample *sample)

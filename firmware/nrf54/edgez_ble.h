@@ -11,6 +11,7 @@ void edgez_ble_process(void);
 bool edgez_ble_is_connected(void);
 bool edgez_ble_can_notify(void);
 bool edgez_ble_is_enabled(void);
+bool edgez_ble_is_stopped(void);
 void edgez_ble_update_battery(uint8_t level);
 int edgez_ble_notify_packet(const uint8_t *payload, size_t payload_len);
 
