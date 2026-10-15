@@ -13,6 +13,10 @@ import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 
 type BeaconLocation = { latitude: number; longitude: number };
 
+const BLE_CONNECT_INITIAL_RETRY_MS = 500;
+const BLE_CONNECT_MAX_RETRY_MS = 30_000;
+const BLE_CONTROL_READY_TIMEOUT_MS = 20_000;
+
 function meshConfig(profile: StoredProfile, iconColor: BeaconIconColor, location?: BeaconLocation): EdgezMeshConfig {
   const channel = channelsForCountry(profile.country).find(({ number }) => number === profile.halowChannel);
   return {
@@ -56,8 +60,10 @@ export function ActiveProfileBleLink({
   onMeshChange: (value: { session: EdgezMeshSession; state: EdgezMeshState }) => void;
 }) {
   const sessionRef = useRef<EdgezMeshSession | null>(null);
-  const retryDelayMs = useRef(500);
+  const retryDelayMs = useRef(BLE_CONNECT_INITIAL_RETRY_MS);
+  const connectAttemptStartedAt = useRef(0);
   const lastBeaconSettingsKey = useRef("");
+  const [connectRetryEpoch, setConnectRetryEpoch] = useState(0);
   const [configured, setConfigured] = useState(false);
   const [setupError, setSetupError] = useState("");
   const [liveLocationError, setLiveLocationError] = useState("");
@@ -204,19 +210,59 @@ export function ActiveProfileBleLink({
   }, [beaconLocation, configured, iconColor, iconType, profile, session, state.bleReady, state.deviceSettings]);
 
   useEffect(() => {
-    if (state.connection !== "none") {
-      retryDelayMs.current = 500;
+    if (!configured || !profile.bleDeviceId) return;
+    if (state.bleReady) {
+      connectAttemptStartedAt.current = 0;
+      retryDelayMs.current = BLE_CONNECT_INITIAL_RETRY_MS;
       return;
     }
-    if (!configured || !profile.bleDeviceId || state.bleConnecting) return;
-    const delay = retryDelayMs.current;
-    const retry = setTimeout(() => {
-      void session.connectBle(profile.bleDeviceId).catch(() => {
-        retryDelayMs.current = Math.min(delay * 2, 30_000);
-      });
-    }, delay);
-    return () => clearTimeout(retry);
-  }, [configured, profile.bleDeviceId, session, state.bleConnecting, state.connection]);
+
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const retryLater = () => {
+      if (!cancelled) setConnectRetryEpoch((value) => value + 1);
+    };
+
+    if (state.connection !== "none" || state.bleConnecting) {
+      if (connectAttemptStartedAt.current === 0) {
+        connectAttemptStartedAt.current = Date.now();
+      }
+      const elapsed = Date.now() - connectAttemptStartedAt.current;
+      const remaining = Math.max(0, BLE_CONTROL_READY_TIMEOUT_MS - elapsed);
+      timer = setTimeout(() => {
+        if (cancelled) return;
+        connectAttemptStartedAt.current = 0;
+        retryDelayMs.current = Math.min(
+          retryDelayMs.current * 2,
+          BLE_CONNECT_MAX_RETRY_MS,
+        );
+        // connectBle() resolves on Android before GATT service discovery has
+        // completed. If neither `connection` nor `ready` progresses, close the
+        // stale GATT before retrying so attempts can never overlap.
+        void session.disconnect().catch(() => undefined).finally(retryLater);
+      }, remaining);
+    } else {
+      connectAttemptStartedAt.current = 0;
+      const delay = retryDelayMs.current;
+      timer = setTimeout(() => {
+        if (cancelled) return;
+        connectAttemptStartedAt.current = Date.now();
+        void session.connectBle(profile.bleDeviceId).catch(() => {
+          connectAttemptStartedAt.current = 0;
+          retryDelayMs.current = Math.min(
+            delay * 2,
+            BLE_CONNECT_MAX_RETRY_MS,
+          );
+          retryLater();
+        });
+      }, delay);
+    }
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [connectRetryEpoch, configured, profile.bleDeviceId, session, state.bleConnecting, state.bleReady, state.connection]);
 
   useEffect(() => {
     const details = [

@@ -18,6 +18,7 @@
 #include "edgez_batman_adv_lite.h"
 #include "edgez_ble.h"
 #include "edgez_config.h"
+#include "edgez_mesh_channel_policy.h"
 #include "edgez_mesh_data_frame.h"
 #include "edgez_mesh_msdu.h"
 #include "edgez_mesh_relay.h"
@@ -57,6 +58,8 @@ static struct edgez_umac_mesh_runtime mesh_runtime;
 static struct edgez_mesh_sae_provider sae_provider;
 static uint32_t tx_status_count;
 static uint32_t tx_failure_count;
+static uint32_t batman_tx_count;
+static uint32_t batman_tx_failure_count;
 static uint32_t previous_operation_failures;
 static uint32_t previous_handler_failures;
 static uint32_t applied_generation;
@@ -316,6 +319,13 @@ static int batman_transmit(void *ctx, const uint8_t *frame, size_t frame_len,
 		}
 	}
 	k_mutex_unlock(&batman_tx_lock);
+	batman_tx_count++;
+	if (rc != EDGEZ_UMAC_OK) {
+		batman_tx_failure_count++;
+		LOG_WRN("BATMAN radio TX rejected peer=%02x:%02x:%02x:%02x:%02x:%02x len=%u rc=%d",
+			receiver[0], receiver[1], receiver[2], receiver[3],
+			receiver[4], receiver[5], (unsigned)frame_len, rc);
+	}
 	return rc == EDGEZ_UMAC_OK ? 0 : -EIO;
 }
 
@@ -507,6 +517,7 @@ static void report_peers(void)
 {
 	size_t active = 0U;
 	size_t established = 0U;
+	size_t authorized = 0U;
 
 	for (size_t i = 0; i < EDGEZ_UMAC_MAX_PEERS; ++i) {
 		const struct edgez_mesh_peering_slot *slot =
@@ -524,14 +535,28 @@ static void report_peers(void)
 			slot->peering.peer_addr[4], slot->peering.peer_addr[5],
 			peering_state_name(slot->peering.state), slot->peering.retries);
 	}
+	for (size_t i = 0; i < EDGEZ_UMAC_MAX_PEERS; ++i) {
+		const struct edgez_umac_peer *peer = &mesh_runtime.umac.peers[i];
+		if (!peer->in_use) {
+			continue;
+		}
+		if (peer->state == EDGEZ_UMAC_PEER_AUTHORIZED) {
+			authorized++;
+		}
+		LOG_INF("radio peer %02x:%02x:%02x:%02x:%02x:%02x aid=%u state=%u",
+			peer->mac_addr[0], peer->mac_addr[1], peer->mac_addr[2],
+			peer->mac_addr[3], peer->mac_addr[4], peer->mac_addr[5],
+			peer->aid, (unsigned)peer->state);
+	}
 
-	LOG_INF("join-only peers=%u established=%u rx=%" PRIu32
+	LOG_INF("join-only peers=%u established=%u authorized=%u rx=%" PRIu32
 		" beacon=%" PRIu32 " auth=%" PRIu32 " mpm=%" PRIu32
 		" malformed=%" PRIu32 " handler_fail=%" PRIu32
 		" rejected=%" PRIu32 " state_err=%" PRIu32
 		" transitions=%" PRIu32 " op_fail=%" PRIu32
-		" tx=%" PRIu32 " tx_fail=%" PRIu32 " driver=%d",
-		(unsigned)active, (unsigned)established,
+		" tx=%" PRIu32 " tx_fail=%" PRIu32
+		" bat_tx=%" PRIu32 " bat_fail=%" PRIu32 " driver=%d",
+		(unsigned)active, (unsigned)established, (unsigned)authorized,
 		mesh_runtime.rx_pipeline.metrics.received,
 		mesh_runtime.rx_pipeline.metrics.beacons,
 		mesh_runtime.rx_pipeline.metrics.authentications,
@@ -543,6 +568,7 @@ static void report_peers(void)
 		mesh_runtime.peering_manager.transitions,
 		mesh_runtime.peering_manager.operation_failures,
 		tx_status_count, tx_failure_count,
+		batman_tx_count, batman_tx_failure_count,
 		mesh_runtime.umac.last_driver_status);
 
 	if (mesh_runtime.peering_manager.operation_failures !=
@@ -574,6 +600,8 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 	size_t passphrase_length = strlen(profile->passphrase);
 	size_t old_peer_count = 0;
 	bool secure = passphrase_length > 0;
+	const uint32_t control_interval_ms =
+		edgez_mesh_country_control_interval_ms(profile->country_code, 1000U);
 	int status;
 
 	if (mesh_id_length == 0 || mesh_id_length > 32 ||
@@ -612,11 +640,16 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 			.primary_1mhz_channel_index = 0U,
 		},
 		.mesh_id_length = mesh_id_length,
-		.beacon_interval_tu = EDGEZ_MESH_BEACON_INTERVAL_TU,
+		.beacon_interval_tu = edgez_mesh_country_beacon_interval_tu(
+			profile->country_code, EDGEZ_MESH_BEACON_INTERVAL_TU),
 		.compressed_ssid = compressed_ssid((const uint8_t *)profile->mesh_id,
 						  mesh_id_length),
 		.mcs = 0U,
 		.attempts = 2U,
+		.peer_liveness_timeout_ms =
+			edgez_mesh_control_liveness_timeout_ms(
+				control_interval_ms,
+				EDGEZ_UMAC_MESH_PEER_LIVENESS_TIMEOUT_MS),
 		.rate_control = {
 			.enabled = true,
 			.initial_mcs = 0U,
@@ -678,7 +711,8 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 	applied_profile = *profile;
 	if (!reconfigure) {
 		status = edgez_nrf_mesh_init(mesh_runtime.radio_info.mac_addr,
-					     &batman_transport, 1000U);
+					     &batman_transport,
+					     control_interval_ms);
 		if (status == 0) status = edgez_nrf_relay_init(mesh_runtime.radio_info.mac_addr);
 		if (status != 0) return status;
 	} else {
@@ -693,6 +727,9 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 		profile->mesh_id, secure ? "SAE" : "open", profile->country_code,
 		profile->mesh_frequency_khz, profile->mesh_bandwidth_mhz,
 		applied_generation);
+	LOG_INF("mesh control beacon=%u TU BATMAN=%u ms liveness=%u ms",
+		config.beacon_interval_tu, control_interval_ms,
+		config.peer_liveness_timeout_ms);
 	LOG_INF("radio backend=%s chip=0x%08" PRIx32
 		" vif=%u mac=%02x:%02x:%02x:%02x:%02x:%02x",
 		mesh_runtime.umac.driver->name, mesh_runtime.radio_info.chip_id,
@@ -720,6 +757,7 @@ int main(void)
 	uint32_t next_beacon = next_report;
 	uint32_t next_link_check = next_report;
 	uint32_t next_ble_status = next_report;
+	bool previous_link_up = false;
 	while (true) {
 		const uint32_t now = k_uptime_get_32();
 		struct edgez_halow_profile profile = {0};
@@ -752,10 +790,21 @@ int main(void)
 		if (mesh_started && (int32_t)(now - next_mesh_tick) >= 0) {
 			edgez_umac_mesh_runtime_tick(&mesh_runtime, now);
 			edgez_nrf_mesh_tick();
+			edgez_nrf_relay_tick();
 			next_mesh_tick = now + EDGEZ_MESH_TICK_MS;
 		}
 		if (mesh_started && (int32_t)(now - next_link_check) >= 0) {
-			edgez_config_set_halow_link(has_established_peer());
+			const bool link_up = has_established_peer();
+
+			edgez_config_set_halow_link(link_up);
+			if (link_up && !previous_link_up) {
+				/* A boot-time beacon can be queued before a usable radio peer
+				 * exists. Send a fresh identity beacon as soon as MPM finishes so
+				 * the remote phone does not wait for the full profile interval. */
+				next_beacon = now;
+				LOG_INF("HaLow link established; scheduling immediate NetworkPacket beacon");
+			}
+			previous_link_up = link_up;
 			next_link_check = now + 500U;
 		}
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
@@ -765,17 +814,21 @@ int main(void)
 			uint8_t beacon[512];
 			size_t beacon_len = 0;
 			uint32_t interval = MAX(profile.beacon_interval_seconds, 5U) * 1000U;
-			if (edgez_config_build_network_beacon(mesh_runtime.radio_info.mac_addr,
+			if (!previous_link_up) {
+				next_beacon = now + 1000U;
+			} else if (edgez_config_build_network_beacon(mesh_runtime.radio_info.mac_addr,
 							 beacon, sizeof(beacon), &beacon_len) == 0) {
 				int rc = edgez_nrf_relay_send(NULL, beacon, beacon_len);
 				if (rc == 0) {
-					LOG_INF("Periodic NetworkPacket beacon broadcast bytes=%u",
+					LOG_INF("NetworkPacket beacon queued bytes=%u",
 						(unsigned int)beacon_len);
 					next_beacon = now + interval;
 				} else {
+					LOG_WRN("NetworkPacket beacon queue failed rc=%d; retrying", rc);
 					next_beacon = now + 3000U;
 				}
 			} else {
+				LOG_WRN("NetworkPacket beacon build failed; retrying");
 				next_beacon = now + 3000U;
 			}
 		}

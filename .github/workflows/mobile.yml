@@ -32,10 +32,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DOMAIN_SUFFIX: edgez.biz
-      APPWRITE_ENDPOINT: https://appwrite.edgez.ai/v1
-      APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID || secrets.APPWRITE_PROJECT_ID }}
-      APPWRITE_PROJECT_NAME: ${{ vars.APPWRITE_PROJECT_NAME }}
-      APPWRITE_TEAM_INVITE_URL: ${{ vars.APPWRITE_TEAM_INVITE_URL }}
       EDGEZ_BUNDLE_RUNTIME_VERSION: offgrid-tracker-android-2
       CI: "1"
       NODE_ENV: production
@@ -55,20 +51,15 @@ jobs:
           fi
           gh release view "$tag" >/dev/null
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      - name: Check Appwrite project ID
-        run: |
-          if [[ -z "$APPWRITE_PROJECT_ID" ]]; then
-            echo 'Set the repository Actions variable or secret APPWRITE_PROJECT_ID to the deployed Appwrite project ID.' >&2
-            exit 1
-          fi
       - name: Check Android signing credentials
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: |
-          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" ]]; then
-            echo 'Set ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets and the ANDROID_KEY_ALIAS variable.' >&2
+          if [[ -z "$ANDROID_KEYSTORE_BASE64" || -z "$ANDROID_KEYSTORE_PASSWORD" || -z "$ANDROID_KEY_ALIAS" || -z "$ANDROID_SIGNING_CERT_SHA256" ]]; then
+            echo 'Configure the organization Android signing secrets and variables.' >&2
             exit 1
           fi
       - uses: actions/setup-node@v5
@@ -107,6 +98,7 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: bash app/scripts/sign-app-bundle-manifest.sh
       - name: Build unsigned APK
         if: github.event_name == 'workflow_dispatch' && inputs.build_apk
@@ -118,6 +110,7 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ vars.ANDROID_KEY_ALIAS }}
+          ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: bash app/scripts/sign-android-release.sh
       - uses: actions/upload-artifact@v6
         with:

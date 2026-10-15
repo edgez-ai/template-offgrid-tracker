@@ -1,5 +1,5 @@
 /*
- * Test-local ESP32-S3 Morse HAL initialization.
+ * ESP32-S3 Morse HAL initialization.
  *
  * The upstream implementation installs the global GPIO ISR service without
  * first clearing interrupt state retained across a software reset. An asserted

@@ -97,10 +97,12 @@ idf_component_register(
     PRIV_REQUIRES ${component_private_dependencies}
 )
 
-if(CONFIG_OFFGRID_MESH_PS_TEST)
+if(IDF_TARGET STREQUAL "esp32s3")
     # Software reset can leave an MM6108 GPIO interrupt pending on ESP32-S3.
-    # Replace the upstream HAL init with the hardened test-local variant so the
-    # GPIO ISR service cannot start while IRQ/BUSY still have stale status.
+    # This is not specific to the power-save test: realtime BLE initialization
+    # also starts HaLow after other peripherals are active. Replace the
+    # upstream HAL init for every S3 image so the GPIO ISR service cannot start
+    # while IRQ/BUSY still have stale status.
     get_target_property(shims_sources shims SOURCES)
     list(FILTER shims_sources EXCLUDE REGEX "mmhal_os\\.c$")
     set_property(TARGET shims PROPERTY SOURCES "${shims_sources}")

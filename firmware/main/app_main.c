@@ -15,6 +15,7 @@ void edgez_ble_control_set_radio_profile(const char *country_code,
                                          uint32_t frequency_khz,
                                          uint8_t bandwidth_mhz);
 void edgez_ble_control_note_mesh_started(const uint8_t mac[6]);
+void edgez_ble_control_note_mesh_init_failed(void);
 void edgez_ble_control_note_mesh_link(int state);
 #if CONFIG_DAB_START_NETWORK_PACKET_RELAY
 void edgez_ble_control_receive_mesh_packet(const uint8_t *payload,
@@ -359,6 +360,7 @@ static void halow_init_task(void *arg)
         }
         ESP_LOGE(TAG, "Failed to start or reconfigure HaLow mesh: %s (%d)",
                  esp_err_to_name(mesh_err), (int)mesh_err);
+        edgez_ble_control_note_mesh_init_failed();
         ESP_LOGI(TAG, "Waiting for another realtime INIT_HALOW request");
     }
 #else

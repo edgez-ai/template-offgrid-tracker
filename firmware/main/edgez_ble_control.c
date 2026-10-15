@@ -35,6 +35,7 @@
 #define EDGEZ_RX_BUFFER_SIZE (EDGEZ_MAX_PACKET_SIZE * 2U)
 #define EDGEZ_STATUS_INTERVAL_MS 5000U
 #define EDGEZ_INVALID_CONNECTION_HANDLE BLE_HS_CONN_HANDLE_NONE
+#define EDGEZ_BLE_NOTIFY_QUEUE_DEPTH 8U
 
 static const char *TAG = "edgez_ble";
 static uint8_t own_address_type;
@@ -46,8 +47,16 @@ static uint8_t rx_buffer[EDGEZ_RX_BUFFER_SIZE];
 static size_t rx_length;
 static SemaphoreHandle_t state_lock;
 static SemaphoreHandle_t mesh_init_signal;
+static QueueHandle_t notify_queue;
 static TaskHandle_t status_task_handle;
 static uint8_t settings_reports_remaining;
+static bool mesh_init_in_progress;
+
+typedef struct {
+    uint16_t connection_handle;
+    size_t length;
+    uint8_t payload[EDGEZ_MAX_PACKET_SIZE];
+} edgez_ble_notify_item_t;
 
 typedef struct {
     char country_code[3];
@@ -115,43 +124,86 @@ static ai_edgez_halow_MarkerColor marker_from_name(const char *name)
     return ai_edgez_halow_MarkerColor_MARKER_BLUE;
 }
 
-static esp_err_t notify_raw_packet(const uint8_t *payload, size_t length)
+static esp_err_t send_raw_packet(const edgez_ble_notify_item_t *item)
 {
-    if (payload == NULL || length == 0 || length > EDGEZ_MAX_PACKET_SIZE) {
+    if (item == NULL || item->length == 0 ||
+        item->length > EDGEZ_MAX_PACKET_SIZE) {
         return ESP_ERR_INVALID_ARG;
-    }
-
-    uint16_t active_connection;
-    bool can_notify;
-    xSemaphoreTake(state_lock, portMAX_DELAY);
-    active_connection = connection_handle;
-    can_notify = notifications_enabled;
-    xSemaphoreGive(state_lock);
-    if (!can_notify || active_connection == EDGEZ_INVALID_CONNECTION_HANDLE) {
-        return ESP_ERR_INVALID_STATE;
     }
 
     uint8_t frame[EDGEZ_FRAME_HEADER_SIZE + EDGEZ_MAX_PACKET_SIZE];
     frame[0] = 'E';
     frame[1] = 'Z';
-    frame[2] = (uint8_t)(length & 0xffU);
-    frame[3] = (uint8_t)(length >> 8);
-    memcpy(&frame[EDGEZ_FRAME_HEADER_SIZE], payload, length);
-    const size_t frame_length = EDGEZ_FRAME_HEADER_SIZE + length;
-    const uint16_t mtu = ble_att_mtu(active_connection);
+    frame[2] = (uint8_t)(item->length & 0xffU);
+    frame[3] = (uint8_t)(item->length >> 8);
+    memcpy(&frame[EDGEZ_FRAME_HEADER_SIZE], item->payload, item->length);
+    const size_t frame_length = EDGEZ_FRAME_HEADER_SIZE + item->length;
+    const uint16_t mtu = ble_att_mtu(item->connection_handle);
     const size_t chunk_limit = mtu > 3U ? mtu - 3U : 20U;
     for (size_t offset = 0; offset < frame_length; offset += chunk_limit) {
         const size_t remaining = frame_length - offset;
         const size_t chunk = remaining < chunk_limit ? remaining : chunk_limit;
         struct os_mbuf *om = ble_hs_mbuf_from_flat(&frame[offset], chunk);
         if (om == NULL) return ESP_ERR_NO_MEM;
-        const int rc = ble_gatts_notify_custom(active_connection,
+        const int rc = ble_gatts_notify_custom(item->connection_handle,
                                                 tx_value_handle, om);
         if (rc != 0) {
             ESP_LOGW(TAG, "FFF2 notify failed offset=%u: %d",
                      (unsigned)offset, rc);
             return ESP_FAIL;
         }
+    }
+    return ESP_OK;
+}
+
+static void notify_task(void *argument)
+{
+    (void)argument;
+    edgez_ble_notify_item_t item;
+    for (;;) {
+        if (xQueueReceive(notify_queue, &item, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        xSemaphoreTake(state_lock, portMAX_DELAY);
+        const bool connection_is_current =
+            notifications_enabled &&
+            connection_handle == item.connection_handle;
+        xSemaphoreGive(state_lock);
+        if (!connection_is_current) {
+            continue;
+        }
+        const esp_err_t err = send_raw_packet(&item);
+        if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(TAG, "Queued BLE notification failed: %s",
+                     esp_err_to_name(err));
+        }
+    }
+}
+
+static esp_err_t notify_raw_packet(const uint8_t *payload, size_t length)
+{
+    if (payload == NULL || length == 0 || length > EDGEZ_MAX_PACKET_SIZE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (notify_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    edgez_ble_notify_item_t item = {0};
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    const bool can_notify = notifications_enabled &&
+        connection_handle != EDGEZ_INVALID_CONNECTION_HANDLE;
+    item.connection_handle = connection_handle;
+    xSemaphoreGive(state_lock);
+    if (!can_notify) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    item.length = length;
+    memcpy(item.payload, payload, length);
+    if (xQueueSend(notify_queue, &item, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "BLE notification queue full; dropping %u bytes",
+                 (unsigned)length);
+        return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
@@ -414,7 +466,9 @@ static void apply_init(const ai_edgez_halow_HaLowInitConfig *init)
           control_state.bandwidth_mhz != init->mesh_bandwidth_mhz));
     reconfigure_mesh = control_state.stack_initialized &&
         mesh_profile_changed;
-    apply_mesh_profile = !control_state.stack_initialized || reconfigure_mesh;
+    apply_mesh_profile = reconfigure_mesh ||
+        (!control_state.stack_initialized &&
+         (!mesh_init_in_progress || mesh_profile_changed));
     if (init->country_code[0] != '\0') {
         strlcpy(control_state.country_code, init->country_code,
                 sizeof(control_state.country_code));
@@ -772,6 +826,9 @@ static int gap_event(struct ble_gap_event *event, void *argument)
         settings_reports_remaining = 0;
         rx_length = 0;
         xSemaphoreGive(state_lock);
+        if (notify_queue != NULL) {
+            xQueueReset(notify_queue);
+        }
         return start_advertising();
     case BLE_GAP_EVENT_SUBSCRIBE:
         if (event->subscribe.attr_handle == tx_value_handle) {
@@ -902,8 +959,17 @@ void edgez_ble_control_note_mesh_started(const uint8_t mac[6])
     xSemaphoreTake(state_lock, portMAX_DELAY);
     if (mac != NULL) memcpy(control_state.mac, mac, sizeof(control_state.mac));
     control_state.stack_initialized = true;
+    mesh_init_in_progress = false;
     xSemaphoreGive(state_lock);
     if (status_task_handle != NULL) xTaskNotifyGive(status_task_handle);
+}
+
+void edgez_ble_control_note_mesh_init_failed(void)
+{
+    if (state_lock == NULL) return;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    mesh_init_in_progress = false;
+    xSemaphoreGive(state_lock);
 }
 
 void edgez_ble_control_note_mesh_link(int state)
@@ -933,6 +999,7 @@ esp_err_t edgez_ble_control_wait_for_mesh_init(char country_code[3],
     }
 
     xSemaphoreTake(state_lock, portMAX_DELAY);
+    mesh_init_in_progress = true;
     strlcpy(country_code, control_state.country_code, 3);
     strlcpy(mesh_id, control_state.mesh_id, 33);
     strlcpy(passphrase, control_state.passphrase, 65);
@@ -957,6 +1024,15 @@ esp_err_t edgez_ble_control_start(void)
     }
     mesh_init_signal = xSemaphoreCreateBinary();
     if (mesh_init_signal == NULL) {
+        vSemaphoreDelete(state_lock);
+        state_lock = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    notify_queue = xQueueCreate(EDGEZ_BLE_NOTIFY_QUEUE_DEPTH,
+                                sizeof(edgez_ble_notify_item_t));
+    if (notify_queue == NULL) {
+        vSemaphoreDelete(mesh_init_signal);
+        mesh_init_signal = NULL;
         vSemaphoreDelete(state_lock);
         state_lock = NULL;
         return ESP_ERR_NO_MEM;
@@ -1024,6 +1100,12 @@ esp_err_t edgez_ble_control_start(void)
     if (xTaskCreate(status_task, "edgez_status", 4096, NULL, 5,
                     &status_task_handle) != pdPASS) {
         ESP_LOGE(TAG, "Could not start BLE status task");
+        (void)nimble_port_deinit();
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(notify_task, "edgez_ble_notify", 4096, NULL, 5, NULL) !=
+        pdPASS) {
+        ESP_LOGE(TAG, "Could not start BLE notification task");
         (void)nimble_port_deinit();
         return ESP_ERR_NO_MEM;
     }

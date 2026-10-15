@@ -175,31 +175,22 @@ static int relay_send_now(const uint8_t destination[6], const uint8_t *payload,
 	return 0;
 }
 
-static void relay_tx_thread(void *arg1, void *arg2, void *arg3)
+void edgez_nrf_relay_tick(void)
 {
-	ARG_UNUSED(arg1);
-	ARG_UNUSED(arg2);
-	ARG_UNUSED(arg3);
 	struct relay_tx_item item;
 
-	for (;;) {
-		k_msgq_get(&relay_tx_queue, &item, K_FOREVER);
-		int rc = relay_send_now(item.broadcast ? NULL : item.destination,
-					item.payload, item.payload_len);
-		if (rc) {
-			LOG_WRN("Queued BLE-to-mesh TX failed rc=%d", rc);
-		} else {
-			LOG_INF("Queued BLE-to-mesh TX complete bytes=%u route=%s",
-				item.payload_len, item.broadcast ? "broadcast" : "unicast");
-		}
+	if (k_msgq_get(&relay_tx_queue, &item, K_NO_WAIT) != 0) {
+		return;
+	}
+	int rc = relay_send_now(item.broadcast ? NULL : item.destination,
+				item.payload, item.payload_len);
+	if (rc) {
+		LOG_WRN("Queued BLE-to-mesh TX failed rc=%d", rc);
+	} else {
+		LOG_INF("Queued BLE-to-mesh TX complete bytes=%u route=%s",
+			item.payload_len, item.broadcast ? "broadcast" : "unicast");
 	}
 }
-
-/* The BATMAN broadcast builder reserves roughly 1.5 KiB on its own. Leave
- * enough headroom for the queued packet and the Morse transport call chain,
- * and keep this radio worker below the Bluetooth RX thread (priority 8). */
-K_THREAD_DEFINE(relay_tx_thread_id, 5120, relay_tx_thread, NULL, NULL, NULL,
-		10, 0, 0);
 
 int edgez_nrf_relay_send(const uint8_t destination[6], const uint8_t *payload,
 			 size_t payload_len)
