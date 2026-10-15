@@ -61,7 +61,15 @@ export type StoredMessage = {
   voiceBytes: Uint8Array;
   voiceCodec: number;
   durationMs: number;
+  retryCount: number;
+  retryOfUuid: string;
+  lastAttemptAtMs: number;
+  deliveryState: string;
 };
+
+export type MessageDeliveryMetadata = Partial<Pick<StoredMessage,
+  "retryCount" | "retryOfUuid" | "lastAttemptAtMs" | "deliveryState"
+>>;
 
 type ProfileRow = {
   id: string;
@@ -112,6 +120,10 @@ type MessageRow = {
   voice_bytes: string;
   voice_codec: number;
   duration_ms: number;
+  retry_count: number;
+  retry_of_uuid: string;
+  last_attempt_at_ms: number;
+  delivery_state: string;
 };
 
 const databaseName = "offgrid-tracker.db";
@@ -196,6 +208,10 @@ function messageFromRow(row: MessageRow): StoredMessage {
     voiceBytes: row.voice_bytes ? toByteArray(row.voice_bytes) : new Uint8Array(),
     voiceCodec: row.voice_codec,
     durationMs: row.duration_ms,
+    retryCount: row.retry_count,
+    retryOfUuid: row.retry_of_uuid,
+    lastAttemptAtMs: row.last_attempt_at_ms,
+    deliveryState: row.delivery_state,
   };
 }
 
@@ -281,6 +297,10 @@ async function database() {
           voice_bytes TEXT NOT NULL DEFAULT '',
           voice_codec INTEGER NOT NULL DEFAULT 0,
           duration_ms INTEGER NOT NULL DEFAULT 0,
+          retry_count INTEGER NOT NULL DEFAULT 0,
+          retry_of_uuid TEXT NOT NULL DEFAULT '',
+          last_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
+          delivery_state TEXT NOT NULL DEFAULT '',
           PRIMARY KEY (profile_id, message_uuid),
           FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
         );
@@ -327,6 +347,20 @@ async function database() {
       }
       if (!deviceColumnNames.has("user_public_key")) {
         await db.execAsync("ALTER TABLE devices ADD COLUMN user_public_key TEXT NOT NULL DEFAULT ''");
+      }
+      const messageColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(messages)");
+      const messageColumnNames = new Set(messageColumns.map(({ name }) => name));
+      if (!messageColumnNames.has("retry_count")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!messageColumnNames.has("retry_of_uuid")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN retry_of_uuid TEXT NOT NULL DEFAULT ''");
+      }
+      if (!messageColumnNames.has("last_attempt_at_ms")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN last_attempt_at_ms INTEGER NOT NULL DEFAULT 0");
+      }
+      if (!messageColumnNames.has("delivery_state")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT ''");
       }
       const profilesWithoutIdentity = await db.getAllAsync<{ id: string; name: string }>(
         "SELECT id, name FROM profiles WHERE identity_id = '' OR identity_private_key = '' OR identity_public_key = ''",
@@ -472,16 +506,20 @@ export async function replaceProfileConversation(
 ): Promise<void> {
   const db = await database();
   await db.withTransactionAsync(async () => {
-    await db.runAsync(
-      "DELETE FROM messages WHERE profile_id = ? AND peer_serial = ?",
-      profileId,
-      peerSerial,
-    );
     for (const message of messages) {
       await db.runAsync(
         `INSERT INTO messages
           (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id, message_uuid) DO UPDATE SET
+           peer_serial = excluded.peer_serial,
+           text = excluded.text,
+           mine = excluded.mine,
+           timestamp_ms = excluded.timestamp_ms,
+           status = excluded.status,
+           voice_bytes = excluded.voice_bytes,
+           voice_codec = excluded.voice_codec,
+           duration_ms = excluded.duration_ms`,
         profileId,
         message.messageUuid,
         peerSerial,
@@ -501,12 +539,14 @@ export async function saveProfileMessage(
   profileId: string,
   peerSerial: string,
   message: EdgezConversationMessage,
+  delivery: MessageDeliveryMetadata = {},
 ): Promise<void> {
   const db = await database();
   await db.runAsync(
     `INSERT INTO messages
-      (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms,
+       retry_count, retry_of_uuid, last_attempt_at_ms, delivery_state)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(profile_id, message_uuid) DO UPDATE SET
        peer_serial = excluded.peer_serial,
        text = excluded.text,
@@ -515,7 +555,11 @@ export async function saveProfileMessage(
        status = excluded.status,
        voice_bytes = excluded.voice_bytes,
        voice_codec = excluded.voice_codec,
-       duration_ms = excluded.duration_ms`,
+       duration_ms = excluded.duration_ms,
+       retry_count = excluded.retry_count,
+       retry_of_uuid = excluded.retry_of_uuid,
+       last_attempt_at_ms = excluded.last_attempt_at_ms,
+       delivery_state = excluded.delivery_state`,
     profileId,
     message.messageUuid,
     peerSerial,
@@ -526,7 +570,49 @@ export async function saveProfileMessage(
     message.voiceBytes.length ? fromByteArray(message.voiceBytes) : "",
     message.voiceCodec,
     message.durationMs,
+    delivery.retryCount ?? 0,
+    delivery.retryOfUuid ?? "",
+    delivery.lastAttemptAtMs ?? message.timestampMs,
+    delivery.deliveryState ?? "",
   );
+}
+
+export async function updateMessageDelivery(
+  profileId: string,
+  messageUuid: string,
+  delivery: Required<Pick<MessageDeliveryMetadata, "retryCount" | "lastAttemptAtMs" | "deliveryState">>,
+): Promise<void> {
+  const db = await database();
+  await db.runAsync(
+    `UPDATE messages
+     SET retry_count = ?, last_attempt_at_ms = ?, delivery_state = ?
+     WHERE profile_id = ? AND message_uuid = ?`,
+    delivery.retryCount,
+    delivery.lastAttemptAtMs,
+    delivery.deliveryState,
+    profileId,
+    messageUuid,
+  );
+}
+
+export async function reconcileProfileMessageDelivery(profileId: string): Promise<boolean> {
+  const db = await database();
+  const result = await db.runAsync(
+    `UPDATE messages AS root
+     SET delivery_state = 'Delivered'
+     WHERE root.profile_id = ?
+       AND root.mine = 1
+       AND root.retry_of_uuid = ''
+       AND root.delivery_state != 'Delivered'
+       AND (root.status = 'Delivered' OR EXISTS (
+         SELECT 1 FROM messages AS attempt
+         WHERE attempt.profile_id = root.profile_id
+           AND attempt.retry_of_uuid = root.message_uuid
+           AND attempt.status = 'Delivered'
+       ))`,
+    profileId,
+  );
+  return result.changes > 0;
 }
 
 export async function deleteProfileDevice(profileId: string, deviceId: string): Promise<void> {

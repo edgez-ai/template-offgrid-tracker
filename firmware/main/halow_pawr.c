@@ -9,6 +9,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "edgez_pawr_protocol.h"
+#include "edgez_mesh.h"
 #include "mmwlan.h"
 
 #define PAWR_QUEUE_DEPTH 4U
@@ -38,6 +39,15 @@ static void pawr_worker(void *arg)
         }
         struct edgez_pawr_request_view request;
         if (!edgez_pawr_decode_request(action.payload, action.length, &request)) {
+            continue;
+        }
+        if (request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
+            (void)edgez_mesh_receive_pawr(request.payload,
+                                          request.payload_length,
+                                          action.source_mac);
+            continue;
+        }
+        if (request.type != EDGEZ_PAWR_REQUEST_BEACON) {
             continue;
         }
         ESP_LOGI(TAG, "request=%" PRIu32 ", RSSI=%d dBm, payload=%u",

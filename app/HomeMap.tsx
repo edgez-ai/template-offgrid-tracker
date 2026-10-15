@@ -25,6 +25,7 @@ export function HomeMap({
   onAddDevice,
   onRemoveDevice,
   onMessagesChanged,
+  onResendMessage,
   onOpenSettings,
 }: {
   profile: StoredProfile;
@@ -35,6 +36,7 @@ export function HomeMap({
   onAddDevice: () => void;
   onRemoveDevice: (device: StoredDevice) => void;
   onMessagesChanged: () => Promise<void>;
+  onResendMessage: (message: StoredMessage) => Promise<void>;
   onOpenSettings: () => void;
 }) {
   const map = useRef<EdgezOrganicMapRef>(null);
@@ -269,6 +271,7 @@ export function HomeMap({
         messages={messages}
         initialPeerSerial={conversationPeer}
         onMessagesChanged={onMessagesChanged}
+        onResendMessage={onResendMessage}
         onShowDevice={setSelectedDevice}
         onRemoveDevice={onRemoveDevice}
         onClose={() => { setMessagesOpen(false); setConversationPeer(null); }}

@@ -23,6 +23,7 @@
 #include "edgez_mesh_msdu.h"
 #include "edgez_mesh_relay.h"
 #include "edgez_mesh_zephyr.h"
+#include "edgez_pawr_protocol.h"
 #include "edgez_mesh_sae_provider.h"
 #include "edgez_rf_api.h"
 #include "edgez_umac_mesh_runtime.h"
@@ -69,6 +70,9 @@ static bool mesh_secure;
 static uint16_t open_data_sequence;
 static uint32_t open_mesh_sequence;
 static uintptr_t open_tx_token;
+static uintptr_t pawr_tx_token;
+static uint16_t pawr_sequence_number;
+static uint32_t pawr_request_id;
 K_MUTEX_DEFINE(batman_state_lock);
 K_MUTEX_DEFINE(batman_tx_lock);
 #define EDGEZ_OPEN_DATA_FRAME_MAX (EDGEZ_MESH_QOS_4ADDR_HEADER_LEN + \
@@ -188,7 +192,17 @@ static int join_ignore_unsupported(void *ctx,
 				   const struct edgez_umac_rx_frame *radio)
 {
 	ARG_UNUSED(ctx);
-	ARG_UNUSED(radio);
+	struct edgez_pawr_action_view action;
+	struct edgez_pawr_request_view request;
+
+	if (radio && edgez_pawr_decode_action_frame(
+			radio->data, radio->length, &action) &&
+	    edgez_pawr_decode_request(
+			action.payload, action.payload_length, &request) &&
+	    request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
+		(void)edgez_nrf_mesh_receive_pawr(
+			request.payload, request.payload_length, action.source);
+	}
 	return EDGEZ_UMAC_OK;
 }
 
@@ -329,6 +343,50 @@ static int batman_transmit(void *ctx, const uint8_t *frame, size_t frame_len,
 	return rc == EDGEZ_UMAC_OK ? 0 : -EIO;
 }
 
+static int batman_transmit_pawr(void *ctx, const uint8_t destination[6],
+			       const uint8_t *frame, size_t frame_len)
+{
+	ARG_UNUSED(ctx);
+	uint8_t packet[EDGEZ_PAWR_HEADER_LENGTH + EDGEZ_PAWR_MAX_ACTION_PAYLOAD];
+	uint8_t action[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
+	size_t packet_len = 0U;
+	size_t action_len = 0U;
+	uint32_t request_id = ++pawr_request_id;
+
+	if (!edgez_pawr_encode_mesh_packet(packet, sizeof(packet), request_id,
+					   frame, frame_len, &packet_len) ||
+	    !edgez_pawr_encode_action_frame(
+			action, sizeof(action), pawr_sequence_number++,
+			mesh_runtime.radio_info.mac_addr, destination,
+			packet, packet_len, &action_len)) {
+		return -EMSGSIZE;
+	}
+	const struct edgez_umac_tx_request request = {
+		.token = pawr_tx_token++,
+		.frame = action,
+		.frame_length = action_len,
+		.frame_type = EDGEZ_UMAC_TX_MANAGEMENT,
+		.aid = 0U,
+		.tid = 8U,
+		.mcs = mesh_runtime.config.mcs,
+		.attempts = mesh_runtime.config.attempts,
+		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
+		.short_guard = mesh_runtime.config.short_guard,
+		.immediate_status = true,
+	};
+	int rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
+	if (rc == EDGEZ_UMAC_OK) {
+		LOG_INF("PAwR direct packet queued id=%u bytes=%u to=%02x:%02x:%02x:%02x:%02x:%02x",
+			request_id, (unsigned)frame_len,
+			destination[0], destination[1], destination[2],
+			destination[3], destination[4], destination[5]);
+		return 0;
+	}
+	LOG_WRN("PAwR direct packet failed id=%u rc=%d driver=%d",
+		request_id, rc, mesh_runtime.umac.last_driver_status);
+	return -EIO;
+}
+
 static uint32_t batman_clock_ms(void *ctx)
 {
 	ARG_UNUSED(ctx);
@@ -356,6 +414,7 @@ static void batman_unlock(void *ctx)
 static const struct edgez_nrf_mesh_transport batman_transport = {
 	.peers = batman_snapshot_peers,
 	.transmit = batman_transmit,
+	.transmit_pawr = batman_transmit_pawr,
 	.clock_ms = batman_clock_ms,
 	.random = batman_random,
 	.lock = batman_lock,

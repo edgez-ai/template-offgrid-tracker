@@ -19,7 +19,9 @@ LOG_MODULE_REGISTER(edgez_relay, LOG_LEVEL_INF);
 #define RELAY_KIND_NETWORK_PACKET 2U
 #define RELAY_ETHERTYPE 0x88b5U
 #define RELAY_ETH_HEADER_LEN 14U
-#define RELAY_FRAME_LIMIT 480U
+/* Leaves room for Ethernet plus the 24-byte PAwR envelope inside Morse's
+ * 512-byte vendor-action payload limit. */
+#define RELAY_FRAME_LIMIT 450U
 #define RELAY_PAYLOAD_LIMIT 512U
 #define RELAY_ASSEMBLIES 2U
 #define RELAY_TX_QUEUE_DEPTH 4U

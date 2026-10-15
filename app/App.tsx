@@ -17,6 +17,7 @@ import {
   listProfileDevices,
   listProfileMessages,
   listProfiles,
+  reconcileProfileMessageDelivery,
   saveProfileDevice,
   replaceProfileConversation,
   setActiveProfile,
@@ -37,6 +38,7 @@ import {
   saveSharedProfileSettings,
 } from "./app-settings";
 import type { SharedProfileSettings } from "./app-settings";
+import { useMessageDeliveryRetries } from "./message-delivery";
 
 const profileStorageKey = "offgrid-tracker.profile.v1";
 type ProfileMeshLink = { profileId: string; session: EdgezMeshSession; state: EdgezMeshState };
@@ -70,6 +72,18 @@ export default function App() {
     [profile, sharedSettings],
   );
   const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
+  const refreshProfileMessages = useCallback(async () => {
+    if (!runtimeProfile) return;
+    const refreshedMessages = await listProfileMessages(runtimeProfile.id);
+    if (activeProfileIdRef.current === runtimeProfile.id) setProfileMessages(refreshedMessages);
+  }, [runtimeProfile?.id]);
+  const { resendMessage } = useMessageDeliveryRetries({
+    profileId: runtimeProfile?.id ?? null,
+    session: currentMeshLink?.session ?? null,
+    meshState: currentMeshLink?.state ?? null,
+    devices: profileDevices,
+    onMessagesChanged: refreshProfileMessages,
+  });
   const handleMeshChange = useCallback((value: { session: EdgezMeshSession; state: EdgezMeshState }) => {
     if (!runtimeProfile || activeProfileIdRef.current !== runtimeProfile.id) return;
     setMeshLink({ profileId: runtimeProfile.id, ...value });
@@ -190,6 +204,7 @@ export default function App() {
         for (const [nodeNum, items] of conversations) {
           await replaceProfileConversation(profile.id, edgezNodeId(nodeNum).toUpperCase(), items);
         }
+        await reconcileProfileMessageDelivery(profile.id);
         persistedMessageFingerprint.current = fingerprint;
         const refreshedMessages = await listProfileMessages(profile.id);
         if (activeProfileIdRef.current === profile.id) setProfileMessages(refreshedMessages);
@@ -326,9 +341,9 @@ export default function App() {
             onAddDevice={() => setProvisioningOpen(true)}
             onRemoveDevice={requestRemoveDevice}
             onMessagesChanged={async () => {
-              const refreshedMessages = await listProfileMessages(runtimeProfile.id);
-              if (activeProfileIdRef.current === runtimeProfile.id) setProfileMessages(refreshedMessages);
+              await refreshProfileMessages();
             }}
+            onResendMessage={resendMessage}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
