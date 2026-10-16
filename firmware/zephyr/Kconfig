@@ -64,6 +64,18 @@ config OFFGRID_NRF54_SENSOR_GPS
       Wake the L76K and wait briefly for a fix before each sensor PAwR report,
       then stop GPS and suspend its UART before returning to tickless sleep.
 
+config OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE
+    bool "Keep HaLow initialized in chip power save between sensor reports"
+    depends on OFFGRID_NRF54_IMU_TIMER_DRAIN
+    depends on WIFI_MORSEMICRO_POWERSAVE
+    default n
+    help
+      Boot the MM8108 and initialize its connectionless PAwR radio once, then
+      use the chip power-save state between reports. This avoids reloading the
+      MM8108 firmware every reporting cycle. The HaLow rail and SPI remain
+      enabled, so compare average energy and wake latency against full rail
+      cutoff rather than expecting the lowest possible sleep current.
+
 config OFFGRID_NRF54_SENSOR_NO_HALOW_TEST
     bool "Skip HaLow wake and transmission in low-power sensor mode"
     depends on OFFGRID_NRF54_IMU_TIMER_DRAIN

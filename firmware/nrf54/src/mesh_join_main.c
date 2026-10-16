@@ -46,6 +46,10 @@
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 #include "mmhal_wlan.h"
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST) || \
+	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
 #include "mmwlan.h"
 
 extern enum mmwlan_status mmdrv_set_wake_enabled(bool enabled);
@@ -88,6 +92,9 @@ static struct edgez_halow_profile applied_profile;
 static bool mesh_started;
 static bool mesh_secure;
 static bool sensor_radio_only;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+static bool sensor_halow_ps_enabled;
+#endif
 static uint16_t open_data_sequence;
 static uint32_t open_mesh_sequence;
 static uintptr_t open_tx_token;
@@ -779,23 +786,8 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	return -ETIMEDOUT;
 }
 
-#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
-static uint32_t busy_percent_x10(void)
-{
-	if (mesh_ps_total_samples == 0U) {
-		return 0U;
-	}
-	return (uint32_t)(((uint64_t)mesh_ps_busy_samples * 1000U) /
-			  mesh_ps_total_samples);
-}
-
-static void reset_samples(uint32_t now)
-{
-	mesh_ps_phase_started = now;
-	mesh_ps_busy_samples = 0U;
-	mesh_ps_total_samples = 0U;
-}
-
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST) || \
+	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
 static bool set_mesh_power_save(bool enabled)
 {
 	enum mmwlan_status status;
@@ -824,6 +816,24 @@ static bool set_mesh_power_save(bool enabled)
 		return false;
 	}
 	return true;
+}
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
+static uint32_t busy_percent_x10(void)
+{
+	if (mesh_ps_total_samples == 0U) {
+		return 0U;
+	}
+	return (uint32_t)(((uint64_t)mesh_ps_busy_samples * 1000U) /
+			  mesh_ps_total_samples);
+}
+
+static void reset_samples(uint32_t now)
+{
+	mesh_ps_phase_started = now;
+	mesh_ps_busy_samples = 0U;
+	mesh_ps_total_samples = 0U;
 }
 
 static void sample_busy(void)
@@ -1000,6 +1010,12 @@ static int stop_mesh_profile(bool clear_routes)
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 	(void)set_mesh_power_save(false);
 	mesh_ps_phase = MESH_PS_WAITING;
+#endif
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	if (sensor_halow_ps_enabled) {
+		(void)set_mesh_power_save(false);
+		sensor_halow_ps_enabled = false;
+	}
 #endif
 	status = edgez_umac_mesh_runtime_stop(&mesh_runtime);
 	if (status != EDGEZ_UMAC_OK) {
@@ -1340,6 +1356,11 @@ static void sensor_leave(void)
 	edgez_gps_stop();
 	sensor_power.phase = SENSOR_POWER_INACTIVE;
 	sensor_power.generation = 0U;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	if (mesh_started) {
+		(void)stop_mesh_profile(true);
+	}
+#endif
 	if (!edgez_halow_power_is_ready()) {
 		int rc = edgez_halow_power_set(true);
 
@@ -1358,7 +1379,12 @@ static void sensor_finish_cycle(uint32_t now)
 	sensor_power.next_wake_ms = elapsed_ms < EDGEZ_SENSOR_UPDATE_INTERVAL_MS ?
 		sensor_power.cycle_started_ms + EDGEZ_SENSOR_UPDATE_INTERVAL_MS : now + 1000U;
 	sensor_power.phase = SENSOR_POWER_SLEEPING;
-	LOG_INF("sensor cycle complete; HaLow off for %u ms",
+	LOG_INF("sensor cycle complete; HaLow %s for %u ms",
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+		sensor_halow_ps_enabled ? "chip sleep" : "off",
+#else
+		"off",
+#endif
 		(unsigned)(sensor_power.next_wake_ms - now));
 }
 
@@ -1454,11 +1480,26 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 #endif
 
 	int rc = 0;
+	bool radio_cold_started = false;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	if (mesh_started && sensor_halow_ps_enabled) {
+		if (!set_mesh_power_save(false)) {
+			LOG_WRN("sensor HaLow power-save wake failed; cold restarting");
+			(void)stop_mesh_profile(true);
+			if (edgez_halow_power_is_ready()) {
+				(void)edgez_halow_power_set(false);
+			}
+		} else {
+			sensor_halow_ps_enabled = false;
+		}
+	}
+#endif
 	if (!mesh_started && !edgez_halow_power_is_ready()) {
 		rc = edgez_halow_power_set(true);
 	}
 	if (rc == 0 && !mesh_started) {
 		rc = start_sensor_radio(profile);
+		radio_cold_started = rc == EDGEZ_UMAC_OK;
 	}
 	if (rc != EDGEZ_UMAC_OK) {
 		LOG_ERR("sensor HaLow wake failed rc=%d; retrying next cycle", rc);
@@ -1466,16 +1507,36 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		/* Radio startup is synchronous. A short settle gives the connectionless
 		 * vendor-action receive callback time to arm; no mesh tick, beacon, scan,
 		 * or peering operation is run in sensor mode. */
-		k_msleep(100);
+		if (radio_cold_started) {
+			k_msleep(100);
+		}
 		rc = sensor_pawr_send_once(EDGEZ_SENSOR_UPDATE_INTERVAL_MS);
 		LOG_INF("sensor telemetry %s after single PAwR transmission",
 			rc == 0 ? "acknowledged" : "unacknowledged");
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+		enum mmwlan_status ps_timeout_status =
+			mmdrv_set_dynamic_ps_timeout(0U);
+		if (ps_timeout_status == MMWLAN_SUCCESS &&
+		    set_mesh_power_save(true)) {
+			sensor_halow_ps_enabled = true;
+		} else {
+			LOG_WRN("sensor HaLow power save failed timeout_status=%d; cutting rail",
+				ps_timeout_status);
+			int stop_rc = stop_mesh_profile(true);
+
+			if (stop_rc != EDGEZ_UMAC_OK) {
+				LOG_WRN("sensor mesh shutdown reported rc=%d; forcing rail cutoff",
+					stop_rc);
+			}
+		}
+#else
 		int stop_rc = stop_mesh_profile(true);
 
 		if (stop_rc != EDGEZ_UMAC_OK) {
 			LOG_WRN("sensor mesh shutdown reported rc=%d; forcing rail cutoff",
 				stop_rc);
 		}
+#endif
 	}
 	if (!mesh_started && edgez_halow_power_is_ready()) {
 		int power_rc = edgez_halow_power_set(false);
