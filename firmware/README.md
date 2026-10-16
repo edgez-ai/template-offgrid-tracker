@@ -184,6 +184,21 @@ source checkout for diagnostics.
 Both targets use the nanopb 0.4.9.1 runtime from `shared/nanopb`; the ESP-IDF
 build exposes it as a component and the Zephyr build compiles the same sources.
 
+### License boundary
+
+The repository's Apache-2.0 license applies only to its original application
+code. Morse Micro `mm-iot-sdk/framework/morselib` is offered under
+`GPL-3.0-or-later OR LicenseRef-MorseMicroCommercial`. The GPL path requires
+the corresponding GPL obligations to be satisfied when a combined firmware
+binary is distributed; otherwise the distributor needs the applicable Morse
+Micro commercial license.
+
+The `edgez-halow-mesh` source, public API headers, and target archives are
+governed by the bundled EdgeZ Non-Commercial and Commercial Software License,
+not Apache-2.0. Commercial or production use requires a separate written
+license from EdgeZeron AI AB. See [the firmware licensing notice](../FIRMWARE-LICENSING.md)
+before distributing any build.
+
 ### FGH200M low-power sensor image
 
 `edgez-nrf54l15-fgh200m-power` is the current-measurement build for the EdgeZ

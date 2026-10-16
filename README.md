@@ -61,7 +61,7 @@ The repository currently pins the top-level platform submodules to:
 
 | Submodule | Revision |
 | --- | --- |
-| `firmware/platforms/esp-halow` | `66be0e4930880c5cceb96821ddedf96a4c5d523b` |
+| `firmware/platforms/esp-halow` | `576ef9bdc04aa2c44a27a82af556fe16a5497a3c` |
 | `firmware/platforms/mm-iot-zephyr` | `52f86ed30eccea52d5bb2ff7950831ed8e7bf6c6` |
 
 Do not independently update nested Morse SDK, firmware, RF API, or EdgeZ
@@ -193,8 +193,36 @@ firmware README.
   `edgez-nrf54l15-fgh200m`, packages licensing/source manifests, and uploads
   short-lived Actions artifacts.
 
-Firmware binaries include components with separate redistribution terms. Read
-[FIRMWARE-LICENSING.md](FIRMWARE-LICENSING.md) before publishing them.
+## Licensing and firmware distribution
+
+The root [Apache-2.0 license](LICENSE) covers only the original Offgrid Tracker
+code. It does **not** relicense the firmware submodules, static libraries, Morse
+radio firmware, or board-configuration blobs.
+
+| Component | License boundary |
+| --- | --- |
+| Offgrid Tracker application and original firmware code | Apache-2.0 |
+| Morse Micro `mm-iot-sdk/framework/morselib` | `GPL-3.0-or-later OR LicenseRef-MorseMicroCommercial` |
+| EdgeZ `edgez-halow-mesh` source, public headers, and prebuilt archives | EdgeZ Non-Commercial and Commercial Software License |
+| Morse Micro radio firmware and BCF blobs | Morse Micro Binary Distribution License |
+
+The GPL option for `morselib` carries GPL obligations for a distributed
+combined firmware binary, including the applicable notices and complete
+corresponding source. A distributor that does not use the GPL path must obtain
+and comply with the applicable Morse Micro commercial license.
+
+`edgez-halow-mesh` is not covered by this repository's Apache-2.0 license. Its
+bundled EdgeZ license permits the stated non-commercial and internal-evaluation
+uses; production or other commercial use requires a separate written commercial
+license from EdgeZeron AI AB. Permitted redistribution must retain the EdgeZ
+license, attribution, and third-party notices.
+
+Building in GitHub Actions or downloading an Actions artifact does not grant
+either commercial license. Do not publish or distribute firmware binaries until
+the chosen Morse Micro and EdgeZ licensing paths, notice requirements, and
+source obligations have been satisfied. See
+[FIRMWARE-LICENSING.md](FIRMWARE-LICENSING.md) and the license files shipped
+beside the pinned dependencies for the complete terms.
 
 ## Validation
 
