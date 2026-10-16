@@ -118,6 +118,7 @@ pio run -e heltec-hc33
 pio run -e heltec-hc33-mesh-ps
 pio run -e edgez-nrf54l15-fgh200m
 pio run -e edgez-nrf54l15-fgh200m-power
+pio run -e edgez-nrf54l15-fgh200m-all-off
 pio run -e seeed-xiao-nrf54l15-hc01
 pio run -e seeed-xiao-nrf54l15-sense
 ```
@@ -213,6 +214,21 @@ stopped before Zephyr returns to tickless System ON idle.
 The power image deliberately disables logging, printk, console, and RTT. Use
 the regular `edgez-nrf54l15-fgh200m` image for runtime diagnostics; use a
 current meter rather than RTT to validate the power image.
+
+### FGH200M all-sensors-off benchmark
+
+`edgez-nrf54l15-fgh200m-all-off` is a standalone minimum-current baseline,
+derived from the supplied `fgh200test/01_power_safe_standby` reference. It
+switches off the FGH200M/MM8108, L76K, IMU, and battery-divider rails; isolates
+all connected I/O to prevent back-powering; disables BLE, networking, buses,
+sensors, console, logging, and RTT; and enters nRF54L15 System OFF. P1.08 KEY is
+the only wake source and causes a reset followed by immediate re-entry into
+System OFF.
+
+See [the benchmark notes](benchmarks/fgh200m_all_off/README.md) for build,
+flash, and measurement instructions. This image contains no provisioning,
+factory-reset, telemetry, or radio behavior and must not be used as the normal
+tracker firmware.
 
 ### ESP-IDF CLI
 

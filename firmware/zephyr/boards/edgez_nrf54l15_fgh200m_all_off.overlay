@@ -1,0 +1,20 @@
+/* Minimum-current overlay for the EdgeZ nRF54L15 + FGH200M carrier. */
+
+/* Remove the XIAO board's always-on IMU GPIO hog before driving P0.01 low. */
+/delete-node/ &imu_power_default_on;
+
+&pdm_imu_pwr { status = "disabled"; };
+&rfsw_ctl { status = "disabled"; };
+&rfsw_pwr { status = "disabled"; };
+&vbat_pwr { status = "disabled"; };
+
+&led0 { status = "disabled"; };
+&usr_btn { status = "disabled"; };
+&uart20 { status = "disabled"; };
+&uart21 { status = "disabled"; };
+&i2c22 { status = "disabled"; };
+&i2c30 { status = "disabled"; };
+&lsm6ds3tr_c { status = "disabled"; };
+&spi00 { status = "disabled"; };
+&pdm20 { status = "disabled"; };
+&adc { status = "disabled"; };
