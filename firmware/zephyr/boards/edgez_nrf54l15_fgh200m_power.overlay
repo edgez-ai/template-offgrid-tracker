@@ -1,0 +1,17 @@
+#include "edgez_nrf54l15_fgh200m.overlay"
+
+/* Low-power sensor variant: leave the L76K fully off. The disabled UART keeps
+ * P1.11/P1.12 disconnected, and the GPIO hog holds its P1.09 power/wake input
+ * low from PRE_KERNEL initialization onward. */
+&uart22 {
+	status = "disabled";
+};
+
+&gpio1 {
+	gps_power_off: gps_power_off {
+		gpio-hog;
+		gpios = <9 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "l76k-power-off";
+	};
+};

@@ -8,6 +8,7 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
@@ -83,6 +84,9 @@ static const struct gpio_dt_spec imu_irq;
 
 static bool imu_ready;
 static bool imu_sample_valid;
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+static bool imu_i2c_suspended;
+#endif
 #if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static bool imu_irq_registered;
 static uint32_t imu_sample_failure_count;
@@ -93,6 +97,24 @@ static struct edgez_imu_sample latest_sample;
 static struct gpio_callback imu_irq_callback;
 #endif
 static uint8_t fifo_raw[EDGEZ_IMU_FIFO_BUFFER_BYTES];
+
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+static int imu_i2c_set_active(bool active)
+{
+	int rc;
+
+	if (!imu_i2c.bus || active == !imu_i2c_suspended) {
+		return 0;
+	}
+	rc = pm_device_action_run(imu_i2c.bus,
+		active ? PM_DEVICE_ACTION_RESUME : PM_DEVICE_ACTION_SUSPEND);
+	if (rc != 0 && rc != -EALREADY) {
+		return rc;
+	}
+	imu_i2c_suspended = !active;
+	return 0;
+}
+#endif
 
 #if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 static void imu_sample_work_handler(struct k_work *work);
@@ -439,6 +461,18 @@ int edgez_imu_init(void)
 		return rc;
 	}
 	imu_ready = true;
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+	/* Runtime PM is deliberately not enabled for the full application image.
+	 * Match the low-power reference by disabling TWIM30 and applying its sleep
+	 * pinctrl state between the 15-second FIFO drains. The IMU keeps filling its
+	 * hardware FIFO independently while the MCU bus peripheral is off. */
+	rc = imu_i2c_set_active(false);
+	if (rc != 0) {
+		imu_ready = false;
+		LOG_WRN("IMU I2C suspend after initialization failed rc=%d", rc);
+		return rc;
+	}
+#endif
 #if !defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	imu_sample_failure_count = 0;
 #endif
@@ -464,9 +498,14 @@ int edgez_imu_drain_fifo(void)
 #if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	struct edgez_imu_sample next_sample = {0};
 	bool captured_sample = false;
+	int result;
 
 	if (!imu_ready) {
 		return -ENODEV;
+	}
+	result = imu_i2c_set_active(true);
+	if (result != 0) {
+		return result;
 	}
 
 	/* Fifteen seconds at 12.5 Hz is about 188 samples. Drain in bounded
@@ -482,7 +521,8 @@ int edgez_imu_drain_fifo(void)
 					    fifo_status, sizeof(fifo_status));
 
 		if (rc < 0) {
-			return rc;
+			result = rc;
+			goto suspend_bus;
 		}
 		available_words = fifo_status[0] |
 			((uint16_t)(fifo_status[1] & 0x07U) << 8);
@@ -497,7 +537,8 @@ int edgez_imu_drain_fifo(void)
 					   fifo_raw,
 					   words_to_read * sizeof(uint16_t));
 		if (rc < 0) {
-			return rc;
+			result = rc;
+			goto suspend_bus;
 		}
 		for (uint16_t i = 0U; i < words_to_read; ++i) {
 			uint8_t pattern = (uint8_t)((fifo_pattern + i) % 3U);
@@ -521,13 +562,24 @@ int edgez_imu_drain_fifo(void)
 	}
 
 	if (!captured_sample) {
-		return -EAGAIN;
+		result = -EAGAIN;
+		goto suspend_bus;
 	}
 	k_mutex_lock(&imu_lock, K_FOREVER);
 	latest_sample = next_sample;
 	imu_sample_valid = true;
 	k_mutex_unlock(&imu_lock);
-	return 0;
+	result = 0;
+
+suspend_bus:
+	{
+		int suspend_rc = imu_i2c_set_active(false);
+
+		if (result == 0 && suspend_rc != 0) {
+			result = suspend_rc;
+		}
+	}
+	return result;
 #else
 	return -ENOTSUP;
 #endif

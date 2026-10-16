@@ -143,6 +143,15 @@
 	status = "disabled";
 };
 
+/* These XIAO-base peripherals are not populated/used on the FGH200M carrier. */
+&pdm20 {
+	status = "disabled";
+};
+
+&vbat_pwr {
+	status = "disabled";
+};
+
 &xiao_spi {
 	status = "okay";
 	cs-gpios = <&gpio1 7 GPIO_ACTIVE_LOW>;

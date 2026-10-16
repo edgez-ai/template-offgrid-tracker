@@ -42,6 +42,8 @@ static const struct gpio_dt_spec halow_wake =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(morse_wifi), wakeup_gpios);
 static const struct gpio_dt_spec halow_irq =
 	GPIO_DT_SPEC_GET(DT_NODELABEL(morse_wifi), spi_irq_gpios);
+static const struct gpio_dt_spec halow_busy =
+	GPIO_DT_SPEC_GET(DT_NODELABEL(morse_wifi), busy_gpios);
 
 static int halow_control_pins(bool powered)
 {
@@ -52,7 +54,7 @@ static int halow_control_pins(bool powered)
 		return rc;
 	}
 	rc = gpio_pin_configure_dt(&halow_wake,
-		powered ? GPIO_OUTPUT_ACTIVE : GPIO_OUTPUT_INACTIVE);
+		powered ? GPIO_OUTPUT_ACTIVE : GPIO_DISCONNECTED);
 	if (rc != 0) {
 		return rc;
 	}
@@ -61,10 +63,16 @@ static int halow_control_pins(bool powered)
 	if (rc != 0) {
 		return rc;
 	}
-	/* Remove the driver's IRQ pull-up while the module supply is absent. */
-	/* Preserve ACTIVE_LOW: gpio_pin_get_dt() uses the port inversion mask. */
-	return gpio_pin_configure_dt(&halow_irq,
+	/* Remove the driver's IRQ pull-up and BUSY pull-down while the module supply
+	 * is absent. This mirrors the verified all-off reference and prevents the
+	 * unpowered module from biasing MCU input structures. */
+	rc = gpio_pin_configure_dt(&halow_irq,
 		powered ? (GPIO_INPUT | GPIO_PULL_UP) : GPIO_DISCONNECTED);
+	if (rc != 0) {
+		return rc;
+	}
+	return gpio_pin_configure_dt(&halow_busy,
+		powered ? (GPIO_INPUT | GPIO_PULL_DOWN) : GPIO_DISCONNECTED);
 }
 #endif
 

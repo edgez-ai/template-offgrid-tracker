@@ -1281,7 +1281,9 @@ static void sensor_begin_cycle(uint32_t now)
 
 static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now)
 {
-	edgez_ble_stop();
+	if (!edgez_ble_is_stopped()) {
+		edgez_ble_stop();
+	}
 	/* Begin with GPS and its UART off. The power build wakes them only inside
 	 * the bounded reporting window and stops them again before tickless sleep. */
 	edgez_gps_stop();
@@ -1476,7 +1478,15 @@ int main(void)
 	}
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	livestock_config_init();
-	if (edgez_ble_start() != 0) LOG_ERR("BLE control service failed to start");
+	struct edgez_halow_profile boot_profile = {0};
+	edgez_config_get_profile(&boot_profile);
+	const bool boot_sensor_mode = edgez_config_should_autostart() &&
+		profile_uses_sensor_mode(&boot_profile);
+	if (!boot_sensor_mode && edgez_ble_start() != 0) {
+		LOG_ERR("BLE control service failed to start");
+	} else if (boot_sensor_mode) {
+		LOG_INF("provisioned sensor boot: BLE controller remains off");
+	}
 
 	uint32_t next_report = k_uptime_get_32();
 	uint32_t next_mesh_tick = next_report;
