@@ -18,6 +18,7 @@
 #include <zephyr/random/random.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/reboot.h>
+#include <helpers/nrfx_ram_ctrl.h>
 
 #include "pb_decode.h"
 #include "pb_encode.h"
@@ -58,9 +59,7 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
-#define EDGEZ_SENSOR_PAWR_ATTEMPTS 3U
-#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 2000U
-#define EDGEZ_SENSOR_RETRY_DELAY_MS 150U
+#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 500U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
@@ -1279,8 +1278,35 @@ static void sensor_begin_cycle(uint32_t now)
 	sensor_power.phase = SENSOR_POWER_READY;
 }
 
+#if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+#define EDGEZ_UNUSED_RAM_BANK_START ((uintptr_t)0x20038000U)
+#define EDGEZ_UNUSED_RAM_BANK_SIZE  ((size_t)0x00008000U)
+extern char _end[];
+
+static void sensor_power_down_unused_ram(void)
+{
+	/* nRF54L15 application RAM is split into eight independently powered 32 KiB
+	 * sections. The linker image currently ends below 0x20038000, so section 7
+	 * can stay completely off throughout sensor operation. Keep the runtime
+	 * guard so a future image growth cannot silently power down live storage. */
+	if ((uintptr_t)_end <= EDGEZ_UNUSED_RAM_BANK_START) {
+		nrfx_ram_ctrl_retention_enable_set(
+			(const void *)EDGEZ_UNUSED_RAM_BANK_START,
+			EDGEZ_UNUSED_RAM_BANK_SIZE, false);
+		nrfx_ram_ctrl_power_enable_set(
+			(const void *)EDGEZ_UNUSED_RAM_BANK_START,
+			EDGEZ_UNUSED_RAM_BANK_SIZE, false);
+	}
+}
+#else
+static inline void sensor_power_down_unused_ram(void)
+{
+}
+#endif
+
 static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now)
 {
+	sensor_power_down_unused_ram();
 	if (!edgez_ble_is_stopped()) {
 		edgez_ble_stop();
 	}
@@ -1405,6 +1431,13 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		LOG_WRN("sensor timer-wake IMU FIFO drain failed rc=%d", imu_rc);
 	}
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST)
+	/* Power A/B image: preserve the complete sensor application and its timer
+	 * wake, but do not start the MM8108 or account for a radio TX pulse. */
+	sensor_finish_cycle(k_uptime_get_32());
+	return;
+#endif
+
 	int rc = 0;
 	if (!mesh_started && !edgez_halow_power_is_ready()) {
 		rc = edgez_halow_power_set(true);
@@ -1419,23 +1452,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		 * vendor-action receive callback time to arm; no mesh tick, beacon, scan,
 		 * or peering operation is run in sensor mode. */
 		k_msleep(100);
-		bool acknowledged = false;
-
-		for (unsigned attempt = 1U;
-		     attempt <= EDGEZ_SENSOR_PAWR_ATTEMPTS; ++attempt) {
-			rc = sensor_pawr_send_once(EDGEZ_SENSOR_UPDATE_INTERVAL_MS);
-			if (rc == 0) {
-				acknowledged = true;
-				break;
-			}
-			LOG_WRN("sensor PAwR attempt %u/%u failed rc=%d", attempt,
-				EDGEZ_SENSOR_PAWR_ATTEMPTS, rc);
-			if (attempt < EDGEZ_SENSOR_PAWR_ATTEMPTS) {
-				k_msleep(EDGEZ_SENSOR_RETRY_DELAY_MS);
-			}
-		}
-		LOG_INF("sensor telemetry %s after PAwR attempts",
-			acknowledged ? "acknowledged" : "unacknowledged");
+		rc = sensor_pawr_send_once(EDGEZ_SENSOR_UPDATE_INTERVAL_MS);
+		LOG_INF("sensor telemetry %s after single PAwR transmission",
+			rc == 0 ? "acknowledged" : "unacknowledged");
 		int stop_rc = stop_mesh_profile(true);
 
 		if (stop_rc != EDGEZ_UMAC_OK) {
@@ -1460,6 +1479,17 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 
 int main(void)
 {
+#if defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
+	/* First full-image current checkpoint. All external rails are already held
+	 * in their safe state except HaLow, which must be present briefly so its
+	 * Zephyr driver can initialize. Shut it down before measuring, then do not
+	 * initialize configuration, battery, BLE, sensors, or application work. */
+	(void)edgez_halow_power_set(false);
+	sensor_power_down_unused_ram();
+	while (true) {
+		k_sleep(K_FOREVER);
+	}
+#endif
 #if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 	edgez_diagnostics_set_sink(join_diagnostic_sink, NULL);
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
@@ -1470,12 +1500,16 @@ int main(void)
 	if (sensor_rc != 0) {
 		LOG_WRN("battery sensing unavailable rc=%d", sensor_rc);
 	}
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_IMU_TEST)
 	sensor_rc = edgez_imu_init();
 	if (sensor_rc != 0) {
 		LOG_WRN("IMU unavailable rc=%d; sensor beacons will omit motion", sensor_rc);
 	} else {
 		LOG_INF("IMU initialized for low-power sensor sampling");
 	}
+#else
+	LOG_INF("IMU disabled for full-application current diagnostic");
+#endif
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	livestock_config_init();
 	struct edgez_halow_profile boot_profile = {0};

@@ -1,6 +1,10 @@
 #include "edgez_ble.h"
 
 #include <errno.h>
+#include <zephyr/autoconf.h>
+
+#if defined(CONFIG_BT)
+
 #include <string.h>
 
 #include <zephyr/bluetooth/bluetooth.h>
@@ -587,3 +591,55 @@ int edgez_ble_start(void)
 	}
 	return 0;
 }
+
+#else
+
+/* Sensor-only builds can omit the complete Zephyr Bluetooth host/controller.
+ * Keep the application-facing contract available so the rest of the firmware
+ * does not need BLE-specific compile-time branches. */
+int edgez_ble_start(void)
+{
+	return -ENOTSUP;
+}
+
+void edgez_ble_stop(void)
+{
+}
+
+void edgez_ble_process(void)
+{
+}
+
+bool edgez_ble_is_connected(void)
+{
+	return false;
+}
+
+bool edgez_ble_can_notify(void)
+{
+	return false;
+}
+
+bool edgez_ble_is_enabled(void)
+{
+	return false;
+}
+
+bool edgez_ble_is_stopped(void)
+{
+	return true;
+}
+
+void edgez_ble_update_battery(uint8_t level)
+{
+	(void)level;
+}
+
+int edgez_ble_notify_packet(const uint8_t *payload, size_t payload_len)
+{
+	(void)payload;
+	(void)payload_len;
+	return -ENOTSUP;
+}
+
+#endif /* CONFIG_BT */

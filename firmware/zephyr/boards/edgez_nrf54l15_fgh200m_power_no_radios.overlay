@@ -1,0 +1,27 @@
+#include "edgez_nrf54l15_fgh200m_power.overlay"
+
+/* Full-application current diagnostic. Keep the LSM6DSL supply off and leave
+ * its interrupt and I2C pins unclaimed so they remain in their reset/high-Z
+ * state. HaLow isolation is performed by edgez_halow_power_set(false). */
+/delete-node/ &imu_power_default_on;
+
+&pdm_imu_pwr {
+	status = "disabled";
+};
+
+&lsm6ds3tr_c {
+	status = "disabled";
+};
+
+&i2c30 {
+	status = "disabled";
+};
+
+&gpio0 {
+	imu_power_off: imu_power_off {
+		gpio-hog;
+		gpios = <1 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "lsm6dsl-power-off";
+	};
+};

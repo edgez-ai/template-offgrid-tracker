@@ -31,9 +31,12 @@ static const struct gpio_dt_spec halow_power_en =
 
 static bool halow_power_ready;
 #if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST) || \
+	defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
 static const struct device *const halow_spi =
 	DEVICE_DT_GET(DT_BUS(DT_NODELABEL(morse_wifi)));
 static bool halow_spi_suspended;
+#endif
 static const struct gpio_dt_spec halow_cs =
 	GPIO_DT_SPEC_GET(DT_BUS(DT_NODELABEL(morse_wifi)), cs_gpios);
 static const struct gpio_dt_spec halow_reset =
@@ -49,7 +52,8 @@ static int halow_control_pins(bool powered)
 {
 	/* SPI PM only manages SCK/MOSI/MISO, not GPIO CS or radio controls.
 	 * Keep reset asserted until the radio driver starts the next cycle. */
-	int rc = gpio_pin_configure_dt(&halow_reset, GPIO_OUTPUT_ACTIVE);
+	int rc = gpio_pin_configure_dt(&halow_reset,
+		powered ? GPIO_OUTPUT_ACTIVE : GPIO_DISCONNECTED);
 	if (rc != 0) {
 		return rc;
 	}
@@ -84,6 +88,15 @@ bool edgez_halow_power_is_ready(void)
 int edgez_halow_power_set(bool enabled)
 {
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, halow_power_en_gpios)
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST) && \
+	!defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
+	/* The current diagnostic must never energize the MM8108, including during
+	 * early boot. Keep this guard here as well as in the application so a
+	 * future caller cannot accidentally invalidate the leakage measurement. */
+	if (enabled) {
+		return -EPERM;
+	}
+#endif
 	if (!gpio_is_ready_dt(&halow_power_en)) {
 		return -ENODEV;
 	}
@@ -91,6 +104,8 @@ int edgez_halow_power_set(bool enabled)
 	/* The caller has stopped the radio and its workers before rail cutoff.
 	 * Suspend SPIM while the module is still powered, then isolate CS and
 	 * apply the bus's sleep pinctrl state. */
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST) || \
+	defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
 	if (!enabled && !halow_spi_suspended) {
 		int rc = pm_device_action_run(halow_spi, PM_DEVICE_ACTION_SUSPEND);
 		if (rc != 0 && rc != -EALREADY) {
@@ -99,6 +114,7 @@ int edgez_halow_power_set(bool enabled)
 		}
 		halow_spi_suspended = true;
 	}
+#endif
 	if (!enabled) {
 		int rc = gpio_pin_interrupt_configure_dt(&halow_irq, GPIO_INT_DISABLE);
 		if (rc == 0) {
@@ -122,6 +138,8 @@ int edgez_halow_power_set(bool enabled)
 	halow_power_ready = enabled;
 #if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	/* Restore bus pins only after the radio supply has settled. */
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST) || \
+	defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
 	if (enabled && halow_spi_suspended) {
 		int rc = halow_control_pins(true);
 		if (rc == 0) {
@@ -136,6 +154,7 @@ int edgez_halow_power_set(bool enabled)
 		}
 		halow_spi_suspended = false;
 	}
+#endif
 #endif
 	LOG_INF("HaLow power rail %s", enabled ? "enabled" : "disabled");
 	return 0;
@@ -162,6 +181,19 @@ static int edgez_halow_power_init(void)
 		LOG_ERR("failed to disable HaLow power rail: %d", status);
 		return status;
 	}
+
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST) && \
+	!defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
+	/* Unlike the normal sensor image, this A/B build never performs the initial
+	 * MM8108 power-up. Suspend SPIM and disconnect every radio-facing control
+	 * pin before the Morse driver can touch the unpowered module. */
+	status = edgez_halow_power_set(false);
+	if (status < 0) {
+		return status;
+	}
+	LOG_INF("HaLow held off and isolated from reset");
+	return 0;
+#endif
 	k_msleep(100);
 
 	status = edgez_halow_power_set(true);

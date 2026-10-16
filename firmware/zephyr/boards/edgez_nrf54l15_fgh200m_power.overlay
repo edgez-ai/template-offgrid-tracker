@@ -7,11 +7,31 @@
 	status = "disabled";
 };
 
+/* Battery measurement is omitted from this power profile.  Disabling the DT
+ * device as well as CONFIG_ADC prevents the SAADC from being initialized and
+ * leaves its analog input disconnected while the MCU sleeps. */
+&adc {
+	status = "disabled";
+};
+
+&vbatt {
+	status = "disabled";
+};
+
 &gpio1 {
 	gps_power_off: gps_power_off {
 		gpio-hog;
 		gpios = <9 GPIO_ACTIVE_HIGH>;
 		output-low;
 		line-name = "l76k-power-off";
+	};
+
+	/* The XIAO base-board regulator node is disabled by the FGH200M overlay.
+	 * Keep its otherwise-unclaimed VBAT divider enable in a defined off state. */
+	xiao_vbat_off: xiao_vbat_off {
+		gpio-hog;
+		gpios = <15 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "xiao-vbat-divider-off";
 	};
 };

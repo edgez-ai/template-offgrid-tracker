@@ -83,7 +83,15 @@ int main(void)
 	nrf_gpio_cfg_input(USER_KEY, NRF_GPIO_PIN_PULLUP);
 	nrf_gpio_cfg_sense_set(USER_KEY, NRF_GPIO_PIN_SENSE_LOW);
 
+	/* System ON is useful for separating application/driver current from board
+	 * leakage while using the same WFI state as the functional sensor image. */
+#if defined(CONFIG_OFFGRID_NRF54_ALL_OFF_SYSTEM_ON)
+	while (true) {
+		k_sleep(K_FOREVER);
+	}
+#else
 	/* System OFF retains the GPIO configuration and wakes by reset on KEY. */
 	sys_poweroff();
+#endif
 	return 0;
 }
