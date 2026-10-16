@@ -64,7 +64,7 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
-#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 500U
+#define EDGEZ_SENSOR_TX_STATUS_TIMEOUT_MS 500U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
@@ -93,7 +93,8 @@ static bool mesh_started;
 static bool mesh_secure;
 static bool sensor_radio_only;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-static bool sensor_halow_ps_enabled;
+static bool sensor_halow_ps_configured;
+static bool sensor_halow_sleep_allowed;
 #endif
 static uint16_t open_data_sequence;
 static uint32_t open_mesh_sequence;
@@ -106,6 +107,10 @@ static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
 K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
+static uintptr_t sensor_pawr_tx_wait_token;
+static bool sensor_pawr_tx_waiting;
+static bool sensor_pawr_tx_succeeded;
+K_SEM_DEFINE(sensor_pawr_tx_sem, 0, 1);
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 static const struct gpio_dt_spec user_button =
 	GPIO_DT_SPEC_GET(EDGEZ_USER_NODE, key_gpios);
@@ -467,6 +472,19 @@ static void join_tx_status(void *ctx,
 {
 	ARG_UNUSED(ctx);
 	tx_status_count++;
+	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+	bool sensor_tx_matched = sensor_pawr_tx_waiting &&
+		status->token == sensor_pawr_tx_wait_token;
+
+	if (sensor_tx_matched) {
+		sensor_pawr_tx_succeeded =
+			(status->status_flags & EDGEZ_RF_TX_STATUS_FAILED) == 0U;
+		sensor_pawr_tx_waiting = false;
+	}
+	k_spin_unlock(&sensor_pawr_lock, key);
+	if (sensor_tx_matched) {
+		k_sem_give(&sensor_pawr_tx_sem);
+	}
 	LOG_INF("mesh TX status token=%" PRIuPTR " len=%u attempts=%u flags=0x%08" PRIx32,
 		status->token, (unsigned)status->frame_length,
 		status->attempts, status->status_flags);
@@ -718,7 +736,6 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	size_t packet_len = 0U;
 	size_t action_len = 0U;
 	uint32_t request_id = ++pawr_request_id;
-	uint32_t hash;
 	int rc;
 
 	/* Refresh GPS, battery and IMU values, then send only the protobuf payload
@@ -733,7 +750,6 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 			(unsigned)vendor_ies_len);
 		return rc != 0 ? rc : -EAGAIN;
 	}
-	hash = edgez_pawr_payload_hash(beacon, beacon_len);
 	if (!edgez_pawr_encode_typed_request(
 			packet, sizeof(packet), EDGEZ_PAWR_REQUEST_BEACON,
 			request_id, wake_interval_ms, beacon, beacon_len,
@@ -745,12 +761,6 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		return -EMSGSIZE;
 	}
 
-	k_sem_reset(&sensor_pawr_response_sem);
-	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-	sensor_pawr_expected_hash = hash;
-	sensor_pawr_waiting = true;
-	k_spin_unlock(&sensor_pawr_lock, key);
-
 	const struct edgez_umac_tx_request request = {
 		.token = pawr_tx_token++,
 		.frame = action,
@@ -759,35 +769,44 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		.aid = 0U,
 		.tid = 8U,
 		.mcs = mesh_runtime.config.mcs,
-		.attempts = mesh_runtime.config.attempts,
+		/* This request is sent to the broadcast address, which cannot return an
+		 * 802.11 MAC ACK. Wait only for the local MM8108 TX status below. */
+		.attempts = 1U,
 		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
 		.short_guard = mesh_runtime.config.short_guard,
+		.no_ack = true,
 		.immediate_status = true,
 	};
+	k_sem_reset(&sensor_pawr_tx_sem);
+	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+	sensor_pawr_tx_wait_token = request.token;
+	sensor_pawr_tx_succeeded = false;
+	sensor_pawr_tx_waiting = true;
+	k_spin_unlock(&sensor_pawr_lock, key);
 	rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
 	if (rc != EDGEZ_UMAC_OK) {
 		key = k_spin_lock(&sensor_pawr_lock);
-		sensor_pawr_waiting = false;
+		sensor_pawr_tx_waiting = false;
 		k_spin_unlock(&sensor_pawr_lock, key);
 		LOG_WRN("sensor PAwR request=%u rejected rc=%d driver=%d",
 			request_id, rc, mesh_runtime.umac.last_driver_status);
 		return -EIO;
 	}
 	edgez_imu_note_halow_tx();
-	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums hash=%08x",
-		request_id, (unsigned)beacon_len, wake_interval_ms, hash);
-	if (k_sem_take(&sensor_pawr_response_sem,
-			       K_MSEC(EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS)) == 0) {
-		return 0;
+	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums; waiting for local TX status only",
+		request_id, (unsigned)beacon_len, wake_interval_ms);
+	if (k_sem_take(&sensor_pawr_tx_sem,
+			       K_MSEC(EDGEZ_SENSOR_TX_STATUS_TIMEOUT_MS)) == 0) {
+		return sensor_pawr_tx_succeeded ? 0 : -EIO;
 	}
 	key = k_spin_lock(&sensor_pawr_lock);
-	sensor_pawr_waiting = false;
+	sensor_pawr_tx_waiting = false;
 	k_spin_unlock(&sensor_pawr_lock, key);
+	LOG_WRN("sensor PAwR request=%u local TX status timeout", request_id);
 	return -ETIMEDOUT;
 }
 
-#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST) || \
-	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+#if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 static bool set_mesh_power_save(bool enabled)
 {
 	enum mmwlan_status status;
@@ -815,6 +834,42 @@ static bool set_mesh_power_save(bool enabled)
 			mesh_runtime.umac.vif_id);
 		return false;
 	}
+	return true;
+}
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+static bool sensor_configure_halow_power_save(void)
+{
+	/* CONFIG_PS is required once to let the MM8108 firmware deassert BUSY. It
+	 * is normally managed by the associated-STA UMAC flow, which this PAwR-only
+	 * mesh VIF does not run. Configure it explicitly once after radio startup,
+	 * then use only the cheap host-wake toggle for subsequent report cycles. */
+	enum mmwlan_status status = mmdrv_set_dynamic_ps_timeout(0U);
+
+	if (status == MMWLAN_SUCCESS) {
+		status = mmdrv_set_chip_power_save_enabled(
+			mesh_runtime.umac.vif_id, true);
+	}
+	if (status != MMWLAN_SUCCESS) {
+		LOG_ERR("could not configure sensor HaLow chip sleep: status=%d vif=%u",
+			status, mesh_runtime.umac.vif_id);
+		return false;
+	}
+	sensor_halow_ps_configured = true;
+	return true;
+}
+
+static bool sensor_set_halow_wake(bool awake)
+{
+	enum mmwlan_status status = mmdrv_set_wake_enabled(awake);
+
+	if (status != MMWLAN_SUCCESS) {
+		LOG_ERR("could not %s sensor HaLow: status=%d",
+			awake ? "wake" : "sleep", status);
+		return false;
+	}
+	sensor_halow_sleep_allowed = !awake;
 	return true;
 }
 #endif
@@ -1012,9 +1067,15 @@ static int stop_mesh_profile(bool clear_routes)
 	mesh_ps_phase = MESH_PS_WAITING;
 #endif
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-	if (sensor_halow_ps_enabled) {
-		(void)set_mesh_power_save(false);
-		sensor_halow_ps_enabled = false;
+	if (sensor_halow_ps_configured) {
+		/* Wake the chip and disable the one-time sleep configuration before
+		 * tearing down the connectionless mesh interface. This is not part of
+		 * the recurring sensor report path. */
+		(void)sensor_set_halow_wake(true);
+		(void)mmdrv_set_chip_power_save_enabled(
+			mesh_runtime.umac.vif_id, false);
+		sensor_halow_ps_configured = false;
+		sensor_halow_sleep_allowed = false;
 	}
 #endif
 	status = edgez_umac_mesh_runtime_stop(&mesh_runtime);
@@ -1337,6 +1398,10 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 			LOG_WRN("sensor mode could not stop the active mesh rc=%d", rc);
 		}
 	}
+	/* The power-save sensor build reuses the rail enabled by the board's early
+	 * Morse initialization. Cycling it off and immediately back on here adds
+	 * 600 ms before the first packet and provides no energy benefit. */
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
 	if (!mesh_started && edgez_halow_power_is_ready()) {
 		int rc = edgez_halow_power_set(false);
 
@@ -1344,6 +1409,7 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 			LOG_WRN("initial sensor HaLow power-off failed rc=%d", rc);
 		}
 	}
+#endif
 	sensor_power.generation = edgez_config_generation();
 	sensor_begin_cycle(now);
 	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=%s IMU=hardware-FIFO",
@@ -1381,7 +1447,7 @@ static void sensor_finish_cycle(uint32_t now)
 	sensor_power.phase = SENSOR_POWER_SLEEPING;
 	LOG_INF("sensor cycle complete; HaLow %s for %u ms",
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-		sensor_halow_ps_enabled ? "chip sleep" : "off",
+		sensor_halow_sleep_allowed ? "chip sleep" : "off",
 #else
 		"off",
 #endif
@@ -1482,15 +1548,14 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	int rc = 0;
 	bool radio_cold_started = false;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-	if (mesh_started && sensor_halow_ps_enabled) {
-		if (!set_mesh_power_save(false)) {
+	if (mesh_started && sensor_halow_ps_configured &&
+	    sensor_halow_sleep_allowed) {
+		if (!sensor_set_halow_wake(true)) {
 			LOG_WRN("sensor HaLow power-save wake failed; cold restarting");
 			(void)stop_mesh_profile(true);
 			if (edgez_halow_power_is_ready()) {
 				(void)edgez_halow_power_set(false);
 			}
-		} else {
-			sensor_halow_ps_enabled = false;
 		}
 	}
 #endif
@@ -1514,14 +1579,10 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		LOG_INF("sensor telemetry %s after single PAwR transmission",
 			rc == 0 ? "acknowledged" : "unacknowledged");
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-		enum mmwlan_status ps_timeout_status =
-			mmdrv_set_dynamic_ps_timeout(0U);
-		if (ps_timeout_status == MMWLAN_SUCCESS &&
-		    set_mesh_power_save(true)) {
-			sensor_halow_ps_enabled = true;
-		} else {
-			LOG_WRN("sensor HaLow power save failed timeout_status=%d; cutting rail",
-				ps_timeout_status);
+		bool ps_ready = sensor_halow_ps_configured ||
+			sensor_configure_halow_power_save();
+		if (!ps_ready || !sensor_set_halow_wake(false)) {
+			LOG_WRN("sensor HaLow power save failed; cutting rail");
 			int stop_rc = stop_mesh_profile(true);
 
 			if (stop_rc != EDGEZ_UMAC_OK) {
