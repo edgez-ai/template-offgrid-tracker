@@ -163,8 +163,9 @@
 		status = "okay";
 		compatible = "morsemicro,mm8108";
 		bcf = "bcf_mf15457.mbin";
-		/* nRF54L SPIM requires an exact supported clock prescaler. */
-		spi-max-frequency = <8000000>;
+		/* SPIM00 supports 32 MHz and MM8108 SPI mode supports higher rates.
+		 * Use the controller maximum to shorten firmware load and host transfers. */
+		spi-max-frequency = <32000000>;
 		reg = <0>;
 
 		spi-irq-gpios = <&gpio1 6 GPIO_ACTIVE_LOW>;

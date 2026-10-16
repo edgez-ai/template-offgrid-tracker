@@ -10,6 +10,7 @@
 #include <zephyr/sys/poweroff.h>
 
 #include <hal/nrf_gpio.h>
+#include <soc.h>
 
 #define PIN(port, pin) NRF_GPIO_PIN_MAP(port, pin)
 
@@ -86,6 +87,11 @@ int main(void)
 	/* System ON is useful for separating application/driver current from board
 	 * leakage while using the same WFI state as the functional sensor image. */
 #if defined(CONFIG_OFFGRID_NRF54_ALL_OFF_SYSTEM_ON)
+	/* Match the functional sensor image's explicit transition out of
+	 * constant-latency mode before measuring the System ON sleep floor. */
+	NRF_POWER->TASKS_LOWPWR = 1U;
+	__DSB();
+	__ISB();
 	while (true) {
 		k_sleep(K_FOREVER);
 	}

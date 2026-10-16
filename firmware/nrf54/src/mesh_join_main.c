@@ -19,6 +19,7 @@
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/reboot.h>
 #include <helpers/nrfx_ram_ctrl.h>
+#include <soc.h>
 
 #include "pb_decode.h"
 #include "pb_encode.h"
@@ -1361,6 +1362,20 @@ static void sensor_finish_cycle(uint32_t now)
 		(unsigned)(sensor_power.next_wake_ms - now));
 }
 
+static inline void sensor_force_cpu_low_power(void)
+{
+#if defined(CONFIG_SOC_COMPATIBLE_NRF54LX) && !defined(CONFIG_NRF_SYS_EVENT)
+	/* The Nordic Bluetooth controller selects constant-latency mode while its
+	 * radio timer is active. Sensor sleep is entered only after bt_disable(),
+	 * HaLow shutdown, SPI suspend and radio-pin isolation, so no low-latency
+	 * client remains. Explicitly restore variable-latency low-power mode in
+	 * case a previous BLE session did not complete that transition. */
+	NRF_POWER->TASKS_LOWPWR = 1U;
+	__DSB();
+	__ISB();
+#endif
+}
+
 static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			      uint32_t now)
 {
@@ -1554,6 +1569,7 @@ int main(void)
 				/* Zephyr's tickless idle puts the nRF54L15 to sleep until
 				 * the next PAwR cycle or a hardware interrupt (including
 				 * the IMU FIFO watermark interrupt). */
+				sensor_force_cpu_low_power();
 				k_msleep(remaining_ms > 0 ? remaining_ms : 1);
 			} else {
 				k_msleep(1);
