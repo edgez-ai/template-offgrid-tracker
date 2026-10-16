@@ -62,7 +62,7 @@ The repository currently pins the top-level platform submodules to:
 | Submodule | Revision |
 | --- | --- |
 | `firmware/platforms/esp-halow` | `576ef9bdc04aa2c44a27a82af556fe16a5497a3c` |
-| `firmware/platforms/mm-iot-zephyr` | `52f86ed30eccea52d5bb2ff7950831ed8e7bf6c6` |
+| `firmware/platforms/mm-iot-zephyr` | `8694828e926487ddda5da5967e3c830dafac6be6` |
 
 Do not independently update nested Morse SDK, firmware, RF API, or EdgeZ
 prebuilt revisions. Update the owning platform submodule and then commit its new
