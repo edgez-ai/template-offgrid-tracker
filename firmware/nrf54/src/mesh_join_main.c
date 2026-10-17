@@ -64,7 +64,7 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
-#define EDGEZ_SENSOR_TX_STATUS_TIMEOUT_MS 500U
+#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 500U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
@@ -107,10 +107,6 @@ static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
 K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
-static uintptr_t sensor_pawr_tx_wait_token;
-static bool sensor_pawr_tx_waiting;
-static bool sensor_pawr_tx_succeeded;
-K_SEM_DEFINE(sensor_pawr_tx_sem, 0, 1);
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 static const struct gpio_dt_spec user_button =
 	GPIO_DT_SPEC_GET(EDGEZ_USER_NODE, key_gpios);
@@ -472,19 +468,6 @@ static void join_tx_status(void *ctx,
 {
 	ARG_UNUSED(ctx);
 	tx_status_count++;
-	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-	bool sensor_tx_matched = sensor_pawr_tx_waiting &&
-		status->token == sensor_pawr_tx_wait_token;
-
-	if (sensor_tx_matched) {
-		sensor_pawr_tx_succeeded =
-			(status->status_flags & EDGEZ_RF_TX_STATUS_FAILED) == 0U;
-		sensor_pawr_tx_waiting = false;
-	}
-	k_spin_unlock(&sensor_pawr_lock, key);
-	if (sensor_tx_matched) {
-		k_sem_give(&sensor_pawr_tx_sem);
-	}
 	LOG_INF("mesh TX status token=%" PRIuPTR " len=%u attempts=%u flags=0x%08" PRIx32,
 		status->token, (unsigned)status->frame_length,
 		status->attempts, status->status_flags);
@@ -736,6 +719,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	size_t packet_len = 0U;
 	size_t action_len = 0U;
 	uint32_t request_id = ++pawr_request_id;
+	uint32_t hash;
 	int rc;
 
 	/* Refresh GPS, battery and IMU values, then send only the protobuf payload
@@ -750,6 +734,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 			(unsigned)vendor_ies_len);
 		return rc != 0 ? rc : -EAGAIN;
 	}
+	hash = edgez_pawr_payload_hash(beacon, beacon_len);
 	if (!edgez_pawr_encode_typed_request(
 			packet, sizeof(packet), EDGEZ_PAWR_REQUEST_BEACON,
 			request_id, wake_interval_ms, beacon, beacon_len,
@@ -769,40 +754,40 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		.aid = 0U,
 		.tid = 8U,
 		.mcs = mesh_runtime.config.mcs,
-		/* This request is sent to the broadcast address, which cannot return an
-		 * 802.11 MAC ACK. Wait only for the local MM8108 TX status below. */
+		/* Broadcast cannot use an 802.11 MAC ACK. The receiver returns the
+		 * application-level PAwR acknowledgement matched by payload hash. */
 		.attempts = 1U,
 		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
 		.short_guard = mesh_runtime.config.short_guard,
 		.no_ack = true,
 		.immediate_status = true,
 	};
-	k_sem_reset(&sensor_pawr_tx_sem);
+	k_sem_reset(&sensor_pawr_response_sem);
 	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-	sensor_pawr_tx_wait_token = request.token;
-	sensor_pawr_tx_succeeded = false;
-	sensor_pawr_tx_waiting = true;
+	sensor_pawr_expected_hash = hash;
+	sensor_pawr_waiting = true;
 	k_spin_unlock(&sensor_pawr_lock, key);
 	rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
 	if (rc != EDGEZ_UMAC_OK) {
 		key = k_spin_lock(&sensor_pawr_lock);
-		sensor_pawr_tx_waiting = false;
+		sensor_pawr_waiting = false;
 		k_spin_unlock(&sensor_pawr_lock, key);
 		LOG_WRN("sensor PAwR request=%u rejected rc=%d driver=%d",
 			request_id, rc, mesh_runtime.umac.last_driver_status);
 		return -EIO;
 	}
 	edgez_imu_note_halow_tx();
-	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums; waiting for local TX status only",
-		request_id, (unsigned)beacon_len, wake_interval_ms);
-	if (k_sem_take(&sensor_pawr_tx_sem,
-			       K_MSEC(EDGEZ_SENSOR_TX_STATUS_TIMEOUT_MS)) == 0) {
-		return sensor_pawr_tx_succeeded ? 0 : -EIO;
+	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums hash=%08x; waiting up to %ums for acknowledgement",
+		request_id, (unsigned)beacon_len, wake_interval_ms, hash,
+		EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS);
+	if (k_sem_take(&sensor_pawr_response_sem,
+			       K_MSEC(EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS)) == 0) {
+		return 0;
 	}
 	key = k_spin_lock(&sensor_pawr_lock);
-	sensor_pawr_tx_waiting = false;
+	sensor_pawr_waiting = false;
 	k_spin_unlock(&sensor_pawr_lock, key);
-	LOG_WRN("sensor PAwR request=%u local TX status timeout", request_id);
+	LOG_WRN("sensor PAwR request=%u acknowledgement timeout", request_id);
 	return -ETIMEDOUT;
 }
 
