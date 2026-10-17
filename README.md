@@ -149,11 +149,14 @@ profile provisions the device as a sensor, it:
 2. Keeps the LSM6DSL gyroscope off and lets its accelerometer FIFO batch samples
    while the MCU uses Zephyr tickless System ON idle.
 3. Wakes on a 15-second reporting cycle and drains the FIFO.
-4. Wakes the L76K GPS and waits up to 10 seconds for a fix. A timeout sends the
-   report without a location.
-5. Powers the MM8108 rail, sends the beacon through connectionless HaLow PAwR
-   with up to three attempts, then stops the radio and cuts its power rail.
-6. Pulls GPS wake low, suspends its UART, and returns to tickless sleep.
+4. Keeps the L76K GPS disabled; the sensor report is valid without a location.
+5. Wakes the initialized MM8108 from chip sleep, sends one connectionless HaLow
+   PAwR-like beacon, and waits up to 500 ms for an application acknowledgement.
+6. Returns the MM8108 to chip sleep without cutting its rail or reloading its
+   firmware, then lets the nRF54L15 return to tickless idle.
+
+Watch the [narrated low-power sensor demonstration](docs/halow-pawr-low-power-sensor.md)
+for the mobile sensor view and measured wake/transmit waveform.
 
 The power image disables INFO logs, printk, the console, and RTT to avoid
 measurement overhead. Garbage from an RTT viewer is therefore expected and is

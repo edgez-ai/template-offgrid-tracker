@@ -205,11 +205,15 @@ before distributing any build.
 `edgez-nrf54l15-fgh200m-power` is the current-measurement build for the EdgeZ
 nRF54L15 carrier and FGH200M/MM8108. It disables BLE after sensor provisioning,
 does not peer or run BATMAN, batches accelerometer-only LSM6DSL samples in the
-hardware FIFO, and uses a 15-second reporting cycle. Each cycle wakes the L76K
-GPS for at most 10 seconds, drains the IMU FIFO, powers the MM8108 rail, and
-sends the beacon through connectionless PAwR with up to three attempts. The
-report is still sent when GPS has no fix. GPS/UART and the HaLow rail are then
-stopped before Zephyr returns to tickless System ON idle.
+hardware FIFO, disables GPS, and uses a 15-second reporting cycle. The first
+cycle initializes the MM8108 and configures chip sleep. Later cycles drain the
+IMU FIFO, wake the retained radio, send one connectionless PAwR-like beacon,
+and wait up to 500 ms for a receiver-generated application acknowledgement.
+There is no same-cycle retry. The MM8108 then returns to chip sleep without a
+firmware reload, and Zephyr returns to tickless System ON idle.
+
+See the [narrated low-power sensor demonstration](../docs/halow-pawr-low-power-sensor.md)
+for the mobile sensor view and measured wake/transmit waveform.
 
 The power image deliberately disables logging, printk, console, and RTT. Use
 the regular `edgez-nrf54l15-fgh200m` image for runtime diagnostics; use a
