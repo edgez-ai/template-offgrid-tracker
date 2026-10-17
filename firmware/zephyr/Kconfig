@@ -6,14 +6,6 @@ config MBEDTLS_ZEPHYR_ENTROPY
 
 source "Kconfig.zephyr"
 
-config OFFGRID_NRF54_ALL_OFF_SYSTEM_ON
-    bool "Use System ON idle in the all-off hardware benchmark"
-    default n
-    help
-      Keep every external rail and peripheral isolated, but enter tickless
-      System ON idle instead of System OFF. This provides a directly comparable
-      WFI baseline for the full sensor application.
-
 config WIFI_SSID
     string "Wi-Fi SSID of the AP we want to connect to"
     default "MorseMicro"
@@ -29,6 +21,46 @@ config MQTT_BROKER_ADDR
 config MQTT_BROKER_PORT
     int "Port the MQTT broker is running on"
     default 1883
+
+choice OFFGRID_NRF54_ROLE
+    prompt "Offgrid Tracker nRF54L15 application role"
+    default OFFGRID_NRF54_ROLE_COMPANION
+
+config OFFGRID_NRF54_ROLE_COMPANION
+    bool "BLE companion and full mesh node"
+    help
+      Build the phone companion role with BLE provisioning/realtime control,
+      mesh peering, BATMAN forwarding, and normal user/device beacons.
+
+config OFFGRID_NRF54_ROLE_SENSOR
+    bool "Low-power connectionless HaLow sensor"
+    help
+      Build a dedicated sensor role. Bluetooth is not required, mesh peering
+      and BATMAN are never started, and reports use the connectionless HaLow
+      PAwR-like path.
+
+endchoice
+
+config OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY
+    string "Zero-touch sensor bootstrap country"
+    default "US"
+    help
+      Regulatory domain used before a sensor has a provisioned profile.
+
+config OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL
+    int "Zero-touch sensor bootstrap S1G channel"
+    range 1 255
+    default 27
+    help
+      Country-specific 802.11ah channel used for zero-touch requests before
+      the accepted profile has been saved to normal settings storage.
+
+config OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS
+    int "Zero-touch request interval"
+    range 5 3600
+    default 15
+    help
+      Time between connectionless HaLow provisioning requests.
 
 config OFFGRID_NRF54_MESH_PS_TEST
     bool "Run the nRF54L15 mesh power-save experiment after peering"
@@ -76,32 +108,3 @@ config OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE
       cycles, avoiding the associated-station transition overhead. The HaLow
       rail and SPI remain enabled, so compare average energy and wake latency
       against full rail cutoff rather than expecting the lowest sleep current.
-
-config OFFGRID_NRF54_SENSOR_NO_HALOW_TEST
-    bool "Skip HaLow wake and transmission in low-power sensor mode"
-    depends on OFFGRID_NRF54_IMU_TIMER_DRAIN
-    default n
-    help
-      Diagnostic A/B mode. Keep the complete application, persistent sensor
-      profile, IMU FIFO sampling, and reporting timer, but never power up or
-      transmit through the HaLow module. This isolates the MM8108 contribution
-      from nRF54L15 System ON, RAM retention, and sensor current.
-
-config OFFGRID_NRF54_SENSOR_NO_IMU_TEST
-    bool "Keep the IMU fully powered off in the no-HaLow diagnostic"
-    depends on OFFGRID_NRF54_SENSOR_NO_HALOW_TEST
-    default n
-    help
-      Diagnostic A/B mode that also keeps the LSM6DSL rail off and omits IMU
-      initialization. Use this only with a board overlay that removes the
-      always-on IMU GPIO hog and holds the sensor power-enable pin low.
-
-config OFFGRID_NRF54_FORCED_IDLE_TEST
-    bool "Force the complete application into idle at main entry"
-    depends on OFFGRID_NRF54_SENSOR_NO_IMU_TEST
-    default n
-    help
-      Diagnostic checkpoint that retains the complete linked application and
-      Zephyr configuration but performs no application initialization after
-      main starts. External rails must be disabled by the matching diagnostic
-      overlay. The CPU blocks forever in tickless System ON idle.

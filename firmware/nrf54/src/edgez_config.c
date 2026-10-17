@@ -12,6 +12,7 @@
 #include "nanopb/pb_decode.h"
 #include "nanopb/pb_encode.h"
 #include "edgez_battery.h"
+#include "edgez_factory_data.h"
 #include "edgez_gps.h"
 #include "edgez_imu.h"
 #include "edgez_mesh_relay.h"
@@ -302,6 +303,9 @@ static int load_persisted_profile_locked(void)
 void edgez_config_init(const char *mesh_id, const char *passphrase)
 {
 	uint8_t random_identity[40];
+	struct edgez_factory_identity factory_identity;
+	bool have_factory_identity =
+		edgez_factory_data_get(&factory_identity) == 0;
 	int settings_rc;
 	int load_rc;
 
@@ -316,12 +320,26 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 	settings.action = ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
 	copy_string(settings.mesh_id, sizeof(settings.mesh_id), mesh_id);
 	copy_string(settings.passphrase, sizeof(settings.passphrase), passphrase);
-	copy_string(settings.user_name, sizeof(settings.user_name), "EdgeZ User");
-	memcpy(&settings.user_id_high, random_identity, sizeof(settings.user_id_high));
-	memcpy(&settings.user_id_low, random_identity + 8, sizeof(settings.user_id_low));
+	copy_string(settings.user_name, sizeof(settings.user_name),
+		have_factory_identity ? factory_identity.serial : "EdgeZ User");
+	memcpy(&settings.user_id_high,
+		have_factory_identity ? factory_identity.public_key : random_identity,
+		sizeof(settings.user_id_high));
+	memcpy(&settings.user_id_low,
+		have_factory_identity ? factory_identity.public_key + 8 : random_identity + 8,
+		sizeof(settings.user_id_low));
 	settings.user_public_key.size = 32;
-	memcpy(settings.user_public_key.bytes, random_identity + 8, 32);
-	settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
+	memcpy(settings.user_public_key.bytes,
+		have_factory_identity ? factory_identity.public_key : random_identity + 8, 32);
+	settings.user_private_key.size = have_factory_identity ? 32 : 0;
+	if (have_factory_identity) {
+		memcpy(settings.user_private_key.bytes, factory_identity.private_key, 32);
+		memset(&factory_identity, 0, sizeof(factory_identity));
+	}
+	settings.device_type = IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR) ?
+		ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR :
+		ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
+	settings.sleep_mode_enabled = IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR);
 	settings.beacon_interval_seconds = EDGEZ_DEFAULT_INTERVAL_SECONDS;
 	settings.max_hop = 2;
 	copy_string(country_code, sizeof(country_code), CONFIG_WIFI_MORSEMICRO_REGION);
@@ -339,7 +357,11 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		if (load_rc != 0 && load_rc != -ENOENT) {
 			LOG_WRN("Persistent HaLow profile ignored: %d", load_rc);
 		} else if (load_rc == -ENOENT) {
+		#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
+			LOG_INF("Persistent HaLow profile absent; zero-touch HaLow provisioning is required");
+		#else
 			LOG_INF("Persistent HaLow profile absent; BLE provisioning is required");
+		#endif
 		}
 	}
 	log_profile_readiness_locked("boot");
@@ -525,6 +547,26 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	LOG_INF("BLE NetworkPacket request body=%u operation=%u len=%u",
 		request.which_body, request.operation, (unsigned int)payload_len);
 	response_base(&request, &response);
+	uint64_t local_node;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	local_node = mac_to_node_id(halow_mac);
+	k_mutex_unlock(&config_lock);
+	if (request.to != 0 && request.to != local_node) {
+		uint8_t destination[6];
+		uint64_t node = request.to;
+
+		for (int i = 5; i >= 0; --i) {
+			destination[i] = (uint8_t)(node & 0xffU);
+			node >>= 8;
+		}
+		int relay_rc = edgez_nrf_relay_send(destination, payload, payload_len);
+		if (relay_rc == 0) {
+			LOG_INF("BLE NetworkPacket relayed to remote HaLow node=%012llx body=%u bytes=%u",
+				(unsigned long long)request.to, request.which_body,
+				(unsigned int)payload_len);
+		}
+		return relay_rc;
+	}
 
 	if (request.which_body == ai_edgez_halow_NetworkPacket_device_settings_tag) {
 		k_mutex_lock(&config_lock, K_FOREVER);
@@ -754,6 +796,40 @@ int edgez_config_build_status_packet(uint8_t *out, size_t out_cap,
 	k_mutex_lock(&config_lock, K_FOREVER);
 	packet.from = mac_to_node_id(halow_mac);
 	fill_status_locked(&packet.body.status);
+	k_mutex_unlock(&config_lock);
+	stream = pb_ostream_from_buffer(out, out_cap);
+	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
+		return -EMSGSIZE;
+	}
+	*out_len = stream.bytes_written;
+	return 0;
+}
+
+int edgez_config_build_zero_touch_request(const uint8_t current_mac[6],
+					   uint8_t *out, size_t out_cap,
+					   size_t *out_len)
+{
+	ai_edgez_halow_NetworkPacket packet = ai_edgez_halow_NetworkPacket_init_zero;
+	pb_ostream_t stream;
+
+	if (!current_mac || !out || !out_len) {
+		return -EINVAL;
+	}
+	packet.from = mac_to_node_id(current_mac);
+	packet.operation = ai_edgez_halow_Operation_REQUEST;
+	packet.interface = ai_edgez_halow_Interface_HALOW;
+	packet.which_body = ai_edgez_halow_NetworkPacket_device_settings_tag;
+	packet.body.device_settings.action =
+		ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
+	k_mutex_lock(&config_lock, K_FOREVER);
+	copy_string(packet.body.device_settings.user_name,
+		    sizeof(packet.body.device_settings.user_name), settings.user_name);
+	packet.body.device_settings.user_id_high = settings.user_id_high;
+	packet.body.device_settings.user_id_low = settings.user_id_low;
+	packet.body.device_settings.user_public_key = settings.user_public_key;
+	packet.body.device_settings.device_type =
+		ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+	packet.body.device_settings.sleep_mode_enabled = true;
 	k_mutex_unlock(&config_lock);
 	stream = pb_ostream_from_buffer(out, out_cap);
 	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {

@@ -1,4 +1,4 @@
-#include "edgez_nrf54l15_fgh200m.overlay"
+#include "edgez_nrf54l15_fgh200m_companion.overlay"
 
 /* Low-power sensor variant: leave the L76K fully off. The disabled UART keeps
  * P1.11/P1.12 disconnected, and the GPIO hog holds its P1.09 power/wake input

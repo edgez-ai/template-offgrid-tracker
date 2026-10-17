@@ -25,6 +25,7 @@
 #include "pb_encode.h"
 
 #include "edgez_diagnostics.h"
+#include "edgez_factory_data.h"
 #include "edgez_batman_adv_lite.h"
 #include "edgez_ble.h"
 #include "edgez_battery.h"
@@ -119,8 +120,6 @@ K_MUTEX_DEFINE(batman_tx_lock);
 	EDGEZ_BATADV_MAX_PACKET_LEN)
 static uint8_t open_data_frame[EDGEZ_OPEN_DATA_FRAME_MAX];
 
-static bool profile_uses_sensor_mode(const struct edgez_halow_profile *profile);
-
 static uint64_t mac_to_u64(const uint8_t mac[6])
 {
 	uint64_t value = 0U;
@@ -170,44 +169,64 @@ static int route_pawr_beacon(const uint8_t source[6], const uint8_t *beacon,
 	ai_edgez_halow_NetworkPacket *packet =
 		k_calloc(1U, sizeof(ai_edgez_halow_NetworkPacket));
 	uint8_t encoded[512];
+	size_t encoded_len = 0;
+	bool zero_touch = false;
 	int rc;
 
 	if (!packet) {
 		return -ENOMEM;
 	}
 	pb_istream_t input = pb_istream_from_buffer(beacon, beacon_len);
-	packet->from = mac_to_u64(source);
-	packet->operation = ai_edgez_halow_Operation_BROADCAST;
-	packet->interface = ai_edgez_halow_Interface_HALOW;
-	packet->which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
-	if (!pb_decode(&input, ai_edgez_halow_Beacon_fields,
-		       &packet->body.beacon)) {
-		LOG_WRN("PAwR Beacon decode failed: %s", PB_GET_ERROR(&input));
-		k_free(packet);
-		return -EINVAL;
-	}
-	pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
-	if (!pb_encode(&output, ai_edgez_halow_NetworkPacket_fields, packet)) {
-		LOG_WRN("PAwR NetworkPacket encode failed: %s", PB_GET_ERROR(&output));
-		k_free(packet);
-		return -EMSGSIZE;
+	if (pb_decode(&input, ai_edgez_halow_NetworkPacket_fields, packet) &&
+	    packet->operation == ai_edgez_halow_Operation_REQUEST &&
+	    packet->which_body == ai_edgez_halow_NetworkPacket_device_settings_tag &&
+	    packet->body.device_settings.device_type ==
+		ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR &&
+	    packet->body.device_settings.user_name[0] != '\0' &&
+	    packet->body.device_settings.user_public_key.size == 32U) {
+		zero_touch = true;
+		encoded_len = beacon_len;
+		memcpy(encoded, beacon, beacon_len);
+	} else {
+		*packet = (ai_edgez_halow_NetworkPacket)
+			ai_edgez_halow_NetworkPacket_init_zero;
+		input = pb_istream_from_buffer(beacon, beacon_len);
+		packet->from = mac_to_u64(source);
+		packet->operation = ai_edgez_halow_Operation_BROADCAST;
+		packet->interface = ai_edgez_halow_Interface_HALOW;
+		packet->which_body = ai_edgez_halow_NetworkPacket_beacon_tag;
+		if (!pb_decode(&input, ai_edgez_halow_Beacon_fields,
+			       &packet->body.beacon)) {
+			LOG_WRN("PAwR payload is neither Beacon nor zero-touch request");
+			k_free(packet);
+			return -EINVAL;
+		}
+		pb_ostream_t output = pb_ostream_from_buffer(encoded, sizeof(encoded));
+		if (!pb_encode(&output, ai_edgez_halow_NetworkPacket_fields, packet)) {
+			LOG_WRN("PAwR NetworkPacket encode failed: %s", PB_GET_ERROR(&output));
+			k_free(packet);
+			return -EMSGSIZE;
+		}
+		encoded_len = output.bytes_written;
 	}
 	k_free(packet);
 
 	if (edgez_ble_can_notify()) {
-		rc = edgez_ble_notify_packet(encoded, output.bytes_written);
+		rc = edgez_ble_notify_packet(encoded, encoded_len);
 		if (rc == 0) {
-			LOG_INF("PAwR Beacon routed via BLE bytes=%u packet=%u",
-				(unsigned)beacon_len, (unsigned)output.bytes_written);
+			LOG_INF("PAwR %s routed via BLE bytes=%u packet=%u",
+				zero_touch ? "zero-touch request" : "Beacon",
+				(unsigned)beacon_len, (unsigned)encoded_len);
 			return 0;
 		}
 		LOG_WRN("PAwR Beacon BLE forwarding failed rc=%d; using HaLow mesh", rc);
 	}
 
-	rc = edgez_nrf_relay_send(NULL, encoded, output.bytes_written);
+	rc = edgez_nrf_relay_send(NULL, encoded, encoded_len);
 	if (rc == 0) {
-		LOG_INF("PAwR Beacon routed via HaLow mesh bytes=%u packet=%u",
-			(unsigned)beacon_len, (unsigned)output.bytes_written);
+		LOG_INF("PAwR %s routed via HaLow mesh bytes=%u packet=%u",
+			zero_touch ? "zero-touch request" : "Beacon",
+			(unsigned)beacon_len, (unsigned)encoded_len);
 	} else {
 		LOG_WRN("PAwR Beacon HaLow mesh broadcast failed rc=%d", rc);
 	}
@@ -427,7 +446,7 @@ static int join_ignore_unsupported(void *ctx,
 		if (rc != 0) {
 			LOG_WRN("PAwR beacon acknowledgement failed rc=%d", rc);
 		}
-		if (!profile_uses_sensor_mode(&applied_profile)) {
+		if (!IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)) {
 			rc = route_pawr_beacon(action.source, request.payload,
 					       request.payload_length);
 			if (rc != 0) {
@@ -696,13 +715,36 @@ static bool same_radio_profile(const struct edgez_halow_profile *a,
 		a->mesh_bandwidth_mhz == b->mesh_bandwidth_mhz;
 }
 
-static bool profile_uses_sensor_mode(const struct edgez_halow_profile *profile)
+static uint32_t sensor_update_interval_ms(void)
 {
-	return profile->sleep_mode_enabled &&
-		(profile->device_type ==
-			ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON ||
-		 profile->device_type ==
-			ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR);
+	return edgez_config_should_autostart() ? EDGEZ_SENSOR_UPDATE_INTERVAL_MS :
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS * 1000U;
+}
+
+static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
+{
+	uint32_t frequency_khz = 0;
+	uint8_t bandwidth_mhz = 0;
+
+	if (!profile || strlen(CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY) != 2U ||
+	    !edgez_rf_resolve_s1g_channel(
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
+		&frequency_khz, &bandwidth_mhz)) {
+		return -EINVAL;
+	}
+	memset(profile, 0, sizeof(*profile));
+	memcpy(profile->country_code,
+	       CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY, 2U);
+	profile->country_code[2] = '\0';
+	strcpy(profile->mesh_id, "edgez-zero-touch");
+	profile->mesh_frequency_khz = frequency_khz;
+	profile->mesh_bandwidth_mhz = bandwidth_mhz;
+	profile->beacon_interval_seconds =
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS;
+	profile->device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+	profile->sleep_mode_enabled = true;
+	return 0;
 }
 
 static int sensor_pawr_send_once(uint32_t wake_interval_ms)
@@ -722,17 +764,26 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	uint32_t hash;
 	int rc;
 
-	/* Refresh GPS, battery and IMU values, then send only the protobuf payload
-	 * carried by the vendor IE. This is the same sleepy beacon contract used by
-	 * the ESP32 PAwR responder. */
-	rc = edgez_config_build_vendor_ies(vendor_ies, sizeof(vendor_ies),
-					   mesh_runtime.radio_info.mac_addr,
-					   &vendor_ies_len);
-	if (rc != 0 || edgez_config_copy_halow_beacon(
-				beacon, sizeof(beacon), &beacon_len) != 0) {
-		LOG_WRN("sensor PAwR payload unavailable rc=%d IE=%u", rc,
-			(unsigned)vendor_ies_len);
-		return rc != 0 ? rc : -EAGAIN;
+	if (!edgez_config_should_autostart()) {
+		rc = edgez_config_build_zero_touch_request(
+			mesh_runtime.radio_info.mac_addr, beacon, sizeof(beacon),
+			&beacon_len);
+		if (rc != 0) {
+			LOG_WRN("zero-touch request unavailable rc=%d", rc);
+			return rc;
+		}
+	} else {
+		/* Refresh GPS, battery and IMU values, then send only the protobuf
+		 * payload carried by the vendor IE. */
+		rc = edgez_config_build_vendor_ies(vendor_ies, sizeof(vendor_ies),
+					       mesh_runtime.radio_info.mac_addr,
+					       &vendor_ies_len);
+		if (rc != 0 || edgez_config_copy_halow_beacon(
+					beacon, sizeof(beacon), &beacon_len) != 0) {
+			LOG_WRN("sensor PAwR payload unavailable rc=%d IE=%u", rc,
+				(unsigned)vendor_ies_len);
+			return rc != 0 ? rc : -EAGAIN;
+		}
 	}
 	hash = edgez_pawr_payload_hash(beacon, beacon_len);
 	if (!edgez_pawr_encode_typed_request(
@@ -777,7 +828,8 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		return -EIO;
 	}
 	edgez_imu_note_halow_tx();
-	LOG_INF("sensor PAwR request=%u queued payload=%u interval=%ums hash=%08x; waiting up to %ums for acknowledgement",
+	LOG_INF("sensor PAwR %s request=%u queued payload=%u interval=%ums hash=%08x; waiting up to %ums for acknowledgement",
+		edgez_config_should_autostart() ? "telemetry" : "zero-touch",
 		request_id, (unsigned)beacon_len, wake_interval_ms, hash,
 		EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS);
 	if (k_sem_take(&sensor_pawr_response_sem,
@@ -1043,7 +1095,7 @@ static int stop_mesh_profile(bool clear_routes)
 	if (!mesh_started) {
 		return EDGEZ_UMAC_OK;
 	}
-	if (clear_routes && mesh_services_initialized && !sensor_radio_only) {
+	if (clear_routes && mesh_services_initialized) {
 		(void)edgez_nrf_mesh_reset_and_pause();
 		edgez_nrf_relay_reset();
 	}
@@ -1237,6 +1289,8 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 static int start_sensor_radio(const struct edgez_halow_profile *profile)
 {
 	size_t mesh_id_length = strlen(profile->mesh_id);
+	const uint32_t control_interval_ms =
+		edgez_mesh_country_control_interval_ms(profile->country_code, 1000U);
 	int status;
 
 	if (mesh_id_length == 0U || mesh_id_length > 32U ||
@@ -1309,6 +1363,21 @@ static int start_sensor_radio(const struct edgez_halow_profile *profile)
 	mesh_secure = false;
 	sensor_radio_only = true;
 	applied_profile = *profile;
+	if (!mesh_services_initialized) {
+		status = edgez_nrf_mesh_init(mesh_runtime.radio_info.mac_addr,
+					     &batman_transport,
+					     control_interval_ms);
+		if (status == 0) {
+			status = edgez_nrf_relay_init(mesh_runtime.radio_info.mac_addr);
+		}
+		if (status != 0) {
+			(void)stop_mesh_profile(false);
+			return status;
+		}
+		mesh_services_initialized = true;
+	} else {
+		edgez_nrf_mesh_resume();
+	}
 	applied_generation = edgez_config_generation();
 	edgez_config_set_halow_mac(mesh_runtime.radio_info.mac_addr);
 	edgez_config_set_halow_ready(true);
@@ -1398,7 +1467,7 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 	sensor_power.generation = edgez_config_generation();
 	sensor_begin_cycle(now);
 	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=%s IMU=hardware-FIFO",
-		profile->device_type, EDGEZ_SENSOR_UPDATE_INTERVAL_MS / 1000U,
+		profile->device_type, sensor_update_interval_ms() / 1000U,
 		IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS) ? "cycled" : "disabled");
 }
 
@@ -1425,10 +1494,11 @@ static void sensor_leave(void)
 static void sensor_finish_cycle(uint32_t now)
 {
 	uint32_t elapsed_ms = now - sensor_power.cycle_started_ms;
+	uint32_t interval_ms = sensor_update_interval_ms();
 
 	edgez_gps_stop();
-	sensor_power.next_wake_ms = elapsed_ms < EDGEZ_SENSOR_UPDATE_INTERVAL_MS ?
-		sensor_power.cycle_started_ms + EDGEZ_SENSOR_UPDATE_INTERVAL_MS : now + 1000U;
+	sensor_power.next_wake_ms = elapsed_ms < interval_ms ?
+		sensor_power.cycle_started_ms + interval_ms : now + 1000U;
 	sensor_power.phase = SENSOR_POWER_SLEEPING;
 	LOG_INF("sensor cycle complete; HaLow %s for %u ms",
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
@@ -1523,13 +1593,6 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		LOG_WRN("sensor timer-wake IMU FIFO drain failed rc=%d", imu_rc);
 	}
 
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_HALOW_TEST)
-	/* Power A/B image: preserve the complete sensor application and its timer
-	 * wake, but do not start the MM8108 or account for a radio TX pulse. */
-	sensor_finish_cycle(k_uptime_get_32());
-	return;
-#endif
-
 	int rc = 0;
 	bool radio_cold_started = false;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
@@ -1560,7 +1623,11 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		if (radio_cold_started) {
 			k_msleep(100);
 		}
-		rc = sensor_pawr_send_once(EDGEZ_SENSOR_UPDATE_INTERVAL_MS);
+		rc = sensor_pawr_send_once(sensor_update_interval_ms());
+		/* A provisioning acceptance is returned as a direct PAwR mesh packet.
+		 * Drain it before putting the radio back to sleep. */
+		edgez_nrf_mesh_tick();
+		edgez_nrf_relay_tick();
 		LOG_INF("sensor telemetry %s after single PAwR transmission",
 			rc == 0 ? "acknowledged" : "unacknowledged");
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
@@ -1601,47 +1668,34 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 
 int main(void)
 {
-#if defined(CONFIG_OFFGRID_NRF54_FORCED_IDLE_TEST)
-	/* First full-image current checkpoint. All external rails are already held
-	 * in their safe state except HaLow, which must be present briefly so its
-	 * Zephyr driver can initialize. Shut it down before measuring, then do not
-	 * initialize configuration, battery, BLE, sensors, or application work. */
-	(void)edgez_halow_power_set(false);
-	sensor_power_down_unused_ram();
-	while (true) {
-		k_sleep(K_FOREVER);
-	}
-#endif
 #if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 	edgez_diagnostics_set_sink(join_diagnostic_sink, NULL);
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
 #endif
-	LOG_INF("EdgeZ nRF54 BLE + BATMAN application; IP services disabled");
+	const bool sensor_role = IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR);
+	LOG_INF("EdgeZ nRF54 role=%s; IP services disabled",
+		sensor_role ? "low-power HaLow sensor" : "BLE companion + BATMAN");
 	configure_user_button();
+	int factory_rc = edgez_factory_data_init();
+	if (factory_rc != 0) {
+		LOG_ERR("factory identity unavailable rc=%d", factory_rc);
+	}
 	int sensor_rc = edgez_battery_init();
 	if (sensor_rc != 0) {
 		LOG_WRN("battery sensing unavailable rc=%d", sensor_rc);
 	}
-#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_NO_IMU_TEST)
 	sensor_rc = edgez_imu_init();
 	if (sensor_rc != 0) {
 		LOG_WRN("IMU unavailable rc=%d; sensor beacons will omit motion", sensor_rc);
 	} else {
 		LOG_INF("IMU initialized for low-power sensor sampling");
 	}
-#else
-	LOG_INF("IMU disabled for full-application current diagnostic");
-#endif
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	livestock_config_init();
-	struct edgez_halow_profile boot_profile = {0};
-	edgez_config_get_profile(&boot_profile);
-	const bool boot_sensor_mode = edgez_config_should_autostart() &&
-		profile_uses_sensor_mode(&boot_profile);
-	if (!boot_sensor_mode && edgez_ble_start() != 0) {
+	if (!sensor_role && edgez_ble_start() != 0) {
 		LOG_ERR("BLE control service failed to start");
-	} else if (boot_sensor_mode) {
-		LOG_INF("provisioned sensor boot: BLE controller remains off");
+	} else if (sensor_role) {
+		LOG_INF("sensor role: Bluetooth is excluded from this build");
 	}
 
 	uint32_t next_report = k_uptime_get_32();
@@ -1656,10 +1710,18 @@ int main(void)
 		struct edgez_halow_profile profile = {0};
 		edgez_config_get_profile(&profile);
 		poll_user_button();
-		const bool sensor_mode = edgez_config_should_autostart() &&
-			profile_uses_sensor_mode(&profile);
 
-		if (sensor_mode) {
+		if (sensor_role) {
+			if (!edgez_config_should_autostart()) {
+				if (sensor_bootstrap_profile(&profile) != 0) {
+					LOG_ERR("invalid zero-touch bootstrap country=%s channel=%d",
+						CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+						CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL);
+					sensor_force_cpu_low_power();
+					k_msleep(1000);
+					continue;
+				}
+			}
 			sensor_power_tick(&profile, now);
 			edgez_ble_process();
 			if (sensor_power.phase == SENSOR_POWER_SLEEPING) {

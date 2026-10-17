@@ -143,6 +143,17 @@
 	status = "disabled";
 };
 
+/* Per-device manufacturing identity. Normal settings/factory reset uses the
+ * stock storage_partition and therefore never erases this page. */
+&cpuapp_rram {
+	partitions {
+		factory_partition: partition@165000 {
+			label = "factory-data";
+			reg = <0x165000 0x1000>;
+		};
+	};
+};
+
 /* These XIAO-base peripherals are not populated/used on the FGH200M carrier. */
 &pdm20 {
 	status = "disabled";

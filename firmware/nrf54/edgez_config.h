@@ -50,5 +50,8 @@ int edgez_config_build_network_beacon(const uint8_t current_mac[6],
 				      size_t *out_len);
 int edgez_config_build_status_packet(uint8_t *out, size_t out_cap,
 				     size_t *out_len);
+int edgez_config_build_zero_touch_request(const uint8_t current_mac[6],
+					   uint8_t *out, size_t out_cap,
+					   size_t *out_len);
 
 #endif

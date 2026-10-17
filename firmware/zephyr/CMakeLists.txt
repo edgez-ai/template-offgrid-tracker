@@ -8,9 +8,7 @@ if(NOT DEFINED DTC_OVERLAY_FILE)
 	)
 endif()
 
-if(OFFGRID_NRF54_ALL_OFF_BENCHMARK)
-	# The all-off benchmark must not initialize or link the Morse/Wi-Fi stack.
-elseif(DEFINED ENV{MORSE_ZEPHYR_MODULE})
+if(DEFINED ENV{MORSE_ZEPHYR_MODULE})
 	set(MORSE_ZEPHYR_MODULE "$ENV{MORSE_ZEPHYR_MODULE}")
 	list(APPEND ZEPHYR_EXTRA_MODULES "${MORSE_ZEPHYR_MODULE}")
 else()
@@ -25,12 +23,6 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(offgrid-tracker-nrf54)
 
-if(OFFGRID_NRF54_ALL_OFF_BENCHMARK)
-	# PlatformIO adds PROJECT_SRC_DIR sources after CMake introspection; keep the
-	# Zephyr app target valid until it adds the benchmark's main.c.
-	target_sources(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/benchmark_anchor.c")
-endif()
-
 zephyr_include_directories("${CMAKE_CURRENT_LIST_DIR}")
 zephyr_include_directories(
 	"${CMAKE_CURRENT_LIST_DIR}/../nrf54"
@@ -41,14 +33,12 @@ zephyr_include_directories(
 	"${CMAKE_CURRENT_LIST_DIR}/../shared"
 	"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb"
 )
-if(NOT OFFGRID_NRF54_ALL_OFF_BENCHMARK)
-	zephyr_include_directories(
-		"$ENV{EDGEZ_HALOW_MESH_SOURCE_ROOT}/include"
-		"${MORSE_ZEPHYR_MODULE}/submodules/edgez-rf-api/include"
-		"${MORSE_ZEPHYR_MODULE}/submodules/mm-iot-sdk/framework/src/mmregdb"
-	)
-	target_compile_definitions(app PRIVATE PB_ENABLE_MALLOC=1)
-endif()
+zephyr_include_directories(
+	"$ENV{EDGEZ_HALOW_MESH_SOURCE_ROOT}/include"
+	"${MORSE_ZEPHYR_MODULE}/submodules/edgez-rf-api/include"
+	"${MORSE_ZEPHYR_MODULE}/submodules/mm-iot-sdk/framework/src/mmregdb"
+)
+target_compile_definitions(app PRIVATE PB_ENABLE_MALLOC=1)
 
 if(CONFIG_WIFI_MORSEMICRO)
 	target_link_libraries(app PRIVATE libmorse_interface)
@@ -71,11 +61,9 @@ endif()
 
 # PlatformIO compiles nrf54/src recursively. nanopb lives outside that source
 # tree so ESP-IDF and Zephyr can share one runtime copy.
-if(NOT OFFGRID_NRF54_ALL_OFF_BENCHMARK)
-	target_sources(app PRIVATE
-		"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_common.c"
-		"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_decode.c"
-		"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_encode.c"
-		"${MORSE_ZEPHYR_MODULE}/submodules/edgez-rf-morsemicro/src/edgez_morse_channel.c"
-	)
-endif()
+target_sources(app PRIVATE
+	"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_common.c"
+	"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_decode.c"
+	"${CMAKE_CURRENT_LIST_DIR}/../shared/nanopb/pb_encode.c"
+	"${MORSE_ZEPHYR_MODULE}/submodules/edgez-rf-morsemicro/src/edgez_morse_channel.c"
+)

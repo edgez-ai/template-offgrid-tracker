@@ -106,7 +106,8 @@ Install PlatformIO, initialize all submodules, and build from `firmware/`:
 ```sh
 cd firmware
 pio run -e heltec-hc33
-pio run -e edgez-nrf54l15-fgh200m
+pio run -e edgez-nrf54l15-fgh200m-companion
+pio run -e edgez-nrf54l15-fgh200m-sensor
 ```
 
 Supported development environments are:
@@ -119,8 +120,8 @@ Supported development environments are:
 | `heltec-hc33-mesh-ps` | HT-HC33 mesh power experiment | MM6108 over SPI | esptool |
 | `seeed-xiao-nrf54l15-hc01` | XIAO nRF54L15 + HT-HC01 | MM6108 over SPI | J-Link |
 | `seeed-xiao-nrf54l15-sense` | XIAO nRF54L15 Sense + FGH100M | MM6108 over SPI | pyOCD |
-| `edgez-nrf54l15-fgh200m` | EdgeZ nRF54L15 + FGH200M | MM8108 over SPI | J-Link |
-| `edgez-nrf54l15-fgh200m-power` | FGH200M current-measurement image | MM8108 over SPI | J-Link |
+| `edgez-nrf54l15-fgh200m-companion` | FGH200M BLE companion and full mesh node | MM8108 over SPI | J-Link |
+| `edgez-nrf54l15-fgh200m-sensor` | FGH200M low-power connectionless sensor; no BLE | MM8108 over SPI | J-Link |
 
 Release-style builds use the `edgez-halow-mesh` public headers and protected
 prebuilt libraries already pinned inside the platform submodules. To diagnose
@@ -129,7 +130,8 @@ the mesh implementation, point both ESP32 and nRF54 builds at a source checkout:
 ```sh
 export EDGEZ_HALOW_MESH_SOURCE_ROOT=/absolute/path/to/edgez-halow-mesh
 pio run -e heltec-hc33
-pio run -e edgez-nrf54l15-fgh200m
+pio run -e edgez-nrf54l15-fgh200m-companion
+pio run -e edgez-nrf54l15-fgh200m-sensor
 ```
 
 Unset the variable to verify the same application against the pinned prebuilts:
@@ -137,13 +139,14 @@ Unset the variable to verify the same application against the pinned prebuilts:
 ```sh
 unset EDGEZ_HALOW_MESH_SOURCE_ROOT
 pio run -e heltec-hc33
-pio run -e edgez-nrf54l15-fgh200m
+pio run -e edgez-nrf54l15-fgh200m-companion
 ```
 
 ### FGH200M low-power sensor image
 
-`edgez-nrf54l15-fgh200m-power` is the current power-measurement target. When a
-profile provisions the device as a sensor, it:
+`edgez-nrf54l15-fgh200m-sensor` is the dedicated low-power target. Bluetooth is
+removed at build time, and the image never enters companion mesh mode. With a
+stored sensor profile, it:
 
 1. Stops BLE and does not start mesh peering, beacons, or BATMAN routing.
 2. Keeps the LSM6DSL gyroscope off and lets its accelerometer FIFO batch samples
@@ -160,14 +163,15 @@ for the mobile sensor view and measured wake/transmit waveform.
 
 The power image disables INFO logs, printk, the console, and RTT to avoid
 measurement overhead. Garbage from an RTT viewer is therefore expected and is
-not a runtime diagnostic. Use `edgez-nrf54l15-fgh200m` or a source build when
-logs are required, and use a current meter to validate the power image.
+not a runtime diagnostic. Use `edgez-nrf54l15-fgh200m-companion` or a sensor
+source build with logging enabled when logs are required, and use a current
+meter to validate the sensor image.
 
 Build the image with:
 
 ```sh
 cd firmware
-pio run -e edgez-nrf54l15-fgh200m-power
+pio run -e edgez-nrf54l15-fgh200m-sensor
 ```
 
 For reliable flashing, program the generated HEX directly with J-Link. Replace
@@ -178,7 +182,7 @@ JLinkExe -device NRF54L15_M33 -if SWD -speed 4000 -SelectEmuBySN <JLINK_SN>
 ```
 
 At the J-Link prompt, reset, load
-`.pio/build/edgez-nrf54l15-fgh200m-power/firmware.hex`, reset again, and run
+`.pio/build/edgez-nrf54l15-fgh200m-sensor/firmware.hex`, reset again, and run
 the image. `O.K.` or `Contents already match` confirms flash verification.
 
 ### Factory reset
@@ -193,7 +197,7 @@ firmware README.
 - `mobile.yml` builds the React Native bundle and can optionally create signed
   Android APKs when the organization signing secrets are configured.
 - `firmware.yml` builds only the supported release targets `heltec-hc33` and
-  `edgez-nrf54l15-fgh200m`, packages licensing/source manifests, and uploads
+  both FGH200M roles, packages licensing/source manifests, and uploads
   short-lived Actions artifacts.
 
 ## Licensing and firmware distribution
@@ -232,8 +236,8 @@ beside the pinned dependencies for the complete terms.
 ```sh
 cd app && npm run typecheck
 cd ../firmware && pio run -e heltec-hc33
-pio run -e edgez-nrf54l15-fgh200m
-pio run -e edgez-nrf54l15-fgh200m-power
+pio run -e edgez-nrf54l15-fgh200m-companion
+pio run -e edgez-nrf54l15-fgh200m-sensor
 ```
 
 For hardware verification, confirm BLE provisioning/realtime status on Android,

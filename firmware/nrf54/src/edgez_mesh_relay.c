@@ -9,6 +9,7 @@
 #include <zephyr/sys/byteorder.h>
 
 #include "edgez_ble.h"
+#include "edgez_config.h"
 #include "edgez_mesh_zephyr.h"
 
 LOG_MODULE_REGISTER(edgez_relay, LOG_LEVEL_INF);
@@ -119,9 +120,24 @@ static void receive_relay(const uint8_t originator[6], const uint8_t *frame,
 	item->updated_ms = k_uptime_get();
 	if (item->received == item->total_length) {
 		if (item->payload[0] == RELAY_KIND_NETWORK_PACKET) {
-			int rc = edgez_ble_notify_packet(item->payload + 1,
+			int rc;
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
+			uint8_t response[256];
+			size_t response_len = 0;
+
+			rc = edgez_config_handle_packet(item->payload + 1,
+				item->total_length - 1U, response, sizeof(response),
+				&response_len);
+			if (rc != 0) {
+				LOG_WRN("Direct PAwR provisioning packet rejected rc=%d", rc);
+			} else {
+				LOG_INF("Direct PAwR provisioning packet accepted");
+			}
+#else
+			rc = edgez_ble_notify_packet(item->payload + 1,
 						      item->total_length - 1U);
 			if (rc) LOG_WRN("Mesh packet could not be forwarded to BLE rc=%d", rc);
+#endif
 		}
 		memset(item, 0, sizeof(*item));
 	}

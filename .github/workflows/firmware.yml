@@ -11,7 +11,8 @@ on:
         options:
           - all
           - heltec-hc33
-          - edgez-nrf54l15-fgh200m
+          - edgez-nrf54l15-fgh200m-companion
+          - edgez-nrf54l15-fgh200m-sensor
 
 # Firmware is intentionally an Actions artifact, never a GitHub Release asset.
 permissions:
@@ -40,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SELECTED_ENVIRONMENT" == "all" ]]; then
-            matrix='{"environment":["heltec-hc33","edgez-nrf54l15-fgh200m"]}'
+            matrix='{"environment":["heltec-hc33","edgez-nrf54l15-fgh200m-companion","edgez-nrf54l15-fgh200m-sensor"]}'
           else
             matrix="$(jq -cn --arg environment "$SELECTED_ENVIRONMENT" \
               '{environment: [$environment]}')"
@@ -64,7 +65,7 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install platformio==6.2.0
       - name: Replace legacy PlatformIO Ninja for nRF
-        if: matrix.environment == 'edgez-nrf54l15-fgh200m'
+        if: startsWith(matrix.environment, 'edgez-nrf54l15-fgh200m-')
         shell: bash
         run: |
           set -euo pipefail

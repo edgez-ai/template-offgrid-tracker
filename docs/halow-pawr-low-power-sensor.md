@@ -10,7 +10,9 @@ request/response behavior: it is inspired by periodic advertising with
 responses, but it is implemented over Wi-Fi HaLow vendor action frames rather
 than the Bluetooth PAwR protocol.
 
-After provisioning the device as a sensor, the power-measurement firmware:
+The `edgez-nrf54l15-fgh200m-sensor` environment compiles Bluetooth out of the
+image and is separate from the `edgez-nrf54l15-fgh200m-companion` BLE/full-mesh
+role. With a stored sensor profile, the sensor firmware:
 
 1. Stops BLE and does not run mesh peering, mesh beacons, BATMAN routing, or
    GPS.
