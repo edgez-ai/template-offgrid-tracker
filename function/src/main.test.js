@@ -8,6 +8,10 @@ process.env.OFFGRID_TRACKER_DATABASE_ID = "database-a";
 process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID = "telemetry-a";
 process.env.OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID = "ota-a";
 process.env.OFFGRID_TRACKER_DOWNLINK_TABLE_ID = "downlink-a";
+process.env.OFFGRID_TRACKER_PROFILE_TABLE_ID = "profiles-a";
+process.env.OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID = "mobile-devices-a";
+process.env.OFFGRID_TRACKER_MESSAGE_TABLE_ID = "messages-a";
+process.env.OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID = "sensor-samples-a";
 process.env.OFFGRID_TRACKER_REPOSITORY_URL = "https://github.example/acme/offgrid-tracker";
 const { default: main } = await import("./main.js");
 
@@ -23,12 +27,15 @@ const originalFetch = globalThis.fetch;
 const originalCreateRow = TablesDB.prototype.createRow;
 const originalDeleteRow = TablesDB.prototype.deleteRow;
 const originalListRows = TablesDB.prototype.listRows;
+const originalGetRow = TablesDB.prototype.getRow;
+const originalUpsertRow = TablesDB.prototype.upsertRow;
 const originalUpdateRow = TablesDB.prototype.updateRow;
 const rows = [];
 const otaRows = [];
 const downlinkRows = [];
 const timeseriesWrites = [];
 const deviceLocationUpdates = [];
+const mobileRows = new Map();
 
 beforeEach(() => {
   delete devices.get(gatewayId).firmwareVersion;
@@ -40,6 +47,7 @@ beforeEach(() => {
   downlinkRows.length = 0;
   timeseriesWrites.length = 0;
   deviceLocationUpdates.length = 0;
+  mobileRows.clear();
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.OFFGRID_TRACKER_DATABASE_ID = "database-a";
@@ -80,6 +88,9 @@ beforeEach(() => {
     return row;
   };
   TablesDB.prototype.listRows = async (args) => {
+    if (["mobile-devices-a", "messages-a", "sensor-samples-a"].includes(args.tableId)) {
+      return { rows: [...mobileRows.values()].filter((row) => row.$tableId === args.tableId) };
+    }
     if (args.tableId === "telemetry-a") {
       const equal = (args.queries || []).map((query) => JSON.parse(query))
         .find((query) => query.method === "equal" && query.attribute === "halowMac");
@@ -88,6 +99,17 @@ beforeEach(() => {
     return { rows: args.tableId === "ota-a"
       ? otaRows
       : args.tableId === "downlink-a" ? downlinkRows : [] };
+  };
+  TablesDB.prototype.getRow = async (args) => {
+    if (args.tableId === "profiles-a" && args.rowId === "profile-a") {
+      return { $id: "profile-a", ownerId: "user-a", teamId: "profile-a", $permissions: ['read("team:profile-a")'] };
+    }
+    throw Object.assign(new Error("not found"), { code: 404 });
+  };
+  TablesDB.prototype.upsertRow = async (args) => {
+    const row = { $id: args.rowId, $tableId: args.tableId, $createdAt: new Date().toISOString(), $updatedAt: new Date().toISOString(), ...args.data };
+    mobileRows.set(`${args.tableId}:${args.rowId}`, row);
+    return row;
   };
   TablesDB.prototype.deleteRow = async (args) => {
     const index = rows.findIndex((candidate) => candidate.$id === args.rowId);
@@ -116,7 +138,34 @@ after(() => {
   TablesDB.prototype.createRow = originalCreateRow;
   TablesDB.prototype.deleteRow = originalDeleteRow;
   TablesDB.prototype.listRows = originalListRows;
+  TablesDB.prototype.getRow = originalGetRow;
+  TablesDB.prototype.upsertRow = originalUpsertRow;
   TablesDB.prototype.updateRow = originalUpdateRow;
+});
+
+test("mobile sync requires an authenticated execution", async () => {
+  const result = await main({
+    req: { headers: { "x-appwrite-key": "test-key" }, bodyJson: { action: "sync", profileId: "profile-a", devices: [], messages: [], sensorSamples: [] } },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 401);
+});
+
+test("mobile sync upserts inside the function and returns a watermark", async () => {
+  const result = await main({
+    req: {
+      headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
+      bodyJson: {
+        action: "sync", profileId: "profile-a", lastSyncAt: "", messages: [], sensorSamples: [],
+        devices: [{ id: "device-a", serial: "AABB", name: "Tracker", kind: "sensor", firmwareTarget: "fgh200", locationSource: "off", latitude: null, longitude: null, deviceType: "sensor", marker: "person", iconStyle: "person", userUuid: "", lastSeenAt: "2026-10-18T10:00:00.000Z", meshMacAddress: "", userPublicKey: "", updatedAt: "2026-10-18T10:00:00.000Z" }],
+      },
+    },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.devices[0].id, "device-a");
+  assert.ok(Date.parse(result.body.syncedAt));
+  assert.equal(mobileRows.size, 1);
 });
 
 async function publish(payload) {

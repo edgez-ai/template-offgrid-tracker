@@ -22,6 +22,11 @@ A legacy single JSON object follows the same path for the publishing device.
 Sensor type 12 carries battery voltage in volts; types 3 and 4 carry latitude
 and longitude. Other application telemetry channels keep their JSON payloads.
 
+Authenticated mobile executions may call `/sync`. The app sends incremental
+SQLite changes together with its last successful sync watermark. This Function,
+not the mobile client, validates and upserts device, message, and sensor rows and
+returns cloud-side changes for the app to merge locally.
+
 When an Appwrite Device is deleted, the same Function removes its deterministic
 latest-telemetry row. This releases the unique HaLow MAC mapping before a device
 with the same serial and radio is recreated; deleting an already-absent row is

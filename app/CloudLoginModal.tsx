@@ -12,7 +12,12 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { authenticateCloud, cloudAuthConfigured, cloudErrorMessage } from "./cloud-auth";
+import {
+  cloudAuthConfigured,
+  cloudErrorMessage,
+  completeCloudToken,
+  requestCloudEmailOtp,
+} from "./cloud-auth";
 
 export function CloudLoginModal({
   visible,
@@ -24,27 +29,54 @@ export function CloudLoginModal({
   onAuthenticated: () => void;
 }) {
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [otp, setOtp] = useState("");
+  const [otpUserId, setOtpUserId] = useState("");
+  const [phrase, setPhrase] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
+  const resetRequest = () => {
+    setOtp("");
+    setOtpUserId("");
+    setPhrase("");
+    setError("");
+  };
+
   useEffect(() => {
     if (!visible) return;
-    setPassword("");
-    setPasswordVisible(false);
+    setOtp("");
+    setOtpUserId("");
+    setPhrase("");
     setError("");
   }, [visible]);
 
-  const authenticate = async (register: boolean) => {
-    if (!email.trim() || !password) {
-      setError("Enter an email address and password.");
+  const sendEmailOtp = async () => {
+    if (!email.trim()) {
+      setError("Enter your email address.");
       return;
     }
     setBusy(true);
     setError("");
     try {
-      await authenticateCloud(email.trim(), password, register);
+      const request = await requestCloudEmailOtp(email.trim());
+      setOtpUserId(request.userId);
+      setPhrase(request.phrase);
+    } catch (caught) {
+      setError(cloudErrorMessage(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const verifyEmailOtp = async () => {
+    if (!otpUserId || !otp.trim()) {
+      setError("Enter the one-time code from your email.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await completeCloudToken(otpUserId, otp.trim());
       onAuthenticated();
       onClose();
     } catch (caught) {
@@ -79,62 +111,74 @@ export function CloudLoginModal({
                 <Ionicons name="close" size={25} color="#59716f" />
               </Pressable>
             </View>
+
             <Text style={loginStyles.help}>
-              Sign in to connect this profile to EdgeZ Cloud. Offline mesh features remain available without a session.
+              Enter your email to receive a one-time code. A new account is created automatically when needed.
             </Text>
+
             <Text style={loginStyles.label}>EMAIL</Text>
             <TextInput
               style={loginStyles.input}
               value={email}
-              onChangeText={setEmail}
-              placeholder="Email"
+              onChangeText={(value) => { setEmail(value); resetRequest(); }}
+              placeholder="you@example.com"
               placeholderTextColor="#718a83"
               autoCapitalize="none"
               autoCorrect={false}
               keyboardType="email-address"
-              editable={!busy}
+              editable={!busy && !otpUserId}
+              onSubmitEditing={() => void sendEmailOtp()}
             />
-            <Text style={loginStyles.label}>PASSWORD</Text>
-            <View style={loginStyles.passwordField}>
-              <TextInput
-                style={loginStyles.passwordInput}
-                value={password}
-                onChangeText={setPassword}
-                placeholder="Password"
-                placeholderTextColor="#718a83"
-                secureTextEntry={!passwordVisible}
-                autoCapitalize="none"
-                editable={!busy}
-                onSubmitEditing={() => void authenticate(false)}
-              />
-              <Pressable
-                style={loginStyles.eyeButton}
-                onPress={() => setPasswordVisible((current) => !current)}
-                accessibilityRole="button"
-                accessibilityLabel={passwordVisible ? "Hide password" : "Show password"}
-              >
-                <Ionicons name={passwordVisible ? "eye-outline" : "eye-off-outline"} size={23} color="#59716f" />
-              </Pressable>
-            </View>
+
+            {otpUserId ? (
+              <>
+                <Text style={loginStyles.label}>ONE-TIME CODE</Text>
+                <TextInput
+                  style={loginStyles.otpInput}
+                  value={otp}
+                  onChangeText={setOtp}
+                  placeholder="000000"
+                  placeholderTextColor="#718a83"
+                  keyboardType="number-pad"
+                  autoComplete="one-time-code"
+                  textContentType="oneTimeCode"
+                  editable={!busy}
+                  maxLength={16}
+                  onSubmitEditing={() => void verifyEmailOtp()}
+                />
+              </>
+            ) : null}
+
+            {phrase ? (
+              <View style={loginStyles.phraseCard}>
+                <Text style={loginStyles.phraseLabel}>SECURITY PHRASE</Text>
+                <Text style={loginStyles.phrase}>{phrase}</Text>
+                <Text style={loginStyles.phraseHelp}>Confirm this phrase matches the email before continuing.</Text>
+              </View>
+            ) : null}
+
             {!cloudAuthConfigured ? (
               <Text style={loginStyles.error}>Cloud login is not configured in this app build.</Text>
             ) : error ? <Text style={loginStyles.error}>{error}</Text> : null}
+
             <Pressable
               style={[loginStyles.primary, (busy || !cloudAuthConfigured) && loginStyles.disabled]}
-              onPress={() => void authenticate(false)}
+              onPress={() => void (otpUserId ? verifyEmailOtp() : sendEmailOtp())}
               disabled={busy || !cloudAuthConfigured}
               accessibilityRole="button"
             >
-              {busy ? <ActivityIndicator color="white" /> : <Text style={loginStyles.primaryText}>SIGN IN</Text>}
+              {busy ? <ActivityIndicator color="white" /> : (
+                <Text style={loginStyles.primaryText}>
+                  {otpUserId ? "VERIFY CODE" : "SEND EMAIL CODE"}
+                </Text>
+              )}
             </Pressable>
-            <Pressable
-              style={[loginStyles.secondary, (busy || !cloudAuthConfigured) && loginStyles.disabled]}
-              onPress={() => void authenticate(true)}
-              disabled={busy || !cloudAuthConfigured}
-              accessibilityRole="button"
-            >
-              <Text style={loginStyles.secondaryText}>CREATE ACCOUNT</Text>
-            </Pressable>
+
+            {otpUserId ? (
+              <Pressable style={loginStyles.secondary} onPress={resetRequest} disabled={busy}>
+                <Text style={loginStyles.secondaryText}>USE A DIFFERENT EMAIL</Text>
+              </Pressable>
+            ) : null}
           </View>
         </SafeAreaView>
       </KeyboardAvoidingView>
@@ -153,9 +197,11 @@ const loginStyles = StyleSheet.create({
   help: { color: "#59716f", fontSize: 12, lineHeight: 18, marginTop: 14, marginBottom: 5 },
   label: { color: "#59716f", fontSize: 9, fontWeight: "900", letterSpacing: 0.8, marginTop: 14, marginBottom: 7 },
   input: { height: 54, paddingHorizontal: 15, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, color: "#0a3037", backgroundColor: "white", fontSize: 14 },
-  passwordField: { height: 54, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, backgroundColor: "white", flexDirection: "row", alignItems: "center" },
-  passwordInput: { flex: 1, height: 52, paddingLeft: 15, color: "#0a3037", fontSize: 14 },
-  eyeButton: { width: 54, height: 52, alignItems: "center", justifyContent: "center" },
+  otpInput: { height: 58, paddingHorizontal: 15, borderWidth: 1, borderColor: "#9fc9c4", borderRadius: 12, color: "#0a3037", backgroundColor: "white", fontSize: 22, fontWeight: "800", letterSpacing: 5, textAlign: "center" },
+  phraseCard: { marginTop: 14, padding: 12, borderRadius: 11, backgroundColor: "#e9f3f1", alignItems: "center" },
+  phraseLabel: { color: "#59716f", fontSize: 8, fontWeight: "900", letterSpacing: 0.8 },
+  phrase: { color: "#0a3037", fontSize: 16, fontWeight: "900", marginTop: 4 },
+  phraseHelp: { color: "#59716f", fontSize: 10, lineHeight: 14, marginTop: 4, textAlign: "center" },
   error: { color: "#b9472f", fontSize: 11, lineHeight: 16, textAlign: "center", marginTop: 12 },
   primary: { minHeight: 52, marginTop: 18, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
   primaryText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: 0.8 },

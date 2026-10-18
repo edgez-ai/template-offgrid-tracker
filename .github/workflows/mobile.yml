@@ -33,7 +33,7 @@ jobs:
     env:
       DOMAIN_SUFFIX: edgez.biz
       APPWRITE_PUBLIC_ENDPOINT: ${{ vars.APPWRITE_PUBLIC_ENDPOINT }}
-      APPWRITE_PROJECT_ID: ${{ vars.APPWRITE_PROJECT_ID }}
+      APPWRITE_PROJECT_ID: ${{ secrets.APPWRITE_PROJECT_ID }}
       EDGEZ_BUNDLE_RUNTIME_VERSION: offgrid-tracker-android-2
       CI: "1"
       NODE_ENV: production

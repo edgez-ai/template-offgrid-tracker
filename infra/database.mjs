@@ -41,6 +41,76 @@ export function installDatabase() {
     ["tables-db", "get-index", ...profiles, "--key", "team-id"],
     ["tables-db", "create-index", ...profiles, "--key", "team-id", "--type", "key", "--columns", "teamId"]);
 
+  const ensureProfileTable = (tableId, name) => {
+    const table = ["--database-id", config.databaseId, "--table-id", tableId];
+    ensure(`${name} table`,
+      ["tables-db", "get-table", ...table],
+      ["tables-db", "create-table", ...table, "--name", name, "--permissions", 'create("users")', "--row-security", "true"]);
+    run(["tables-db", "update-table", ...table, "--permissions", 'create("users")', "--row-security", "true"]);
+    return table;
+  };
+  const ensureString = (label, table, key, size, { required = true, encrypt = false } = {}) => {
+    const create = ["tables-db", "create-string-column", ...table, "--key", key, "--size", String(size)];
+    if (required) create.push("--required", "true");
+    if (encrypt) create.push("--encrypt", "true");
+    ensure(`${label}.${key} column`, ["tables-db", "get-column", ...table, "--key", key], create);
+  };
+  const ensureInteger = (label, table, key, required = true) => {
+    const create = ["tables-db", "create-integer-column", ...table, "--key", key];
+    if (required) create.push("--required", "true");
+    ensure(`${label}.${key} column`, ["tables-db", "get-column", ...table, "--key", key], create);
+  };
+  const ensureFloat = (label, table, key) => ensure(`${label}.${key} column`,
+    ["tables-db", "get-column", ...table, "--key", key],
+    ["tables-db", "create-float-column", ...table, "--key", key]);
+
+  const mobileDevices = ensureProfileTable(config.mobileDeviceTableId, "Mobile profile devices");
+  for (const [key, size] of [
+    ["profileId", 36], ["localId", 36], ["serial", 64], ["name", 128], ["kind", 16],
+    ["firmwareTarget", 128], ["locationSource", 16], ["deviceType", 64], ["marker", 32],
+    ["iconStyle", 32], ["userUuid", 64], ["lastSeenAt", 40], ["meshMacAddress", 32],
+    ["userPublicKey", 256], ["updatedAt", 40],
+  ]) ensureString("mobile devices", mobileDevices, key, size);
+  for (const key of ["latitude", "longitude"]) ensureFloat("mobile devices", mobileDevices, key);
+  ensure("mobile devices profile/update index",
+    ["tables-db", "get-index", ...mobileDevices, "--key", "profile-updated"],
+    ["tables-db", "create-index", ...mobileDevices, "--key", "profile-updated", "--type", "key", "--columns", "profileId", "updatedAt", "--orders", "ASC", "DESC"]);
+  ensure("mobile devices identity index",
+    ["tables-db", "get-index", ...mobileDevices, "--key", "profile-local-id"],
+    ["tables-db", "create-index", ...mobileDevices, "--key", "profile-local-id", "--type", "unique", "--columns", "profileId", "localId"]);
+
+  const messages = ensureProfileTable(config.messageTableId, "Profile messages");
+  for (const [key, size, encrypt] of [
+    ["profileId", 36, false], ["messageUuid", 64, false], ["peerSerial", 64, false],
+    ["text", 10000, true], ["status", 32, false], ["voicePayload", 100000, true],
+    ["retryOfUuid", 64, false], ["deliveryState", 32, false],
+  ]) ensureString("messages", messages, key, size, { encrypt });
+  ensure("messages.mine column",
+    ["tables-db", "get-column", ...messages, "--key", "mine"],
+    ["tables-db", "create-boolean-column", ...messages, "--key", "mine", "--required", "true"]);
+  for (const key of ["timestampMs", "voiceCodec", "durationMs", "retryCount", "lastAttemptAtMs"]) {
+    ensureInteger("messages", messages, key);
+  }
+  ensure("messages profile/time index",
+    ["tables-db", "get-index", ...messages, "--key", "profile-message-time"],
+    ["tables-db", "create-index", ...messages, "--key", "profile-message-time", "--type", "key", "--columns", "profileId", "timestampMs", "--orders", "ASC", "DESC"]);
+  ensure("messages identity index",
+    ["tables-db", "get-index", ...messages, "--key", "profile-message-id"],
+    ["tables-db", "create-index", ...messages, "--key", "profile-message-id", "--type", "unique", "--columns", "profileId", "messageUuid"]);
+
+  const sensorSamples = ensureProfileTable(config.sensorSampleTableId, "Mobile sensor samples");
+  ensureString("sensor samples", sensorSamples, "profileId", 36);
+  ensureString("sensor samples", sensorSamples, "nodeNum", 32);
+  ensureInteger("sensor samples", sensorSamples, "timestampMs");
+  for (const key of [
+    "latitude", "longitude", "altitude", "temperature", "humidity", "pressure", "vibrationAverage",
+    "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ",
+  ]) ensureFloat("sensor samples", sensorSamples, key);
+  ensureInteger("sensor samples", sensorSamples, "binaryLengthBytes", false);
+  ensure("sensor samples profile/node/time index",
+    ["tables-db", "get-index", ...sensorSamples, "--key", "profile-node-time"],
+    ["tables-db", "create-index", ...sensorSamples, "--key", "profile-node-time", "--type", "key", "--columns", "profileId", "nodeNum", "timestampMs", "--orders", "ASC", "ASC", "DESC"]);
+
   const telemetry = ["--database-id", config.databaseId, "--table-id", config.telemetryTableId];
   ensure("telemetry table",
     ["tables-db", "get-table", ...telemetry],

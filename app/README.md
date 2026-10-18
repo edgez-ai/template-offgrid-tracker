@@ -9,6 +9,12 @@ Profiles may optionally enable **Connect to cloud**. The map and Settings show
 reports that the Internet is reachable. A signed-in phone without usable
 Internet remains `OFFLINE`.
 
+Devices, messages, and sensor samples are always saved to local SQLite first.
+When cloud access is enabled and online, the app runs an incremental sync every
+15 seconds. It sends only records newer than the profile's last successful sync
+to the authenticated Appwrite Function. The Function owns validation and cloud
+database writes, and returns remote changes for the app to merge into SQLite.
+
 ## Data model
 
 The app uses `expo-sqlite` with WAL and foreign-key support. The active profile
@@ -112,8 +118,9 @@ Copy `.env.example` to `.env` only when overriding defaults:
 - `APP_NAME` controls the display name and Android package suffix.
 - `DOMAIN_SUFFIX` controls the Android package prefix.
 - `APPWRITE_PUBLIC_ENDPOINT` and `APPWRITE_PROJECT_ID` enable the optional
-  EdgeZ Cloud login. Release builds read these from GitHub Actions repository
-  variables; local builds may provide the same values in `.env`.
+  EdgeZ Cloud login. Release builds read the endpoint from a GitHub Actions
+  repository variable and the project ID from a repository secret; local builds
+  may provide the same values in `.env`.
 - `OFFGRID_TRACKER_REPOSITORY_URL` identifies the repository used by update
   tooling.
 - `EDGEZ_OTA_PROXY_URL` and `EDGEZ_BUNDLE_RUNTIME_VERSION` override bundle
@@ -123,7 +130,10 @@ No backend API key or other privileged credential belongs in the mobile
 environment. The project ID and public endpoint are client-safe identifiers.
 
 When an active profile enables **Connect to cloud**, the status is `LOGIN`
-until an Appwrite email session exists. A successful login reconciles a
-profile-scoped Team and profile row, then reports `ONLINE` only while Internet
-reachability remains available. The cached session marker preserves the
-correct `OFFLINE` state when an authenticated phone temporarily loses access.
+until an Appwrite email session exists. Sign-in uses an email OTP, and Appwrite
+creates an account automatically when the email is new. A successful login
+reconciles a profile-scoped Team and profile row, then reports `ONLINE` only
+while Internet reachability remains available. The cached session marker
+preserves the correct `OFFLINE` state when an authenticated phone temporarily
+loses access. Authenticated users can log out from the active profile card in
+Settings.

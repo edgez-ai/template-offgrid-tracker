@@ -19,8 +19,10 @@ import {
   listProfileDevices,
   listProfileMessages,
   listProfileProvisioningRequests,
+  listProfileSensorSamples,
   listProfiles,
   reconcileProfileMessageDelivery,
+  saveProfileMessage,
   saveProfileDevice,
   saveProfileSensorSamples,
   replaceProfileConversation,
@@ -36,9 +38,17 @@ import { ProvisioningFlow } from "./ProvisioningFlow";
 import { SettingsPage } from "./SettingsScreens";
 import { HomeMap } from "./HomeMap";
 import { CloudLoginModal } from "./CloudLoginModal";
-import { cachedCloudSession, cloudErrorMessage, syncCloudProfile, verifyCloudSession } from "./cloud-auth";
+import {
+  cachedCloudSession,
+  cloudErrorMessage,
+  completeCloudDataSync,
+  logoutCloudSession,
+  syncCloudData,
+  syncCloudProfile,
+  verifyCloudSession,
+} from "./cloud-auth";
 import type { CloudConnectionState } from "./cloud-auth";
-import { normalizedDeviceSerial } from "./mesh-utils";
+import { nodeNumFromSerial, normalizedDeviceSerial } from "./mesh-utils";
 import {
   applySharedProfileSettings,
   loadSharedProfileSettings,
@@ -66,6 +76,7 @@ export default function App() {
   const [cloudLoginOpen, setCloudLoginOpen] = useState(false);
   const [cloudSessionLoggedIn, setCloudSessionLoggedIn] = useState(false);
   const [cloudProfileReady, setCloudProfileReady] = useState(false);
+  const [cloudDataHydrated, setCloudDataHydrated] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [bleStatus, setBleStatus] = useState<BleLinkStatus>({
@@ -89,6 +100,7 @@ export default function App() {
     runtimeProfile?.connectToCloud &&
     cloudSessionLoggedIn &&
     cloudProfileReady &&
+    cloudDataHydrated &&
     network.isConnected === true &&
     network.isInternetReachable === true,
   );
@@ -130,6 +142,7 @@ export default function App() {
     persistedNodeFingerprint.current = "";
     persistedMessageFingerprint.current = "";
     persistedSensorHighWater.current.clear();
+    setCloudDataHydrated(false);
     setMeshLink(null);
     setProfileDevices([]);
     setProfileMessages([]);
@@ -168,6 +181,7 @@ export default function App() {
 
   useEffect(() => {
     setCloudProfileReady(false);
+    setCloudDataHydrated(false);
     if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || network.isInternetReachable !== true) return;
     let active = true;
     void syncCloudProfile(runtimeProfile)
@@ -181,6 +195,68 @@ export default function App() {
       });
     return () => { active = false; };
   }, [cloudSessionLoggedIn, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id, runtimeProfile?.updatedAt]);
+
+  useEffect(() => {
+    if (!runtimeProfile || !cloudProfileReady || network.isInternetReachable !== true) return;
+    let active = true;
+    let running = false;
+    const synchronize = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const [localDevices, localMessages, localSensorSamples] = await Promise.all([
+        listProfileDevices(runtimeProfile.id),
+        listProfileMessages(runtimeProfile.id),
+        listProfileSensorSamples(runtimeProfile.id),
+        ]);
+        const remote = await syncCloudData(runtimeProfile.id, localDevices, localMessages, localSensorSamples);
+        for (const device of remote.devices) {
+          const existing = localDevices.find((candidate) => candidate.id === device.id ||
+            normalizedDeviceSerial(candidate.serial) === normalizedDeviceSerial(device.serial));
+          if (existing && existing.updatedAt.localeCompare(device.updatedAt) > 0) continue;
+          await saveProfileDevice({
+            profileId: runtimeProfile.id, serial: device.serial, name: device.name, kind: device.kind,
+            firmwareTarget: device.firmwareTarget, locationSource: device.locationSource,
+            latitude: device.latitude, longitude: device.longitude, deviceType: device.deviceType,
+            marker: device.marker, iconStyle: device.iconStyle, userUuid: device.userUuid,
+            lastSeenAt: device.lastSeenAt, meshMacAddress: device.meshMacAddress,
+            userPublicKey: device.userPublicKey,
+          }, existing?.id ?? device.id);
+        }
+        const localMessageMap = new Map(localMessages.map((message) => [message.messageUuid, message]));
+        for (const message of remote.messages) {
+          const existing = localMessageMap.get(message.messageUuid);
+          const remoteDelivered = message.status === "Delivered" || message.deliveryState === "Delivered";
+          const localDelivered = existing?.status === "Delivered" || existing?.deliveryState === "Delivered";
+          if (existing && !remoteDelivered && (localDelivered || existing.lastAttemptAtMs > message.lastAttemptAtMs)) continue;
+          await saveProfileMessage(runtimeProfile.id, message.peerSerial, {
+            nodeNum: nodeNumFromSerial(message.peerSerial) ?? 0n, text: message.text, mine: message.mine,
+            timestampMs: message.timestampMs, messageUuid: message.messageUuid, status: message.status,
+            voiceBytes: message.voiceBytes, voiceCodec: message.voiceCodec, durationMs: message.durationMs,
+          }, {
+            retryCount: message.retryCount, retryOfUuid: message.retryOfUuid,
+            lastAttemptAtMs: message.lastAttemptAtMs, deliveryState: message.deliveryState,
+          });
+        }
+        await saveProfileSensorSamples(runtimeProfile.id, remote.sensorSamples);
+        const [devices, messages] = await Promise.all([
+          listProfileDevices(runtimeProfile.id), listProfileMessages(runtimeProfile.id),
+        ]);
+        if (!active || activeProfileIdRef.current !== runtimeProfile.id) return;
+        setProfileDevices(devices);
+        setProfileMessages(messages);
+        await completeCloudDataSync(runtimeProfile.id, remote.syncedAt);
+        setCloudDataHydrated(true);
+      } catch (caught) {
+        if (active) setSettingsError(`Cloud sync failed: ${cloudErrorMessage(caught)}`);
+      } finally {
+        running = false;
+      }
+    };
+    void synchronize();
+    const timer = setInterval(() => void synchronize(), 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [cloudProfileReady, network.isInternetReachable, runtimeProfile?.id]);
 
   useEffect(() => {
     void (async () => {
@@ -301,7 +377,7 @@ export default function App() {
 
     const timer = setTimeout(() => {
       void saveProfileSensorSamples(profile.id, pending)
-        .then(() => {
+        .then(async () => {
           for (const sample of pending) {
             const key = `${profile.id}:${sample.nodeNum}`;
             persistedSensorHighWater.current.set(
@@ -337,6 +413,36 @@ export default function App() {
     await saveSharedProfileSettings(settings);
     setSharedSettings(settings);
     setSettingsError("");
+  };
+
+  const requestCloudLogout = () => {
+    Alert.alert(
+      "Log out of EdgeZ Cloud?",
+      "Your local profiles and offline data will remain on this phone.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Log out",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setSettingsBusy(true);
+              setSettingsError("");
+              try {
+                await logoutCloudSession();
+                setCloudSessionLoggedIn(false);
+                setCloudProfileReady(false);
+                setCloudDataHydrated(false);
+              } catch (caught) {
+                setSettingsError(`Cloud logout failed: ${cloudErrorMessage(caught)}`);
+              } finally {
+                setSettingsBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
   };
 
   const selectManagedProfile = async (selected: StoredProfile) => {
@@ -491,6 +597,7 @@ export default function App() {
                 }}
                 bleStatus={bleStatus}
                 cloudStatus={cloudStatus}
+                cloudLoggedIn={cloudSessionLoggedIn}
                 managerOpen={profileManagerOpen}
                 busy={settingsBusy}
                 error={settingsError}
@@ -503,6 +610,7 @@ export default function App() {
                 onDelete={requestDeleteProfile}
                 onSaveSharedSettings={saveAppSettings}
                 onCloudPress={() => { if (cloudStatus === "login") setCloudLoginOpen(true); }}
+                onCloudLogout={requestCloudLogout}
               />
             )}
           </Modal>

@@ -1,7 +1,9 @@
 import { androidApplicationId, config, ensure, run, webDomain } from "./appwrite.mjs";
 
 export function installAuth() {
-  run(["project", "update-auth-method", "--method-id", "email-password", "--enabled", "true"]);
+  run(["project", "update-auth-method", "--method-id", "email-password", "--enabled", "false"]);
+  run(["project", "update-auth-method", "--method-id", "magic-url", "--enabled", "false"]);
+  run(["project", "update-auth-method", "--method-id", "email-otp", "--enabled", "true"]);
   run(["project", "update-auth-method", "--method-id", "jwt", "--enabled", "true"]);
   run(["project", "update-auth-method", "--method-id", "anonymous", "--enabled", "false"]);
   run(["project", "update-membership-privacy-policy", "--user-id=true", "--user-email=true", "--user-name=true"]);

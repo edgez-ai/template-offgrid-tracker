@@ -1,6 +1,6 @@
 # Appwrite infrastructure
 
-`npm run deploy` enables email/password auth, disables anonymous auth,
+`npm run deploy` enables email-OTP auth, disables magic-link, password, and anonymous auth,
 allows profile team members to see each other's user ID, email, and name,
 registers web and Android platforms, and installs the row-secured profiles and
 telemetry tables, the project-scoped Time Series

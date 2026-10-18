@@ -5,7 +5,7 @@ export function installFunction() {
   const settings = [
     "--function-id", id, "--name", `${config.name} MQTT ingest`,
     "--runtime", "node-24", "--events", "devices.*.mqtt.message.publish", "devices.*.delete", "--timeout", "15",
-    "--enabled", "true", "--logging", "true", "--entrypoint", "src/main.js",
+    "--enabled", "true", "--logging", "true", "--entrypoint", "src/main.js", "--execute", "users",
     "--commands", "npm ci", "--scopes", "devices.read", "devices.write", "rows.read", "rows.write", "timeseries.write",
   ];
   run(exists(["functions", "get", "--function-id", id])
@@ -13,6 +13,10 @@ export function installFunction() {
     : ["functions", "create", ...settings]);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_DATABASE_ID", config.databaseId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", config.telemetryTableId);
+  upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_PROFILE_TABLE_ID", config.profileTableId);
+  upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID", config.mobileDeviceTableId);
+  upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_MESSAGE_TABLE_ID", config.messageTableId);
+  upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID", config.sensorSampleTableId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", config.otaUpdateTableId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_DOWNLINK_TABLE_ID", config.downlinkTableId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID", config.geofenceAreaTableId);

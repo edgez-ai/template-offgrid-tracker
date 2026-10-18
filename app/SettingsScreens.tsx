@@ -75,6 +75,7 @@ export function SettingsPage({
   sharedSettings,
   bleStatus,
   cloudStatus,
+  cloudLoggedIn,
   managerOpen,
   busy,
   error,
@@ -87,12 +88,14 @@ export function SettingsPage({
   onDelete,
   onSaveSharedSettings,
   onCloudPress,
+  onCloudLogout,
 }: {
   profiles: StoredProfile[];
   currentProfile: StoredProfile;
   sharedSettings: SharedProfileSettings;
   bleStatus: BleLinkStatus;
   cloudStatus: CloudConnectionState;
+  cloudLoggedIn: boolean;
   managerOpen: boolean;
   busy: boolean;
   error: string;
@@ -105,6 +108,7 @@ export function SettingsPage({
   onDelete: () => void;
   onSaveSharedSettings: (settings: SharedProfileSettings) => Promise<void>;
   onCloudPress: () => void;
+  onCloudLogout: () => void;
 }) {
   const [debugOpen, setDebugOpen] = useState(false);
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
@@ -274,9 +278,40 @@ export function SettingsPage({
               {currentProfile.country} · {selectedChannel ? `${bandwidthForChannel(selectedChannel)} MHz · ${selectedChannel.frequencyMHz} MHz` : "Auto frequency"}
             </Text>
             <Text style={styles.settingsMuted}>Mesh ID: {currentProfile.meshId}</Text>
-            <Pressable style={styles.manageProfilesButton} onPress={onManage} disabled={busy} accessibilityRole="button">
-              <Text style={styles.settingsOutlineText}>MANAGE PROFILES</Text>
-            </Pressable>
+            <View style={styles.profileCardActionRow}>
+              <Pressable style={styles.manageProfilesButton} onPress={onManage} disabled={busy} accessibilityRole="button">
+                <Text style={styles.settingsOutlineText}>MANAGE PROFILES</Text>
+              </Pressable>
+              {currentProfile.connectToCloud ? (
+                cloudLoggedIn ? (
+                  <Pressable
+                    style={styles.cloudLogoutButton}
+                    onPress={onCloudLogout}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Log out of EdgeZ Cloud"
+                  >
+                    {busy ? (
+                      <ActivityIndicator size="small" color="#a33f32" />
+                    ) : (
+                      <Ionicons name="log-out-outline" size={18} color="#a33f32" />
+                    )}
+                    <Text style={styles.cloudLogoutText}>LOG OUT</Text>
+                  </Pressable>
+                ) : (
+                  <Pressable
+                    style={styles.cloudLoginButton}
+                    onPress={onCloudPress}
+                    disabled={busy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Login to EdgeZ Cloud"
+                  >
+                    <Ionicons name="log-in-outline" size={18} color="#08755f" />
+                    <Text style={styles.cloudLoginText}>LOGIN</Text>
+                  </Pressable>
+                )
+              ) : null}
+            </View>
           </View>
         )}
         {!managerOpen ? (

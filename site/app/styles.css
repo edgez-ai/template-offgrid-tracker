@@ -27,6 +27,8 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .actions button { padding: 13px 18px; border: 0; border-radius: 10px; color: white; background: #0a7c78; font-weight: 800; }
 .actions button:disabled, button:disabled { opacity: .5; cursor: default; }
 .actions .secondary { color: #0a7c78; background: #e8f3f2; }
+.otp-help { margin: 0 0 16px; color: #5d7180; font-size: 12px; line-height: 1.6; }
+.otp-help strong { color: #0a3037; }
 .invite-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
 .invite-panel { width: min(520px, 100%); }
 .invite-panel h1 { font-size: clamp(34px, 6vw, 52px); }
@@ -159,6 +161,19 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .empty { padding: 30px; border: 1px dashed #bdcbd2; border-radius: 16px; color: #718491; text-align: center; }
 .detail-empty { margin-top: 30%; }
 .error { position: fixed; z-index: 20; left: 50%; bottom: 22px; transform: translateX(-50%); padding: 12px 18px; border-radius: 10px; color: white; background: #a93d2a; }
+.cloud-sync-panel { margin-top: 18px; padding: 24px; border: 1px solid #cfddda; border-radius: 22px; background: #f7faf9; box-shadow: 0 18px 44px rgb(9 46 53 / 7%); }
+.cloud-sync-panel > header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+.cloud-sync-panel h2, .cloud-sync-panel h3 { margin: 0; }
+.cloud-sync-panel header > span { color: #718783; font-size: 9px; font-weight: 900; letter-spacing: .7px; }
+.cloud-sync-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.cloud-sync-grid > article { min-width: 0; padding: 17px; border: 1px solid #d8e4e1; border-radius: 16px; background: white; }
+.cloud-sync-grid h3 { margin-bottom: 12px; color: #0a3037; font-size: 15px; }
+.cloud-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 0; border-top: 1px solid #e5ecea; }
+.cloud-row > span { display: grid; min-width: 0; gap: 3px; }
+.cloud-row strong, .cloud-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-row strong { color: #173f42; font-size: 10px; }
+.cloud-row small, .cloud-row time { color: #718783; font-size: 8px; }
+.cloud-row time { flex: none; }
 
 .topology-loading { display: grid; min-height: 100vh; place-content: center; justify-items: center; gap: 12px; color: #59716f; }
 .topology-loading p { margin: 0; font-size: 12px; font-weight: 800; }
@@ -273,6 +288,9 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
   .chart { min-height: 190px; }
   .chart-empty { min-height: 190px; }
   .recent article header { display: grid; gap: 3px; }
+  .cloud-sync-panel { padding: 17px; }
+  .cloud-sync-panel > header { display: grid; align-items: start; }
+  .cloud-sync-grid { grid-template-columns: 1fr; }
   .ota-card, .sensor-script-card { display: grid; }
   .ota-card button, .sensor-script-card button { width: 100%; }
   .topology-dashboard { padding-top: 24px; }

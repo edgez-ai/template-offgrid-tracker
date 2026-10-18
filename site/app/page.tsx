@@ -11,6 +11,9 @@ type Device = DeviceSystemState & { $id: string; serial: string; name: string; s
 type Profile = Models.Row & { name: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
+type MobileDevice = Models.Row & { profileId: string; localId: string; serial: string; name: string; kind: string; firmwareTarget: string; locationSource: string; latitude?: number | null; longitude?: number | null; deviceType: string; marker: string; iconStyle: string; lastSeenAt: string; meshMacAddress: string; updatedAt: string };
+type CloudMessage = Models.Row & { profileId: string; messageUuid: string; peerSerial: string; text: string; mine: boolean; timestampMs: number; status: string; deliveryState: string };
+type CloudSensorSample = Models.Row & { profileId: string; nodeNum: string; timestampMs: number; latitude?: number | null; longitude?: number | null; temperature?: number | null; humidity?: number | null; pressure?: number | null; vibrationAverage?: number | null; accelX?: number | null; accelY?: number | null; accelZ?: number | null; gyroX?: number | null; gyroY?: number | null; gyroZ?: number | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type SensorPoint = { timestamp: number; value: number };
 type SensorSeries = { field: string; label: string; color: string; points: SensorPoint[] };
@@ -30,6 +33,9 @@ const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const profileTableId = "profiles";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
+const mobileDeviceTableId = process.env.NEXT_PUBLIC_MOBILE_DEVICE_TABLE_ID!;
+const messageTableId = process.env.NEXT_PUBLIC_MESSAGE_TABLE_ID!;
+const sensorSampleTableId = process.env.NEXT_PUBLIC_SENSOR_SAMPLE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -329,6 +335,9 @@ export default function Home() {
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
+  const [mobileDevices, setMobileDevices] = useState<MobileDevice[]>([]);
+  const [cloudMessages, setCloudMessages] = useState<CloudMessage[]>([]);
+  const [cloudSensorSamples, setCloudSensorSamples] = useState<CloudSensorSample[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
@@ -345,22 +354,30 @@ export default function Home() {
   const [scriptMessage, setScriptMessage] = useState("");
   const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [otpUserId, setOtpUserId] = useState("");
+  const [otpCode, setOtpCode] = useState("");
+  const [otpPhrase, setOtpPhrase] = useState("");
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, profileRows, telemetryRows, otaRows] = await Promise.all([
+    const [deviceResult, profileRows, telemetryRows, otaRows, mobileDeviceRows, messageRows, sensorRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
       tables.listRows<Profile>({ databaseId, tableId: profileTableId, queries: [Query.limit(100)] }),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
+      tables.listRows<MobileDevice>({ databaseId, tableId: mobileDeviceTableId, queries: [Query.limit(500)] }),
+      tables.listRows<CloudMessage>({ databaseId, tableId: messageTableId, queries: [Query.limit(500)] }),
+      tables.listRows<CloudSensorSample>({ databaseId, tableId: sensorSampleTableId, queries: [Query.limit(1000)] }),
     ]);
     setDevices(deviceResult.devices);
     setProfiles([...profileRows.rows].sort((left, right) => left.name.localeCompare(right.name)));
     setTelemetry(telemetryRows.rows as unknown as Telemetry[]);
     setTopology(topologyFromDevices(deviceResult.devices));
     setOtaUpdates(otaRows.rows as unknown as OtaUpdate[]);
+    setMobileDevices(mobileDeviceRows.rows);
+    setCloudMessages(messageRows.rows);
+    setCloudSensorSamples(sensorRows.rows);
   }, []);
 
   useEffect(() => {
@@ -402,6 +419,15 @@ export default function Home() {
   }, [currentProfileId, profiles, user]);
 
   const profileDevices = useMemo(() => devices.filter((device) => device.metadata?.profileId === currentProfileId), [currentProfileId, devices]);
+  const profileMobileDevices = useMemo(() => mobileDevices
+    .filter((device) => device.profileId === currentProfileId)
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), [currentProfileId, mobileDevices]);
+  const profileCloudMessages = useMemo(() => cloudMessages
+    .filter((message) => message.profileId === currentProfileId)
+    .sort((left, right) => right.timestampMs - left.timestampMs), [cloudMessages, currentProfileId]);
+  const profileCloudSensorSamples = useMemo(() => cloudSensorSamples
+    .filter((sample) => sample.profileId === currentProfileId)
+    .sort((left, right) => right.timestampMs - left.timestampMs), [cloudSensorSamples, currentProfileId]);
   const currentProfile = profiles.find((profile) => profile.$id === currentProfileId);
 
   useEffect(() => {
@@ -428,11 +454,20 @@ export default function Home() {
     return () => { active = false; };
   }, [historyRange, selectedDeviceId]);
 
-  async function authenticate(register: boolean) {
+  async function requestOtp() {
     setBusy(true); setError("");
     try {
-      if (register) await account.create({ userId: ID.unique(), email, password });
-      await account.createEmailPasswordSession({ email, password });
+      const token = await account.createEmailToken({ userId: ID.unique(), email, phrase: true });
+      setOtpUserId(token.userId);
+      setOtpPhrase(token.phrase || "");
+    } catch (caught) { setError(errorMessage(caught)); }
+    finally { setBusy(false); }
+  }
+
+  async function verifyOtp() {
+    setBusy(true); setError("");
+    try {
+      await account.createSession({ userId: otpUserId, secret: otpCode });
       setUser(await account.get());
       await refresh();
     } catch (caught) { setError(errorMessage(caught)); }
@@ -441,7 +476,7 @@ export default function Home() {
 
   async function signOut() {
     await account.deleteSession({ sessionId: "current" });
-    setUser(null); setDevices([]); setProfiles([]); setCurrentProfileId(""); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false);
+    setUser(null); setDevices([]); setMobileDevices([]); setCloudMessages([]); setCloudSensorSamples([]); setProfiles([]); setCurrentProfileId(""); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false); setOtpUserId(""); setOtpCode(""); setOtpPhrase("");
   }
 
   async function removeSelectedDevice() {
@@ -548,11 +583,16 @@ export default function Home() {
     <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read the latest device state from TablesDB and permitted history from Time Series.</p></div>
-      <form className="panel" onSubmit={(event) => { event.preventDefault(); void authenticate(false); }}>
+      <form className="panel" onSubmit={(event) => { event.preventDefault(); void (otpUserId ? verifyOtp() : requestOtp()); }}>
         <h2>Operator access</h2>
-        <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
-        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} required /></label>
-        <div className="actions"><button disabled={busy}>Sign in</button><button className="secondary" type="button" disabled={busy} onClick={() => authenticate(true)}>Create account</button></div>
+        {!otpUserId ? <>
+          <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required autoComplete="email" /></label>
+          <div className="actions"><button disabled={busy}>{busy ? "Sending…" : "Send email code"}</button></div>
+        </> : <>
+          <p className="otp-help">Enter the six-digit code sent to <strong>{email}</strong>.{otpPhrase ? <> Confirm the email shows <strong>{otpPhrase}</strong>.</> : null}</p>
+          <label>Email code<input inputMode="numeric" autoComplete="one-time-code" value={otpCode} onChange={(event) => setOtpCode(event.target.value.replace(/\D/g, "").slice(0, 6))} minLength={6} maxLength={6} required autoFocus /></label>
+          <div className="actions"><button disabled={busy || otpCode.length !== 6}>{busy ? "Verifying…" : "Verify code"}</button><button className="secondary" type="button" disabled={busy} onClick={() => { setOtpUserId(""); setOtpCode(""); setOtpPhrase(""); }}>Use another email</button></div>
+        </>}
       </form>
     </section> : <section className="dashboard">
       <div className="heading-row"><div><p className="eyebrow">{currentProfile ? currentProfile.name : "SELECT A PROFILE"} · SIGNED IN AS {user.email}</p><h1>Device telemetry</h1></div><span className="count">{profileDevices.length} DEVICES · TABLESDB LATEST · INFLUXDB HISTORY</span></div>
@@ -598,6 +638,14 @@ export default function Home() {
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>
       </div>
+      <section className="cloud-sync-panel">
+        <header><div><p className="eyebrow">MOBILE CLOUD SYNC</p><h2>Offline mesh data</h2></div><span>{profileMobileDevices.length} DEVICES · {profileCloudMessages.length} MESSAGES · {profileCloudSensorSamples.length} SAMPLES</span></header>
+        <div className="cloud-sync-grid">
+          <article><h3>Devices</h3>{profileMobileDevices.slice(0, 12).map((device) => <div className="cloud-row" key={device.$id}><span><strong>{device.name}</strong><small>{device.serial} · {device.deviceType}</small></span><time>{device.lastSeenAt ? relativeTime(device.lastSeenAt) : "Never seen"}</time></div>)}{!profileMobileDevices.length && <p className="empty">No mobile-synced devices.</p>}</article>
+          <article><h3>Messages</h3>{profileCloudMessages.slice(0, 12).map((message) => <div className="cloud-row" key={message.$id}><span><strong>{message.mine ? `To ${message.peerSerial}` : `From ${message.peerSerial}`}</strong><small>{message.text || "Voice message"}</small></span><time>{relativeTime(new Date(message.timestampMs).toISOString())}</time></div>)}{!profileCloudMessages.length && <p className="empty">No synced conversations.</p>}</article>
+          <article><h3>Sensor data</h3>{profileCloudSensorSamples.slice(0, 12).map((sample) => <div className="cloud-row" key={sample.$id}><span><strong>Node {sample.nodeNum}</strong><small>{typeof sample.temperature === "number" ? `${sample.temperature.toFixed(1)} °C` : typeof sample.vibrationAverage === "number" ? `Vibration ${sample.vibrationAverage.toFixed(2)}` : "Sensor sample"}</small></span><time>{relativeTime(new Date(sample.timestampMs).toISOString())}</time></div>)}{!profileCloudSensorSamples.length && <p className="empty">No synced sensor samples.</p>}</article>
+        </div>
+      </section>
     </section>}
     {error && <p className="error" role="alert">{error}</p>}
   </main>;
