@@ -13,7 +13,7 @@
       "$id": "offgrid-tracker-web",
       "name": "Offgrid Tracker web",
       "type": "web",
-      "hostname": "{siteDomain:offgrid-tracker}"
+      "hostname": "{siteDomain:offgrid-tracker-site}"
     },
     {
       "$id": "offgrid-tracker-local",
