@@ -362,6 +362,10 @@
         { "key": "OFFGRID_TRACKER_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
         { "key": "OFFGRID_TRACKER_DATABASE_ID", "value": "offgrid-tracker" },
         { "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", "value": "telemetry" },
+        { "key": "OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID", "value": "mobile-devices" },
+        { "key": "OFFGRID_TRACKER_MESSAGE_TABLE_ID", "value": "messages" },
+        { "key": "OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID", "value": "sensor-samples" },
+        { "key": "OFFGRID_TRACKER_MESSAGE_ATTACHMENT_BUCKET_ID", "value": "message-attachments" },
         { "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
       ]
     }
