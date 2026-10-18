@@ -5,6 +5,7 @@ import React, { useEffect, useState } from "react";
 import { ActivityIndicator, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
+import type { CloudConnectionState } from "./cloud-auth";
 import { styles } from "./app-styles";
 import { ProfileBleDevicePicker, ProfileLocationPicker } from "./ProfileScreens";
 import type { LocationMode, SharedProfileSettings } from "./app-settings";
@@ -73,6 +74,7 @@ export function SettingsPage({
   currentProfile,
   sharedSettings,
   bleStatus,
+  cloudStatus,
   managerOpen,
   busy,
   error,
@@ -84,11 +86,13 @@ export function SettingsPage({
   onEdit,
   onDelete,
   onSaveSharedSettings,
+  onCloudPress,
 }: {
   profiles: StoredProfile[];
   currentProfile: StoredProfile;
   sharedSettings: SharedProfileSettings;
   bleStatus: BleLinkStatus;
+  cloudStatus: CloudConnectionState;
   managerOpen: boolean;
   busy: boolean;
   error: string;
@@ -100,6 +104,7 @@ export function SettingsPage({
   onEdit: () => void;
   onDelete: () => void;
   onSaveSharedSettings: (settings: SharedProfileSettings) => Promise<void>;
+  onCloudPress: () => void;
 }) {
   const [debugOpen, setDebugOpen] = useState(false);
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
@@ -219,6 +224,30 @@ export function SettingsPage({
             <View style={styles.profileCardHeader}>
               <Text style={styles.currentProfileLabel}>CURRENT PROFILE</Text>
               <View style={styles.profileCardBleActions}>
+                <Pressable
+                  style={[
+                    styles.profileCardCloudStatus,
+                    cloudStatus === "online" && styles.profileCardCloudStatusOnline,
+                    cloudStatus === "login" && styles.profileCardCloudStatusLogin,
+                  ]}
+                  onPress={onCloudPress}
+                  disabled={cloudStatus !== "login"}
+                  accessibilityRole={cloudStatus === "login" ? "button" : "text"}
+                  accessibilityLabel={cloudStatus === "login" ? "Login to EdgeZ Cloud" : `Cloud ${cloudStatus}`}
+                >
+                  <View style={[
+                    styles.cloudStatusDot,
+                    cloudStatus === "online" && styles.cloudStatusDotOnline,
+                    cloudStatus === "login" && styles.cloudStatusDotLogin,
+                  ]} />
+                  <Text style={[
+                    styles.profileCardCloudText,
+                    cloudStatus === "online" && styles.profileCardCloudTextOnline,
+                    cloudStatus === "login" && styles.profileCardCloudTextLogin,
+                  ]}>
+                    {cloudStatus.toUpperCase()}
+                  </Text>
+                </Pressable>
                 <View style={styles.profileCardBleStatus}>
                   <View style={[
                     styles.profileCardBleDot,

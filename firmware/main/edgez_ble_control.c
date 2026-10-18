@@ -36,7 +36,7 @@
 #define EDGEZ_STATUS_INTERVAL_MS 5000U
 #define EDGEZ_INVALID_CONNECTION_HANDLE BLE_HS_CONN_HANDLE_NONE
 #define EDGEZ_BLE_NOTIFY_QUEUE_DEPTH 8U
-#define EDGEZ_PROVISIONING_CACHE_SLOTS 4U
+#define EDGEZ_PROVISIONING_CACHE_SLOTS 5U
 
 static const char *TAG = "edgez_ble";
 static uint8_t own_address_type;
@@ -136,10 +136,12 @@ static esp_err_t cache_provisioning_response(uint64_t destination,
     }
     xSemaphoreTake(state_lock, portMAX_DELAY);
     edgez_provisioning_cache_entry_t *entry = NULL;
+    bool replaced = false;
     for (size_t i = 0; i < EDGEZ_PROVISIONING_CACHE_SLOTS; ++i) {
         if (provisioning_cache[i].valid &&
             provisioning_cache[i].destination == destination) {
             entry = &provisioning_cache[i];
+            replaced = true;
             break;
         }
     }
@@ -153,9 +155,32 @@ static esp_err_t cache_provisioning_response(uint64_t destination,
     entry->length = packet_len;
     memcpy(entry->packet, packet, packet_len);
     xSemaphoreGive(state_lock);
-    ESP_LOGI(TAG, "Cached zero-touch response for node=%012llx bytes=%u",
-             (unsigned long long)destination, (unsigned)packet_len);
+    ESP_LOGI(TAG, "%s zero-touch response for node=%012llx bytes=%u slots=%u",
+             replaced ? "Replaced" : "Cached",
+             (unsigned long long)destination, (unsigned)packet_len,
+             EDGEZ_PROVISIONING_CACHE_SLOTS);
     return ESP_OK;
+}
+
+static void forget_provisioning_response(const uint8_t destination[6])
+{
+    if (destination == NULL || state_lock == NULL) return;
+    const uint64_t node = mac_to_u64(destination);
+    bool removed = false;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    for (size_t i = 0; i < EDGEZ_PROVISIONING_CACHE_SLOTS; ++i) {
+        if (provisioning_cache[i].valid &&
+            provisioning_cache[i].destination == node) {
+            memset(&provisioning_cache[i], 0, sizeof(provisioning_cache[i]));
+            removed = true;
+            break;
+        }
+    }
+    xSemaphoreGive(state_lock);
+    if (removed) {
+        ESP_LOGI(TAG, "Removed accepted zero-touch response for node=%012llx",
+                 (unsigned long long)node);
+    }
 }
 
 static esp_err_t replay_provisioning_response(const uint8_t destination[6])
@@ -569,6 +594,11 @@ esp_err_t edgez_ble_control_route_pawr_beacon(const uint8_t source_mac[6],
             ESP_LOGW(TAG, "Cached zero-touch response replay failed: %s",
                      esp_err_to_name(replay_err));
         }
+    } else {
+        /* A normal sensor beacon proves that the sensor accepted and persisted
+         * its profile. Its one-shot response must no longer occupy the bounded
+         * relay cache. */
+        forget_provisioning_response(source_mac);
     }
 
     esp_err_t err = notify_raw_packet(encoded, encoded_length);

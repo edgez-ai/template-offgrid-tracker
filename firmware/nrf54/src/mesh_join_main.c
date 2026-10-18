@@ -219,6 +219,10 @@ static int route_pawr_beacon(const uint8_t source[6], const uint8_t *beacon,
 		if (replay_rc != 0 && replay_rc != -ENOENT) {
 			LOG_WRN("Cached zero-touch response replay failed rc=%d", replay_rc);
 		}
+	} else {
+		/* Receiving a normal beacon proves provisioning completed. The cached
+		 * response is one-shot state and can be released immediately. */
+		edgez_config_forget_provisioning_response(source);
 	}
 
 	if (edgez_ble_can_notify()) {

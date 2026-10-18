@@ -30,7 +30,7 @@ LOG_MODULE_REGISTER(edgez_config, LOG_LEVEL_INF);
 #define EDGEZ_PROFILE_MAGIC 0x455A5031U
 #define EDGEZ_PROFILE_VERSION 1U
 #define EDGEZ_PROVISIONING_COMMIT_GRACE_MS 5000
-#define EDGEZ_PROVISIONING_CACHE_SLOTS 4U
+#define EDGEZ_PROVISIONING_CACHE_SLOTS 5U
 #define EDGEZ_PROVISIONING_PACKET_MAX 512U
 #define EDGEZ_PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define EDGEZ_PROVISIONING_NONCE_LEN 12U
@@ -234,10 +234,12 @@ static int cache_provisioning_response(uint64_t destination,
 	}
 	k_mutex_lock(&provisioning_cache_lock, K_FOREVER);
 	struct edgez_provisioning_cache_entry *entry = NULL;
+	bool replaced = false;
 	for (size_t i = 0; i < ARRAY_SIZE(provisioning_cache); ++i) {
 		if (provisioning_cache[i].valid &&
 		    provisioning_cache[i].destination == destination) {
 			entry = &provisioning_cache[i];
+			replaced = true;
 			break;
 		}
 	}
@@ -251,9 +253,32 @@ static int cache_provisioning_response(uint64_t destination,
 	entry->length = packet_len;
 	memcpy(entry->packet, packet, packet_len);
 	k_mutex_unlock(&provisioning_cache_lock);
-	LOG_INF("Cached zero-touch response for node=%012llx bytes=%u",
-		(unsigned long long)destination, (unsigned int)packet_len);
+	LOG_INF("%s zero-touch response for node=%012llx bytes=%u slots=%u",
+		replaced ? "Replaced" : "Cached",
+		(unsigned long long)destination, (unsigned int)packet_len,
+		(unsigned int)ARRAY_SIZE(provisioning_cache));
 	return 0;
+}
+
+void edgez_config_forget_provisioning_response(const uint8_t destination[6])
+{
+	if (!destination) return;
+	const uint64_t node = mac_to_node_id(destination);
+	bool removed = false;
+	k_mutex_lock(&provisioning_cache_lock, K_FOREVER);
+	for (size_t i = 0; i < ARRAY_SIZE(provisioning_cache); ++i) {
+		if (provisioning_cache[i].valid &&
+		    provisioning_cache[i].destination == node) {
+			memset(&provisioning_cache[i], 0, sizeof(provisioning_cache[i]));
+			removed = true;
+			break;
+		}
+	}
+	k_mutex_unlock(&provisioning_cache_lock);
+	if (removed) {
+		LOG_INF("Removed accepted zero-touch response for node=%012llx",
+			(unsigned long long)node);
+	}
 }
 
 int edgez_config_replay_provisioning_response(const uint8_t destination[6])

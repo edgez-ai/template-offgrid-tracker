@@ -14,10 +14,10 @@ const { default: main } = await import("./main.js");
 const gatewayId = "11111111-1111-4111-8111-111111111111";
 const remoteId = "22222222-2222-4222-8222-222222222222";
 const devices = new Map([
-  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", markerType: "gateway", markerColor: "blue", metadata: { farmId: "farm-a" },
-    $permissions: ['read("team:farm-a")'] }],
-  [remoteId, { $id: remoteId, serial: "112233445566", markerType: "tracker", markerColor: "orange", gatewayDeviceId: gatewayId, metadata: { farmId: "farm-a" },
-    $permissions: ['read("team:farm-a")'] }],
+  [gatewayId, { $id: gatewayId, serial: "AABBCCDDEEFF", markerType: "gateway", markerColor: "blue", metadata: { profileId: "profile-a" },
+    $permissions: ['read("team:profile-a")'] }],
+  [remoteId, { $id: remoteId, serial: "112233445566", markerType: "tracker", markerColor: "orange", gatewayDeviceId: gatewayId, metadata: { profileId: "profile-a" },
+    $permissions: ['read("team:profile-a")'] }],
 ]);
 const originalFetch = globalThis.fetch;
 const originalCreateRow = TablesDB.prototype.createRow;
@@ -45,8 +45,8 @@ beforeEach(() => {
   process.env.OFFGRID_TRACKER_DATABASE_ID = "database-a";
   process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID = "telemetry-a";
   process.env.OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID = "ota-a";
-  devices.get(gatewayId).metadata = { farmId: "farm-a", icon: "gateway", markerColor: "blue" };
-  devices.get(remoteId).metadata = { farmId: "farm-a", icon: "tracker", markerColor: "orange" };
+  devices.get(gatewayId).metadata = { profileId: "profile-a", icon: "gateway", markerColor: "blue" };
+  devices.get(remoteId).metadata = { profileId: "profile-a", icon: "tracker", markerColor: "orange" };
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
     if (href === "https://github.example/acme/offgrid-tracker/releases/latest") {
@@ -314,7 +314,7 @@ test("system and retired status topics never enter application ingestion", async
 
 test("device deletion removes its latest telemetry row", async () => {
   rows.push({ $id: gatewayId, data: {
-    deviceId: gatewayId, farmId: "farm-a", serial: "AABBCCDDEEFF", halowMac: "0C:BF:74:1A:AE:36",
+    deviceId: gatewayId, profileId: "profile-a", serial: "AABBCCDDEEFF", halowMac: "0C:BF:74:1A:AE:36",
   } });
   const result = await deleteDevice(gatewayId);
   assert.equal(result.status, 200);

@@ -298,11 +298,11 @@ function containsArea(area, point) {
 async function evaluateGeofences(tables, target, entry, readPermissions, receivedAt) {
   if (!GEOFENCE_AREA_TABLE_ID || !GEOFENCE_RULE_TABLE_ID || !GEOFENCE_ALARM_TABLE_ID) return;
   const point = locationOf(entry);
-  const farmId = target.metadata?.farmId;
-  if (!point || !farmId) return;
+  const profileId = target.metadata?.profileId;
+  if (!point || !profileId) return;
   const [areasResult, rulesResult, alarmsResult] = await Promise.all([
-    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_AREA_TABLE_ID, queries: [Query.equal("farmId", farmId), Query.limit(100)] }),
-    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_RULE_TABLE_ID, queries: [Query.equal("farmId", farmId), Query.limit(100)] }),
+    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_AREA_TABLE_ID, queries: [Query.equal("profileId", profileId), Query.limit(100)] }),
+    tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_RULE_TABLE_ID, queries: [Query.equal("profileId", profileId), Query.limit(100)] }),
     tables.listRows({ databaseId: DATABASE_ID, tableId: GEOFENCE_ALARM_TABLE_ID, queries: [Query.equal("deviceId", target.$id), Query.limit(100)] }),
   ]);
   const areas = new Map((areasResult.rows || []).map((area) => [area.$id, area]));
@@ -316,7 +316,7 @@ async function evaluateGeofences(tables, target, entry, readPermissions, receive
       const location = `${point.latitude.toFixed(6)},${point.longitude.toFixed(6)}`;
       if (matches && !existing) {
         await tables.createRow({ databaseId: DATABASE_ID, tableId: GEOFENCE_ALARM_TABLE_ID, rowId: ID.unique(), data: {
-          farmId, areaId: area.$id, ruleId: rule.$id, deviceId: target.$id, event, active: true, acknowledged: false,
+          profileId, areaId: area.$id, ruleId: rule.$id, deviceId: target.$id, event, active: true, acknowledged: false,
           lastLocation: location, raisedAt: receivedAt,
         }, permissions: readPermissions });
       } else if (existing && existing.active !== matches) {
@@ -525,7 +525,7 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (location) await updateDeviceLocation(req, target.$id, location);
       const row = await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
-        farmId: target.metadata.farmId,
+        profileId: target.metadata.profileId,
         gatewayDeviceId: target.$id === device.$id ? null : device.$id,
         serial: target.serial,
         channel: route.channel,

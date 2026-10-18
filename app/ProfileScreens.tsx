@@ -26,7 +26,10 @@ const countryMapCenters: Record<string, { latitude: number; longitude: number }>
   US: { latitude: 39.8283, longitude: -98.5795 },
 };
 
-type LegacyProfileDetails = Omit<ProfileDetails, "identityName" | "identityId" | "identityPrivateKey" | "identityPublicKey" | "bleDeviceId" | "bleDeviceName">;
+type LegacyProfileDetails = Omit<ProfileDetails,
+  "identityName" | "identityId" | "identityPrivateKey" | "identityPublicKey" |
+  "bleDeviceId" | "bleDeviceName" | "connectToCloud"
+>;
 
 export function validProfileDetails(value: unknown): value is LegacyProfileDetails {
   if (!value || typeof value !== "object") return false;
@@ -269,6 +272,7 @@ export function ProfileForm({
         halowBandwidthMHz: "1",
         meshId: "",
         meshPassphrase: "",
+        connectToCloud: false,
       };
     }
     const initialChannel = channelsForCountry(initialProfile.country)
@@ -318,6 +322,7 @@ export function ProfileForm({
         halowChannel: channel,
         meshId: draft.meshId.trim(),
         meshPassphrase: draft.meshPassphrase,
+        connectToCloud: draft.connectToCloud,
         bleDeviceId: draft.bleDeviceId,
         bleDeviceName: draft.bleDeviceName,
       });
@@ -500,6 +505,23 @@ export function ProfileForm({
             <Ionicons name={passphraseVisible ? "eye-outline" : "eye-off-outline"} size={24} color="#8cb0ad" />
           </Pressable>
         </View>
+        <Pressable
+          style={styles.profileCheckboxRow}
+          onPress={() => setDraft((current) => ({ ...current, connectToCloud: !current.connectToCloud }))}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: draft.connectToCloud }}
+          accessibilityLabel="Connect to cloud"
+        >
+          <Ionicons
+            name={draft.connectToCloud ? "checkbox" : "square-outline"}
+            size={24}
+            color={draft.connectToCloud ? "#69cfc7" : "#90aaa7"}
+          />
+          <View style={styles.profileCheckboxBody}>
+            <Text style={styles.profileCheckboxLabel}>CONNECT TO CLOUD</Text>
+            <Text style={styles.profileCheckboxHelp}>Show online when this profile has an authenticated cloud session.</Text>
+          </View>
+        </Pressable>
         {error ? <Text style={styles.profileError}>{error}</Text> : null}
         <Pressable
           style={[styles.profileSaveButton, saving && styles.disabledButton]}

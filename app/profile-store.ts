@@ -1,7 +1,7 @@
 import * as SQLite from "expo-sqlite";
 import { EdgezIdentityStore } from "@edgez/react-native-sdk";
 import type { EdgezUserIdentity } from "@edgez/react-native-sdk";
-import type { EdgezConversationMessage } from "@edgez/react-native-sdk";
+import type { EdgezConversationMessage, EdgezSensorData, EdgezSensorSample } from "@edgez/react-native-sdk";
 import { fromByteArray, toByteArray } from "base64-js";
 
 const identityFactory = new EdgezIdentityStore();
@@ -17,6 +17,7 @@ export type ProfileDetails = {
   halowChannel: number;
   meshId: string;
   meshPassphrase: string;
+  connectToCloud: boolean;
   bleDeviceId: string;
   bleDeviceName: string;
 };
@@ -68,6 +69,10 @@ export type StoredMessage = {
   deliveryState: string;
 };
 
+export type StoredSensorSample = EdgezSensorSample & {
+  profileId: string;
+};
+
 export type ProvisioningRequestDetails = {
   profileId: string;
   serial: string;
@@ -101,6 +106,7 @@ type ProfileRow = {
   halow_channel: number;
   mesh_id: string;
   mesh_passphrase: string;
+  connect_to_cloud: number;
   ble_device_id: string;
   ble_device_name: string;
   created_at: string;
@@ -145,6 +151,26 @@ type MessageRow = {
   delivery_state: string;
 };
 
+type SensorSampleRow = {
+  profile_id: string;
+  node_num: string;
+  timestamp_ms: number;
+  latitude: number | null;
+  longitude: number | null;
+  altitude: number | null;
+  temperature: number | null;
+  humidity: number | null;
+  pressure: number | null;
+  vibration_average: number | null;
+  accel_x: number | null;
+  accel_y: number | null;
+  accel_z: number | null;
+  gyro_x: number | null;
+  gyro_y: number | null;
+  gyro_z: number | null;
+  binary_length_bytes: number | null;
+};
+
 type ProvisioningRequestRow = {
   id: string;
   profile_id: string;
@@ -175,10 +201,35 @@ function profileFromRow(row: ProfileRow): StoredProfile {
     halowChannel: row.halow_channel,
     meshId: row.mesh_id,
     meshPassphrase: row.mesh_passphrase,
+    connectToCloud: row.connect_to_cloud === 1,
     bleDeviceId: row.ble_device_id,
     bleDeviceName: row.ble_device_name,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function sensorSampleFromRow(row: SensorSampleRow): StoredSensorSample {
+  const data: EdgezSensorData = {};
+  if (row.latitude !== null) data.latitude = row.latitude;
+  if (row.longitude !== null) data.longitude = row.longitude;
+  if (row.altitude !== null) data.altitude = row.altitude;
+  if (row.temperature !== null) data.temperature = row.temperature;
+  if (row.humidity !== null) data.humidity = row.humidity;
+  if (row.pressure !== null) data.pressure = row.pressure;
+  if (row.vibration_average !== null) data.vibrationAverage = row.vibration_average;
+  if (row.accel_x !== null) data.accelX = row.accel_x;
+  if (row.accel_y !== null) data.accelY = row.accel_y;
+  if (row.accel_z !== null) data.accelZ = row.accel_z;
+  if (row.gyro_x !== null) data.gyroX = row.gyro_x;
+  if (row.gyro_y !== null) data.gyroY = row.gyro_y;
+  if (row.gyro_z !== null) data.gyroZ = row.gyro_z;
+  if (row.binary_length_bytes !== null) data.binaryLengthBytes = row.binary_length_bytes;
+  return {
+    profileId: row.profile_id,
+    nodeNum: BigInt(row.node_num),
+    timestampMs: row.timestamp_ms,
+    data,
   };
 }
 
@@ -305,6 +356,7 @@ async function database() {
           halow_channel INTEGER NOT NULL,
           mesh_id TEXT NOT NULL,
           mesh_passphrase TEXT NOT NULL DEFAULT '',
+          connect_to_cloud INTEGER NOT NULL DEFAULT 0 CHECK (connect_to_cloud IN (0, 1)),
           ble_device_id TEXT NOT NULL DEFAULT '',
           ble_device_name TEXT NOT NULL DEFAULT '',
           created_at TEXT NOT NULL,
@@ -357,6 +409,29 @@ async function database() {
         );
         CREATE INDEX IF NOT EXISTS messages_profile_peer_time_idx
           ON messages(profile_id, peer_serial, timestamp_ms);
+        CREATE TABLE IF NOT EXISTS sensor_samples (
+          profile_id TEXT NOT NULL,
+          node_num TEXT NOT NULL,
+          timestamp_ms INTEGER NOT NULL,
+          latitude REAL,
+          longitude REAL,
+          altitude REAL,
+          temperature REAL,
+          humidity REAL,
+          pressure REAL,
+          vibration_average REAL,
+          accel_x REAL,
+          accel_y REAL,
+          accel_z REAL,
+          gyro_x REAL,
+          gyro_y REAL,
+          gyro_z REAL,
+          binary_length_bytes INTEGER,
+          PRIMARY KEY (profile_id, node_num, timestamp_ms),
+          FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS sensor_samples_profile_node_time_idx
+          ON sensor_samples(profile_id, node_num, timestamp_ms DESC);
         CREATE TABLE IF NOT EXISTS provisioning_requests (
           id TEXT PRIMARY KEY NOT NULL,
           profile_id TEXT NOT NULL,
@@ -391,6 +466,9 @@ async function database() {
       }
       if (!profileColumnNames.has("ble_device_id")) {
         await db.execAsync("ALTER TABLE profiles ADD COLUMN ble_device_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!profileColumnNames.has("connect_to_cloud")) {
+        await db.execAsync("ALTER TABLE profiles ADD COLUMN connect_to_cloud INTEGER NOT NULL DEFAULT 0");
       }
       if (!profileColumnNames.has("ble_device_name")) {
         await db.execAsync("ALTER TABLE profiles ADD COLUMN ble_device_name TEXT NOT NULL DEFAULT ''");
@@ -447,7 +525,7 @@ async function database() {
           profile.id,
         );
       }
-      await db.execAsync("PRAGMA user_version = 8");
+      await db.execAsync("PRAGMA user_version = 10");
       return db;
     });
   }
@@ -484,8 +562,8 @@ export async function createProfile(details: ProfileDetails): Promise<StoredProf
   const now = new Date().toISOString();
   await db.runAsync(
     `INSERT INTO profiles
-      (id, name, identity_name, identity_id, identity_private_key, identity_public_key, country, location, halow_channel, mesh_id, mesh_passphrase, ble_device_id, ble_device_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, name, identity_name, identity_id, identity_private_key, identity_public_key, country, location, halow_channel, mesh_id, mesh_passphrase, connect_to_cloud, ble_device_id, ble_device_name, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     details.name,
     details.identityName,
@@ -497,6 +575,7 @@ export async function createProfile(details: ProfileDetails): Promise<StoredProf
     details.halowChannel,
     details.meshId,
     details.meshPassphrase,
+    details.connectToCloud ? 1 : 0,
     details.bleDeviceId,
     details.bleDeviceName,
     now,
@@ -512,7 +591,7 @@ export async function updateProfile(id: string, details: ProfileDetails): Promis
     `UPDATE profiles
      SET name = ?, identity_name = ?, identity_id = ?, identity_private_key = ?, identity_public_key = ?,
          country = ?, location = ?, halow_channel = ?, mesh_id = ?, mesh_passphrase = ?,
-         ble_device_id = ?, ble_device_name = ?, updated_at = ?
+         connect_to_cloud = ?, ble_device_id = ?, ble_device_name = ?, updated_at = ?
      WHERE id = ?`,
     details.name,
     details.identityName,
@@ -524,6 +603,7 @@ export async function updateProfile(id: string, details: ProfileDetails): Promis
     details.halowChannel,
     details.meshId,
     details.meshPassphrase,
+    details.connectToCloud ? 1 : 0,
     details.bleDeviceId,
     details.bleDeviceName,
     new Date().toISOString(),
@@ -568,6 +648,67 @@ export async function listProfileMessages(profileId: string): Promise<StoredMess
     profileId,
   );
   return rows.map(messageFromRow);
+}
+
+export async function listProfileSensorSamples(profileId: string): Promise<StoredSensorSample[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<SensorSampleRow>(
+    "SELECT * FROM sensor_samples WHERE profile_id = ? ORDER BY timestamp_ms ASC",
+    profileId,
+  );
+  return rows.map(sensorSampleFromRow);
+}
+
+export async function saveProfileSensorSamples(
+  profileId: string,
+  samples: ReadonlyArray<EdgezSensorSample>,
+): Promise<void> {
+  if (!samples.length) return;
+  const db = await database();
+  await db.withTransactionAsync(async () => {
+    for (const sample of samples) {
+      const data = sample.data;
+      await db.runAsync(
+        `INSERT INTO sensor_samples
+          (profile_id, node_num, timestamp_ms, latitude, longitude, altitude, temperature, humidity,
+           pressure, vibration_average, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z,
+           binary_length_bytes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(profile_id, node_num, timestamp_ms) DO UPDATE SET
+           latitude = excluded.latitude,
+           longitude = excluded.longitude,
+           altitude = excluded.altitude,
+           temperature = excluded.temperature,
+           humidity = excluded.humidity,
+           pressure = excluded.pressure,
+           vibration_average = excluded.vibration_average,
+           accel_x = excluded.accel_x,
+           accel_y = excluded.accel_y,
+           accel_z = excluded.accel_z,
+           gyro_x = excluded.gyro_x,
+           gyro_y = excluded.gyro_y,
+           gyro_z = excluded.gyro_z,
+           binary_length_bytes = excluded.binary_length_bytes`,
+        profileId,
+        sample.nodeNum.toString(),
+        sample.timestampMs,
+        data.latitude ?? null,
+        data.longitude ?? null,
+        data.altitude ?? null,
+        data.temperature ?? null,
+        data.humidity ?? null,
+        data.pressure ?? null,
+        data.vibrationAverage ?? null,
+        data.accelX ?? null,
+        data.accelY ?? null,
+        data.accelZ ?? null,
+        data.gyroX ?? null,
+        data.gyroY ?? null,
+        data.gyroZ ?? null,
+        data.binaryLengthBytes ?? null,
+      );
+    }
+  });
 }
 
 export async function listProfileProvisioningRequests(profileId: string): Promise<StoredProvisioningRequest[]> {

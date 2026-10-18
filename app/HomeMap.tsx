@@ -13,8 +13,38 @@ import { BleDebugModal } from "./SettingsScreens";
 import { styles } from "./app-styles";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, nodeNumFromSerial } from "./mesh-utils";
+import type { CloudConnectionState } from "./cloud-auth";
 import { listProfileMessages } from "./profile-store";
 import type { StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
+
+type MapCamera = { latitude: number; longitude: number; zoom: number };
+
+const MAX_MERCATOR_LATITUDE = 85.05112878;
+
+function mercatorPoint(latitude: number, longitude: number, zoom: number) {
+  const clampedLatitude = Math.max(-MAX_MERCATOR_LATITUDE, Math.min(MAX_MERCATOR_LATITUDE, latitude));
+  const latitudeRadians = clampedLatitude * Math.PI / 180;
+  const worldSize = 256 * 2 ** zoom;
+  return {
+    x: (longitude + 180) / 360 * worldSize,
+    y: (1 - Math.log(Math.tan(latitudeRadians) + 1 / Math.cos(latitudeRadians)) / Math.PI) / 2 * worldSize,
+    worldSize,
+  };
+}
+
+function deviceScreenPoint(
+  device: StoredDevice,
+  camera: MapCamera,
+  size: { width: number; height: number },
+) {
+  if (device.latitude === null || device.longitude === null || size.width <= 0 || size.height <= 0) return null;
+  const center = mercatorPoint(camera.latitude, camera.longitude, camera.zoom);
+  const point = mercatorPoint(device.latitude, device.longitude, camera.zoom);
+  let deltaX = point.x - center.x;
+  if (deltaX > center.worldSize / 2) deltaX -= center.worldSize;
+  if (deltaX < -center.worldSize / 2) deltaX += center.worldSize;
+  return { x: size.width / 2 + deltaX, y: size.height / 2 + point.y - center.y };
+}
 
 export function HomeMap({
   profile,
@@ -22,13 +52,14 @@ export function HomeMap({
   messages,
   provisioningRequests,
   bleStatus,
+  cloudStatus,
   meshLink,
-  onAddDevice,
   onRemoveDevice,
   onMessagesChanged,
   onDevicesChanged,
   onProvisioningRequestsChanged,
   onResendMessage,
+  onCloudPress,
   onOpenSettings,
 }: {
   profile: StoredProfile;
@@ -36,18 +67,24 @@ export function HomeMap({
   messages: StoredMessage[];
   provisioningRequests: StoredProvisioningRequest[];
   bleStatus: BleLinkStatus;
+  cloudStatus: CloudConnectionState;
   meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;
-  onAddDevice: () => void;
   onRemoveDevice: (device: StoredDevice) => void;
   onMessagesChanged: () => Promise<void>;
   onDevicesChanged: () => Promise<void>;
   onProvisioningRequestsChanged: () => Promise<void>;
   onResendMessage: (message: StoredMessage) => Promise<void>;
+  onCloudPress: () => void;
   onOpenSettings: () => void;
 }) {
   const map = useRef<EdgezOrganicMapRef>(null);
   const profileCenter = coordinatesFromLocation(profile.location);
   const initialZoom = profileCenter ? 12 : 9;
+  const initialCamera = {
+    latitude: profileCenter?.latitude ?? 59.3293,
+    longitude: profileCenter?.longitude ?? 18.0686,
+    zoom: initialZoom,
+  };
   const mapZoom = useRef(initialZoom);
   const [region, setRegion] = useState("");
   const [download, setDownload] = useState<EdgezMapDownloadUpdate | null>(null);
@@ -56,10 +93,16 @@ export function HomeMap({
   const [debugOpen, setDebugOpen] = useState(false);
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [selectedDevice, setSelectedDevice] = useState<StoredDevice | null>(null);
+  const [selectedMapDeviceId, setSelectedMapDeviceId] = useState<string | null>(null);
   const [conversationPeer, setConversationPeer] = useState<string | null>(null);
   const [locating, setLocating] = useState(false);
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [mapCamera, setMapCamera] = useState<MapCamera>(initialCamera);
+  const [mapSize, setMapSize] = useState({ width: 0, height: 0 });
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
+  const selectedMapDevice = selectedMapDeviceId === null
+    ? null
+    : devices.find((device) => device.id === selectedMapDeviceId) ?? null;
   const mapIconForDevice = (device: StoredDevice) => {
     switch ((device.iconStyle || device.deviceType).trim().toLowerCase()) {
       case "user":
@@ -118,7 +161,10 @@ export function HomeMap({
   return (
     <SafeAreaView style={styles.safeArea}>
       <StatusBar style={mapTheme === "night" ? "light" : "dark"} />
-      <View style={styles.mapCard}>
+      <View
+        style={styles.mapCard}
+        onLayout={({ nativeEvent }) => setMapSize(nativeEvent.layout)}
+      >
         <EdgezOrganicMap
           ref={map}
           nodes={mapNodes}
@@ -128,7 +174,11 @@ export function HomeMap({
           zoom={initialZoom}
           enableMapDownloads
           style={styles.map}
-          onCameraChanged={({ zoom }) => { mapZoom.current = zoom; }}
+          onCameraChanged={(camera) => {
+            mapZoom.current = camera.zoom;
+            setMapCamera(camera);
+            setSelectedMapDeviceId(null);
+          }}
           onMapRegionAvailable={setRegion}
           onMapDownloadUpdate={(update) => {
             setRegion("");
@@ -136,6 +186,60 @@ export function HomeMap({
           }}
           onMapError={setMapError}
         />
+        <View style={styles.mapMarkerHitLayer} pointerEvents="box-none">
+          {locatedDevices.map((device) => {
+            const point = deviceScreenPoint(device, mapCamera, mapSize);
+            if (!point || point.x < -26 || point.x > mapSize.width + 26 || point.y < -26 || point.y > mapSize.height + 26) {
+              return null;
+            }
+            return (
+              <Pressable
+                key={device.id}
+                style={[styles.mapMarkerHitTarget, { left: point.x - 26, top: point.y - 26 }]}
+                onPress={() => setSelectedMapDeviceId(device.id)}
+                accessibilityRole="button"
+                accessibilityLabel={`Show ${device.name}`}
+              />
+            );
+          })}
+        </View>
+
+        {selectedMapDevice ? (
+          <View style={styles.mapDeviceOverlay}>
+            <View style={styles.mapDeviceOverlayHeader}>
+              <View style={styles.mapDeviceOverlayBody}>
+                <Text style={styles.mapDeviceOverlayName} numberOfLines={1}>{selectedMapDevice.name}</Text>
+                <Text style={styles.mapDeviceOverlayLastSeen}>
+                  Last seen: {selectedMapDevice.lastSeenAt
+                    ? new Date(selectedMapDevice.lastSeenAt).toLocaleString()
+                    : "Unknown"}
+                </Text>
+              </View>
+              <Pressable
+                style={styles.mapDeviceOverlayClose}
+                onPress={() => setSelectedMapDeviceId(null)}
+                hitSlop={8}
+                accessibilityRole="button"
+                accessibilityLabel="Close device summary"
+              >
+                <Ionicons name="close" size={22} color="#b8cdca" />
+              </Pressable>
+            </View>
+            <Pressable
+              style={styles.mapDeviceOverlayMessageButton}
+              onPress={() => {
+                setSelectedMapDeviceId(null);
+                setConversationPeer(selectedMapDevice.meshMacAddress || selectedMapDevice.serial);
+                setMessagesOpen(true);
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={`Open conversation with ${selectedMapDevice.name}`}
+            >
+              <Ionicons name="chatbubble-ellipses-outline" size={17} color="white" />
+              <Text style={styles.mapDeviceOverlayMessageText}>OPEN CONVERSATION</Text>
+            </Pressable>
+          </View>
+        ) : null}
         {region ? (
           <View style={styles.mapPrompt}>
             <Text style={styles.mapPromptTitle}>Save {region} offline?</Text>
@@ -243,16 +347,31 @@ export function HomeMap({
       </View>
 
       <View style={styles.dashboardHeader} pointerEvents="box-none">
-        <View />
+        <Pressable
+          style={[
+            styles.cloudMapStatus,
+            cloudStatus === "online" && styles.cloudMapStatusOnline,
+            cloudStatus === "login" && styles.cloudMapStatusLogin,
+          ]}
+          onPress={onCloudPress}
+          disabled={cloudStatus !== "login"}
+          accessibilityRole={cloudStatus === "login" ? "button" : "text"}
+          accessibilityLabel={cloudStatus === "login" ? "Login to EdgeZ Cloud" : `Cloud ${cloudStatus}`}
+        >
+          <View style={[
+            styles.cloudStatusDot,
+            cloudStatus === "online" && styles.cloudStatusDotOnline,
+            cloudStatus === "login" && styles.cloudStatusDotLogin,
+          ]} />
+          <Text style={[
+            styles.cloudMapStatusText,
+            cloudStatus === "online" && styles.cloudMapStatusTextOnline,
+            cloudStatus === "login" && styles.cloudMapStatusTextLogin,
+          ]}>
+            {cloudStatus.toUpperCase()}
+          </Text>
+        </Pressable>
         <View style={styles.headerActions}>
-          <Pressable
-            style={[styles.headerIconButton, styles.headerAddIconButton]}
-            onPress={onAddDevice}
-            accessibilityRole="button"
-            accessibilityLabel="Add device"
-          >
-            <Ionicons name="add" size={26} color="white" />
-          </Pressable>
           <Pressable
             style={styles.headerIconButton}
             onPress={onOpenSettings}

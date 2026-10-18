@@ -6,17 +6,32 @@ exchanges private user messages and clear-text channel messages over
 BATMAN-adv-lite, discovers peers from mesh beacons, and stores profiles,
 devices, and conversations locally.
 
-The current app does not require Appwrite, MQTT, an Internet connection, or an
-upstream Wi-Fi network. Cloud deployment files and the legacy ingestion
-function may still be present for compatibility, but they are not part of the
-offline app and firmware runtime.
+[![Use this template](https://img.shields.io/badge/Use%20this-template-238636?style=for-the-badge&logo=github)](https://github.com/new?template_name=template-offgrid-tracker&template_owner=edgez-ai)
+[![Deploy on EdgeZ](https://img.shields.io/badge/Deploy%20on-EdgeZ-6c5ce7?style=for-the-badge)](https://appwrite.edgez.ai/console/deploy?repo=https%3A%2F%2Fgithub.com%2Fedgez-ai%2Ftemplate-offgrid-tracker)
+
+Offline operation remains the default and does not require Appwrite, MQTT, an
+Internet connection, or an upstream Wi-Fi network. A profile can optionally
+enable cloud connectivity. Cloud status is online only while that profile is
+enabled, the user has an authenticated session, and the phone has verified
+Internet reachability.
+
+When cloud connectivity is enabled but the app has no authenticated session,
+the status badge reads `LOGIN` and opens the EdgeZ Cloud sign-in dialog. Mobile
+release builds obtain the public endpoint and project ID from the
+`APPWRITE_PUBLIC_ENDPOINT` and `APPWRITE_PROJECT_ID` repository variables.
+After authentication, the app creates or reuses a Team whose ID matches the
+local profile, writes the profile row with team-scoped permissions, and saves
+the selected profile in Appwrite account preferences. The badge changes to
+`ONLINE` only after this setup succeeds and Internet reachability is verified.
 
 ## Current features
 
 - Profile-specific HaLow country, bandwidth/channel, mesh ID, and passphrase,
   with shared phone identity, BLE selection, location mode, icon, and color.
 - SQLite-backed profiles, devices, peer MAC addresses/public keys, messages,
-  retry state, and last-seen time.
+  sensor history, retry state, and last-seen time.
+- Optional profile-level EdgeZ cloud connectivity with explicit online/offline
+  status on the map and in Settings.
 - Offline map and list views with day/night and current-location controls.
 - `Channels`, `People`, and `Sensors` message tabs. Channels are available
   before the first message; discovered users and sensors share the persisted
@@ -35,15 +50,44 @@ offline app and firmware runtime.
 | Path | Purpose |
 | --- | --- |
 | `app/` | Expo/React Native Android app and local SQLite data model |
+| `site/` | Optional authenticated Next.js cloud portal |
+| `function/` | Appwrite MQTT ingestion and telemetry processing Function |
+| `infra/` | Rerunnable Appwrite CLI installer used by Deploy on EdgeZ |
 | `firmware/` | PlatformIO ESP-IDF and Zephyr firmware |
 | `firmware/platforms/esp-halow/` | Pinned ESP32 HaLow platform submodule |
 | `firmware/platforms/mm-iot-zephyr/` | Pinned nRF54L15 HaLow platform submodule |
 | `docs/` | Product screenshots and hardware images |
 | `.github/workflows/` | Android and supported firmware CI builds |
-| `function/` | Legacy cloud ingestion code; unused by offline operation |
 
 See [app/README.md](app/README.md) and
 [firmware/README.md](firmware/README.md) for component-specific details.
+
+## Optional EdgeZ cloud deployment
+
+The root `edgez.json` selects `appwrite.config.json` as the version-controlled
+solution plan. **Deploy on EdgeZ** provisions email/password and JWT auth,
+web/Android platforms, the profile and telemetry database, Time Series storage,
+the MQTT ingestion Function, the Next.js Site, resource variables, and proxy
+domains. The deployment is optional; the mobile app and mesh continue to work
+locally when the cloud is disabled or unreachable.
+
+For a local infrastructure check:
+
+```sh
+cd infra
+npm ci
+npm run check
+```
+
+Managed deployments inject `APP_NAME`, `DOMAIN_SUFFIX`, `APPWRITE_ENDPOINT`,
+`APPWRITE_PROJECT_ID`, `APPWRITE_PROJECT_NAME`, and `APPWRITE_API_KEY`. Run
+`npm run deploy` only when you intend to reconcile a remote Appwrite project;
+`npm run clean` removes the template Site, Function, tables, Time Series store,
+proxy rules, and auth platforms while preserving project users and Devices.
+
+For a local mobile build connected to that deployment, copy `app/.env.example`
+to `app/.env` and set its public `APPWRITE_PROJECT_ID`. Never put the Appwrite
+API key in the mobile environment.
 
 ## Clone and initialize
 

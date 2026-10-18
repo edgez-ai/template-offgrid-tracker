@@ -4,6 +4,11 @@ The Expo app is a standalone, local-first Android companion for Offgrid
 Tracker. It opens on the Home page and does not require an account, Appwrite,
 MQTT, or an Internet connection.
 
+Profiles may optionally enable **Connect to cloud**. The map and Settings show
+`ONLINE` only when cloud is enabled, the user is authenticated, and Android
+reports that the Internet is reachable. A signed-in phone without usable
+Internet remains `OFFLINE`.
+
 ## Data model
 
 The app uses `expo-sqlite` with WAL and foreign-key support. The active profile
@@ -12,9 +17,10 @@ is retained across launches. Each profile owns its own:
 - HaLow country, channel, mesh ID, and optional passphrase;
 - discovered/provisioned devices, including persistent HaLow MAC addresses and
   user public keys; and
-- message history and delivery/retry metadata.
+- message history and delivery/retry metadata; and
+- timestamped sensor samples used by the local statistics view.
 
-Deleting a profile cascades to its devices and messages. Switching profiles
+Deleting a profile cascades to its devices, messages, and sensor history. Switching profiles
 disconnects the previous BLE/mesh session and displays only the selected
 profile's data. Legacy AsyncStorage profile data is migrated automatically.
 The phone identity/key material, selected BLE device, location mode, fixed
@@ -105,9 +111,19 @@ Copy `.env.example` to `.env` only when overriding defaults:
 
 - `APP_NAME` controls the display name and Android package suffix.
 - `DOMAIN_SUFFIX` controls the Android package prefix.
+- `APPWRITE_PUBLIC_ENDPOINT` and `APPWRITE_PROJECT_ID` enable the optional
+  EdgeZ Cloud login. Release builds read these from GitHub Actions repository
+  variables; local builds may provide the same values in `.env`.
 - `OFFGRID_TRACKER_REPOSITORY_URL` identifies the repository used by update
   tooling.
 - `EDGEZ_OTA_PROXY_URL` and `EDGEZ_BUNDLE_RUNTIME_VERSION` override bundle
   update behavior.
 
-No backend credential belongs in the mobile environment.
+No backend API key or other privileged credential belongs in the mobile
+environment. The project ID and public endpoint are client-safe identifiers.
+
+When an active profile enables **Connect to cloud**, the status is `LOGIN`
+until an Appwrite email session exists. A successful login reconciles a
+profile-scoped Team and profile row, then reports `ONLINE` only while Internet
+reachability remains available. The cached session marker preserves the
+correct `OFFLINE` state when an authenticated phone temporarily loses access.

@@ -43,9 +43,9 @@
   ],
   "tables": [
     {
-      "$id": "farms",
+      "$id": "profiles",
       "databaseId": "offgrid-tracker",
-      "name": "Farms",
+      "name": "Profiles",
       "permissions": ["create(\"users\")"],
       "rowSecurity": true,
       "enabled": true,
@@ -72,7 +72,7 @@
       "enabled": true,
       "columns": [
         { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "farmId", "type": "varchar", "size": 36, "required": false, "array": false },
+        { "key": "profileId", "type": "varchar", "size": 36, "required": false, "array": false },
         { "key": "halowMac", "type": "varchar", "size": 17, "required": false, "array": false },
         { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": false, "array": false },
         { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
@@ -149,7 +149,7 @@
       "rowSecurity": true,
       "enabled": true,
       "columns": [
-        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
         { "key": "shape", "type": "varchar", "size": 12, "required": true, "array": false },
         { "key": "geometry", "type": "varchar", "size": 4000, "required": true, "array": false }
@@ -163,7 +163,7 @@
       "rowSecurity": true,
       "enabled": true,
       "columns": [
-        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
         { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "deviceIds", "type": "varchar", "size": 36, "required": false, "array": true },
@@ -171,7 +171,7 @@
         { "key": "exitAlert", "type": "boolean", "required": true, "array": false }
       ],
       "indexes": [
-        { "key": "farm-id", "type": "key", "attributes": ["farmId"] }
+        { "key": "profile-id", "type": "key", "attributes": ["profileId"] }
       ]
     },
     {
@@ -182,7 +182,7 @@
       "rowSecurity": true,
       "enabled": true,
       "columns": [
-        { "key": "farmId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "ruleId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
@@ -195,7 +195,7 @@
         { "key": "acknowledgedAt", "type": "varchar", "size": 40, "required": false, "array": false }
       ],
       "indexes": [
-        { "key": "farm-active", "type": "key", "attributes": ["farmId", "active"], "orders": ["ASC", "ASC"] },
+        { "key": "profile-active", "type": "key", "attributes": ["profileId", "active"], "orders": ["ASC", "ASC"] },
         { "key": "rule-device-event", "type": "unique", "attributes": ["ruleId", "deviceId", "event"] }
       ]
     }
@@ -230,7 +230,7 @@
   ],
   "sites": [
     {
-      "$id": "offgrid-tracker",
+      "$id": "offgrid-tracker-site",
       "name": "Offgrid Tracker",
       "framework": "nextjs",
       "buildRuntime": "node-24",

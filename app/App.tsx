@@ -1,6 +1,7 @@
 import "react-native-get-random-values";
 import { edgezNodeDisplayName, edgezNodeId, isEdgezPublicChannel } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useNetInfo } from "@react-native-community/netinfo";
 import { fromByteArray } from "base64-js";
 import { rememberedBeaconIcon } from "./halow-provisioning";
 import type { EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
@@ -21,6 +22,7 @@ import {
   listProfiles,
   reconcileProfileMessageDelivery,
   saveProfileDevice,
+  saveProfileSensorSamples,
   replaceProfileConversation,
   setActiveProfile,
   updateProfile,
@@ -33,6 +35,9 @@ import { ProfileForm, validProfileDetails } from "./ProfileScreens";
 import { ProvisioningFlow } from "./ProvisioningFlow";
 import { SettingsPage } from "./SettingsScreens";
 import { HomeMap } from "./HomeMap";
+import { CloudLoginModal } from "./CloudLoginModal";
+import { cachedCloudSession, cloudErrorMessage, syncCloudProfile, verifyCloudSession } from "./cloud-auth";
+import type { CloudConnectionState } from "./cloud-auth";
 import { normalizedDeviceSerial } from "./mesh-utils";
 import {
   applySharedProfileSettings,
@@ -46,6 +51,7 @@ const profileStorageKey = "offgrid-tracker.profile.v1";
 type ProfileMeshLink = { profileId: string; session: EdgezMeshSession; state: EdgezMeshState };
 
 export default function App() {
+  const network = useNetInfo();
   const [profiles, setProfiles] = useState<StoredProfile[]>([]);
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
@@ -57,6 +63,9 @@ export default function App() {
   const [profileManagerOpen, setProfileManagerOpen] = useState(false);
   const [profileFormMode, setProfileFormMode] = useState<"create" | "edit" | null>(null);
   const [provisioningOpen, setProvisioningOpen] = useState(false);
+  const [cloudLoginOpen, setCloudLoginOpen] = useState(false);
+  const [cloudSessionLoggedIn, setCloudSessionLoggedIn] = useState(false);
+  const [cloudProfileReady, setCloudProfileReady] = useState(false);
   const [settingsBusy, setSettingsBusy] = useState(false);
   const [settingsError, setSettingsError] = useState("");
   const [bleStatus, setBleStatus] = useState<BleLinkStatus>({
@@ -70,11 +79,22 @@ export default function App() {
   const activeProfileIdRef = useRef<string | null>(null);
   const persistedNodeFingerprint = useRef("");
   const persistedMessageFingerprint = useRef("");
+  const persistedSensorHighWater = useRef(new Map<string, number>());
   const runtimeProfile = useMemo(
     () => profile && sharedSettings ? applySharedProfileSettings(profile, sharedSettings) : profile,
     [profile, sharedSettings],
   );
   const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
+  const cloudOnline = Boolean(
+    runtimeProfile?.connectToCloud &&
+    cloudSessionLoggedIn &&
+    cloudProfileReady &&
+    network.isConnected === true &&
+    network.isInternetReachable === true,
+  );
+  const cloudStatus: CloudConnectionState = runtimeProfile?.connectToCloud && !cloudSessionLoggedIn
+    ? "login"
+    : cloudOnline ? "online" : "offline";
   const refreshProfileMessages = useCallback(async () => {
     if (!runtimeProfile) return;
     const refreshedMessages = await listProfileMessages(runtimeProfile.id);
@@ -109,6 +129,7 @@ export default function App() {
     activeProfileIdRef.current = null;
     persistedNodeFingerprint.current = "";
     persistedMessageFingerprint.current = "";
+    persistedSensorHighWater.current.clear();
     setMeshLink(null);
     setProfileDevices([]);
     setProfileMessages([]);
@@ -126,6 +147,42 @@ export default function App() {
   };
 
   useEffect(() => {
+    let active = true;
+    void cachedCloudSession().then((loggedIn) => {
+      if (active) setCloudSessionLoggedIn(loggedIn);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!runtimeProfile?.connectToCloud || network.isInternetReachable !== true) return;
+    let active = true;
+    void verifyCloudSession()
+      .then((loggedIn) => { if (active) setCloudSessionLoggedIn(loggedIn); })
+      .catch(() => {
+        // Preserve the cached authenticated state on transient network errors.
+        // Reachability still makes the visible status OFFLINE.
+      });
+    return () => { active = false; };
+  }, [network.isInternetReachable, runtimeProfile?.connectToCloud]);
+
+  useEffect(() => {
+    setCloudProfileReady(false);
+    if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || network.isInternetReachable !== true) return;
+    let active = true;
+    void syncCloudProfile(runtimeProfile)
+      .then(() => {
+        if (active) setCloudProfileReady(true);
+      })
+      .catch((caught) => {
+        if (!active) return;
+        setCloudProfileReady(false);
+        setSettingsError(`Cloud setup failed: ${cloudErrorMessage(caught)}`);
+      });
+    return () => { active = false; };
+  }, [cloudSessionLoggedIn, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id, runtimeProfile?.updatedAt]);
+
+  useEffect(() => {
     void (async () => {
       await initializeProfileStore();
       let availableProfiles = await listProfiles();
@@ -134,7 +191,13 @@ export default function App() {
         if (stored) {
           const parsed: unknown = JSON.parse(stored);
           if (validProfileDetails(parsed)) {
-            await createProfile({ ...parsed, ...createProfileIdentity(parsed.name), bleDeviceId: "", bleDeviceName: "" });
+            await createProfile({
+              ...parsed,
+              ...createProfileIdentity(parsed.name),
+              connectToCloud: false,
+              bleDeviceId: "",
+              bleDeviceName: "",
+            });
             await AsyncStorage.removeItem(profileStorageKey);
           }
         }
@@ -226,6 +289,33 @@ export default function App() {
     }, 100);
     return () => clearTimeout(timer);
   }, [meshLink?.profileId, meshLink?.state.conversations, profile]);
+
+  useEffect(() => {
+    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
+    const pending = [...meshLink.state.sensorSamples.entries()].flatMap(([nodeNum, samples]) => {
+      const key = `${profile.id}:${nodeNum}`;
+      const highWater = persistedSensorHighWater.current.get(key) ?? -1;
+      return samples.filter((sample) => sample.timestampMs > highWater);
+    });
+    if (!pending.length) return;
+
+    const timer = setTimeout(() => {
+      void saveProfileSensorSamples(profile.id, pending)
+        .then(() => {
+          for (const sample of pending) {
+            const key = `${profile.id}:${sample.nodeNum}`;
+            persistedSensorHighWater.current.set(
+              key,
+              Math.max(persistedSensorHighWater.current.get(key) ?? -1, sample.timestampMs),
+            );
+          }
+        })
+        .catch((caught) => {
+          setSettingsError(caught instanceof Error ? caught.message : "Could not save sensor data.");
+        });
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [meshLink?.profileId, meshLink?.state.sensorSamples, profile]);
 
   const saveInitialProfile = async (details: ProfileDetails) => {
     await createProfile(details);
@@ -351,8 +441,8 @@ export default function App() {
             messages={profileMessages}
             provisioningRequests={provisioningRequests}
             bleStatus={bleStatus}
+            cloudStatus={cloudStatus}
             meshLink={currentMeshLink}
-            onAddDevice={() => setProvisioningOpen(true)}
             onRemoveDevice={requestRemoveDevice}
             onMessagesChanged={async () => {
               await refreshProfileMessages();
@@ -363,6 +453,7 @@ export default function App() {
             }}
             onProvisioningRequestsChanged={refreshProvisioningRequests}
             onResendMessage={resendMessage}
+            onCloudPress={() => { if (cloudStatus === "login") setCloudLoginOpen(true); }}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
@@ -399,6 +490,7 @@ export default function App() {
                   bleDeviceName: runtimeProfile.bleDeviceName,
                 }}
                 bleStatus={bleStatus}
+                cloudStatus={cloudStatus}
                 managerOpen={profileManagerOpen}
                 busy={settingsBusy}
                 error={settingsError}
@@ -410,6 +502,7 @@ export default function App() {
                 onEdit={() => setProfileFormMode("edit")}
                 onDelete={requestDeleteProfile}
                 onSaveSharedSettings={saveAppSettings}
+                onCloudPress={() => { if (cloudStatus === "login") setCloudLoginOpen(true); }}
               />
             )}
           </Modal>
@@ -423,6 +516,14 @@ export default function App() {
               }}
             />
           </Modal>
+          <CloudLoginModal
+            visible={cloudLoginOpen}
+            onClose={() => setCloudLoginOpen(false)}
+            onAuthenticated={() => {
+              setCloudProfileReady(false);
+              setCloudSessionLoggedIn(true);
+            }}
+          />
         </>
       ) : (
         <ProfileForm sharedSettings={sharedSettings ?? undefined} required onSave={saveInitialProfile} />

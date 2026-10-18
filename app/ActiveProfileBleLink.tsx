@@ -1,11 +1,11 @@
 import { encodeNetworkPacket, Interface, Operation, useEdgezMeshSession } from "@edgez/react-native-sdk";
-import type { EdgezMeshConfig, EdgezMeshNode, EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
+import type { EdgezMeshConfig, EdgezMeshNode, EdgezMeshSession, EdgezMeshState, EdgezSensorSample } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import React, { useEffect, useRef, useState } from "react";
 import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, messagesByNode, storedDeviceNode } from "./mesh-utils";
-import { listProfileDevices, listProfileMessages, profileIdentity, saveProfileProvisioningRequest } from "./profile-store";
+import { listProfileDevices, listProfileMessages, listProfileSensorSamples, profileIdentity, saveProfileProvisioningRequest } from "./profile-store";
 import type { StoredProfile } from "./profile-store";
 import type { LocationMode } from "./app-settings";
 import { beaconDeviceType } from "./beacon-options";
@@ -100,20 +100,26 @@ export function ActiveProfileBleLink({
     setBeaconLocation(undefined);
     lastBeaconSettingsKey.current = "";
     void (async () => {
-      if (!profile.bleDeviceId) return;
-      const [storedMessages, storedDevices] = await Promise.all([
+      const [storedMessages, storedDevices, storedSensorSamples] = await Promise.all([
         listProfileMessages(profile.id),
         listProfileDevices(profile.id),
+        listProfileSensorSamples(profile.id),
       ]);
       const cachedNodes = new Map<bigint, EdgezMeshNode>();
       for (const device of storedDevices) {
         const node = storedDeviceNode(device);
         if (node) cachedNodes.set(node.nodeNum, node);
       }
+      const cachedSensorSamples = new Map<bigint, EdgezSensorSample[]>();
+      for (const sample of storedSensorSamples) {
+        cachedSensorSamples.set(sample.nodeNum, [...cachedSensorSamples.get(sample.nodeNum) ?? [], sample]);
+      }
       session.restoreCachedMeshData({
         ...(cachedNodes.size ? { nodes: cachedNodes } : {}),
+        ...(cachedSensorSamples.size ? { sensorSamples: cachedSensorSamples } : {}),
         ...(storedMessages.length ? { conversations: messagesByNode(storedMessages) } : {}),
       });
+      if (!profile.bleDeviceId) return;
       let coordinates = locationMode === "fixed" ? coordinatesFromLocation(profile.location) ?? undefined : undefined;
       if (locationMode === "live") {
         try {

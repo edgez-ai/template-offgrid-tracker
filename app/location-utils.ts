@@ -1,18 +1,8 @@
+import { getCurrentLocation as getEdgezCurrentLocation } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
-import { NativeModules, Platform } from "react-native";
+import { Platform } from "react-native";
 
 export type AppCoordinates = { latitude: number; longitude: number };
-
-type NativeLocationResult = AppCoordinates & {
-  accuracy: number;
-  timestamp: number;
-};
-
-type NativeLocationModule = {
-  getCurrentLocation(timeoutMs: number): Promise<NativeLocationResult>;
-};
-
-const nativeLocation = NativeModules.NativeLocation as NativeLocationModule | undefined;
 
 function coordinates(position: Location.LocationObject): AppCoordinates {
   return {
@@ -23,10 +13,7 @@ function coordinates(position: Location.LocationObject): AppCoordinates {
 
 export async function compatibleCurrentLocation(): Promise<AppCoordinates> {
   if (Platform.OS === "android") {
-    if (!nativeLocation?.getCurrentLocation) {
-      throw new Error("Native Android location support is unavailable");
-    }
-    const result = await nativeLocation.getCurrentLocation(20_000);
+    const result = await getEdgezCurrentLocation(20_000);
     return { latitude: result.latitude, longitude: result.longitude };
   }
 

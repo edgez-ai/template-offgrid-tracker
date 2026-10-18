@@ -54,5 +54,6 @@ int edgez_config_build_zero_touch_request(const uint8_t current_mac[6],
 					   uint8_t *out, size_t out_cap,
 					   size_t *out_len);
 int edgez_config_replay_provisioning_response(const uint8_t destination[6]);
+void edgez_config_forget_provisioning_response(const uint8_t destination[6]);
 
 #endif
