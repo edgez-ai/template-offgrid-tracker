@@ -35,6 +35,7 @@ const otaRows = [];
 const downlinkRows = [];
 const timeseriesWrites = [];
 const deviceLocationUpdates = [];
+const cloudDeviceWrites = [];
 const mobileRows = new Map();
 const mobileListCalls = [];
 
@@ -48,6 +49,10 @@ beforeEach(() => {
   downlinkRows.length = 0;
   timeseriesWrites.length = 0;
   deviceLocationUpdates.length = 0;
+  cloudDeviceWrites.length = 0;
+  for (const deviceId of [...devices.keys()]) {
+    if (deviceId !== gatewayId && deviceId !== remoteId) devices.delete(deviceId);
+  }
   mobileRows.clear();
   mobileListCalls.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
@@ -66,11 +71,27 @@ beforeEach(() => {
       timeseriesWrites.push(JSON.parse(options.body));
       return { ok: true, status: 201 };
     }
+    const parsed = new URL(href);
+    if (parsed.pathname === "/v1/devices" && options.method === "GET") {
+      const query = parsed.searchParams.get("queries[]");
+      const serial = query ? JSON.parse(query).values[0] : "";
+      return { ok: true, status: 200, json: async () => ({
+        devices: [...devices.values()].filter((device) => !serial || device.serial === serial),
+      }) };
+    }
+    if (parsed.pathname === "/v1/devices" && options.method === "POST") {
+      const data = JSON.parse(options.body);
+      const device = { $id: `cloud-${devices.size + 1}`, serial: data.serial, ...data };
+      devices.set(device.$id, device);
+      cloudDeviceWrites.push({ method: "POST", device });
+      return { ok: true, status: 201, json: async () => device };
+    }
     const device = devices.get(decodeURIComponent(href.split("/").pop()));
     if (options.method === "PATCH" && device) {
       const update = JSON.parse(options.body);
       Object.assign(device, update);
       deviceLocationUpdates.push({ deviceId: device.$id, ...update });
+      cloudDeviceWrites.push({ method: "PATCH", device });
     }
     return { ok: Boolean(device), status: device ? 200 : 404, json: async () => device };
   };
@@ -169,6 +190,29 @@ test("mobile sync upserts inside the function and returns a watermark", async ()
   assert.equal(result.body.devices[0].id, "device-a");
   assert.ok(Date.parse(result.body.syncedAt));
   assert.equal(mobileRows.size, 1);
+  assert.equal(cloudDeviceWrites.length, 1);
+  assert.equal(cloudDeviceWrites[0].method, "POST");
+  assert.equal(cloudDeviceWrites[0].device.serial, "AABB");
+  assert.equal(cloudDeviceWrites[0].device.metadata.profileId, "profile-a");
+});
+
+test("mobile sync updates an existing cloud device instead of duplicating it", async () => {
+  devices.set("cloud-device-a", { $id: "cloud-device-a", serial: "AABB", name: "Old name" });
+  const result = await main({
+    req: {
+      headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
+      bodyJson: {
+        action: "sync", profileId: "profile-a", identityId: "identity-a", lastSyncAt: "", messages: [], sensorSamples: [],
+        devices: [{ id: "device-a", serial: "AABB", name: "Tracker", kind: "sensor", firmwareTarget: "fgh200", locationSource: "map", latitude: 59.3, longitude: 18.1, deviceType: "sensor", marker: "orange", iconStyle: "animal", userUuid: "", lastSeenAt: "2026-10-18T10:00:00.000Z", meshMacAddress: "", userPublicKey: "", updatedAt: "2026-10-18T10:00:00.000Z" }],
+      },
+    },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 200);
+  assert.equal(cloudDeviceWrites.length, 1);
+  assert.equal(cloudDeviceWrites[0].method, "PATCH");
+  assert.equal(devices.get("cloud-device-a").name, "Tracker");
+  assert.deepEqual(devices.get("cloud-device-a").location, [18.1, 59.3]);
 });
 
 test("mobile sync stores attachment metadata but never inline attachment bytes", async () => {

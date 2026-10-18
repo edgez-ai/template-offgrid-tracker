@@ -372,6 +372,68 @@ function fields(value, names) {
   return Object.fromEntries(names.filter((name) => value[name] !== undefined).map((name) => [name, value[name]]));
 }
 
+async function deviceApi(req, method, path, body, queries = []) {
+  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
+  const url = new URL(`${endpoint}${path}`);
+  for (const query of queries) url.searchParams.append("queries[]", query);
+  if (method === "GET") url.searchParams.set("total", "false");
+  const response = await fetch(url, {
+    method,
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": process.env.APPWRITE_FUNCTION_PROJECT_ID,
+      "x-appwrite-key": req.headers["x-appwrite-key"],
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(new Error(payload.message || `Device API request failed with ${response.status}`), {
+      code: response.status,
+    });
+  }
+  return payload;
+}
+
+async function findCloudDevice(req, serial) {
+  const result = await deviceApi(req, "GET", "/devices", null, [Query.equal("serial", [serial])]);
+  return result.devices?.find((device) => device.serial === serial) || null;
+}
+
+function cloudDeviceData(profileId, device, permissions) {
+  const hasLocation = Number.isFinite(device.latitude) && Number.isFinite(device.longitude);
+  return {
+    name: device.name || device.serial,
+    permissions,
+    enabled: true,
+    metadata: {
+      profileId,
+      localId: device.id,
+      kind: device.kind,
+      deviceType: device.deviceType,
+      firmwareTarget: device.firmwareTarget,
+    },
+    markerType: device.iconStyle || null,
+    markerColor: device.marker === "default" ? null : device.marker || null,
+    location: hasLocation ? [device.longitude, device.latitude] : null,
+  };
+}
+
+async function upsertCloudDevice(req, profileId, device, permissions) {
+  let cloudDevice = await findCloudDevice(req, device.serial);
+  const data = cloudDeviceData(profileId, device, permissions);
+  if (!cloudDevice) {
+    try {
+      return await deviceApi(req, "POST", "/devices", { serial: device.serial, ...data });
+    } catch (caught) {
+      if (caught?.code !== 409) throw caught;
+      cloudDevice = await findCloudDevice(req, device.serial);
+      if (!cloudDevice) throw caught;
+    }
+  }
+  return deviceApi(req, "PATCH", `/devices/${encodeURIComponent(cloudDevice.$id)}`, data);
+}
+
 async function syncMobileData(req, res, error) {
   const syncedAt = new Date().toISOString();
   const userId = req.headers["x-appwrite-user-id"];
@@ -402,6 +464,9 @@ async function syncMobileData(req, res, error) {
 
     const tables = new TablesDB(new Client().setEndpoint(endpoint).setProject(project).setKey(req.headers["x-appwrite-key"]));
     const permissions = profile.$permissions || [];
+    for (const device of body.devices) {
+      await upsertCloudDevice(req, profileId, device, permissions);
+    }
     const specs = [
       {
         tableId: MOBILE_DEVICE_TABLE_ID, prefix: "d", items: body.devices,

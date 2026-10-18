@@ -262,7 +262,7 @@ export async function syncCloudData(
   if (!functions) throw new Error("Cloud access is not configured in this app build.");
   const run = cloudSyncQueue.catch(() => ({ syncedAt: "", devices: [], messages: [], sensorSamples: [] })).then(async () => {
     if (!identityId) throw new Error("The active profile has no messaging identity.");
-    const lastSyncKey = `offgrid-tracker:cloud-last-sync:${projectId}:${identityId}`;
+    const lastSyncKey = `offgrid-tracker:cloud-last-sync-v2:${projectId}:${identityId}`;
     const lastSyncAt = await AsyncStorage.getItem(lastSyncKey) ?? "";
     const lastSyncMs = lastSyncAt ? Date.parse(lastSyncAt) : 0;
     const changedDevices = devices.filter((device) => !lastSyncMs || Date.parse(device.updatedAt) > lastSyncMs);
@@ -368,5 +368,5 @@ export async function syncCloudData(
 export async function completeCloudDataSync(identityId: string, syncedAt: string) {
   if (!syncedAt || Number.isNaN(Date.parse(syncedAt))) throw new Error("Cloud sync returned an invalid watermark.");
   if (!identityId) throw new Error("The active profile has no messaging identity.");
-  await AsyncStorage.setItem(`offgrid-tracker:cloud-last-sync:${projectId}:${identityId}`, syncedAt);
+  await AsyncStorage.setItem(`offgrid-tracker:cloud-last-sync-v2:${projectId}:${identityId}`, syncedAt);
 }
