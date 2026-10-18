@@ -4,6 +4,7 @@ const profileTable = appwriteConfig.tables?.find((table) => table.$id === "profi
 const deviceTable = appwriteConfig.tables?.find((table) => table.$id === "mobile-devices");
 const messageTable = appwriteConfig.tables?.find((table) => table.$id === "messages");
 const sensorSampleTable = appwriteConfig.tables?.find((table) => table.$id === "sensor-samples");
+const messageAttachmentBucket = appwriteConfig.buckets?.find((bucket) => bucket.$id === "message-attachments");
 const databaseId = profileTable?.databaseId || "offgrid-tracker";
 const profileTableId = profileTable?.$id || "profiles";
 
@@ -53,6 +54,7 @@ module.exports = {
       appwriteMessageTableId: messageTable?.$id || "messages",
       appwriteSensorSampleTableId: sensorSampleTable?.$id || "sensor-samples",
       appwriteFunctionId: appwriteConfig.functions?.[0]?.$id || "offgrid-tracker",
+      appwriteMessageAttachmentBucketId: messageAttachmentBucket?.$id || "message-attachments",
       otaRepositoryUrl: vcsRepositoryUrl.replace(/\.git$/, "").replace(/\/$/, ""),
       otaProxyUrl,
       bundleRuntimeVersion,

@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
-import { Account, Client, ExecutionMethod, Functions, ID, Permission, Role, TablesDB, Teams } from "react-native-appwrite";
-import { fromByteArray, toByteArray } from "base64-js";
+import { File, Paths } from "expo-file-system";
+import { Account, Client, ExecutionMethod, Functions, ID, Permission, Role, Storage, TablesDB, Teams } from "react-native-appwrite";
 import type { EdgezSensorSample } from "@edgez/react-native-sdk";
 import type { StoredProfile } from "./profile-store";
 import type { StoredDevice, StoredMessage } from "./profile-store";
@@ -18,6 +18,7 @@ type CloudConfig = {
   appwriteMessageTableId?: string;
   appwriteSensorSampleTableId?: string;
   appwriteFunctionId?: string;
+  appwriteMessageAttachmentBucketId?: string;
 };
 
 const extra = (Constants.expoConfig?.extra ?? {}) as CloudConfig;
@@ -27,6 +28,7 @@ const platform = (extra.appwritePlatform ?? "").trim();
 const databaseId = (extra.appwriteDatabaseId ?? "offgrid-tracker").trim();
 const profileTableId = (extra.appwriteProfileTableId ?? "profiles").trim();
 const functionId = (extra.appwriteFunctionId ?? "offgrid-tracker").trim();
+const messageAttachmentBucketId = (extra.appwriteMessageAttachmentBucketId ?? "message-attachments").trim();
 
 export const cloudAuthConfigured = Boolean(
   endpoint && projectId && projectId !== "<PROJECT_ID>" && platform,
@@ -39,6 +41,7 @@ const account = client ? new Account(client) : null;
 const teams = client ? new Teams(client) : null;
 const tables = client ? new TablesDB(client) : null;
 const functions = client ? new Functions(client) : null;
+const storage = client ? new Storage(client) : null;
 const sessionCacheKey = `offgrid-tracker:cloud-session:${projectId || "unconfigured"}`;
 let cloudSyncQueue: Promise<CloudSyncResult> = Promise.resolve({ syncedAt: "", devices: [], messages: [], sensorSamples: [] });
 
@@ -63,6 +66,87 @@ function rowPermissions(profileId: string) {
     Permission.update(Role.team(profileId, "owner")),
     Permission.delete(Role.team(profileId, "owner")),
   ];
+}
+
+function stableAttachmentId(profileId: string, messageUuid: string) {
+  let left = 0x811c9dc5;
+  let right = 0x9e3779b9;
+  const value = `${profileId}:${messageUuid}`;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    left = Math.imul(left ^ code, 0x01000193) >>> 0;
+    right = Math.imul(right ^ (code + index), 0x85ebca6b) >>> 0;
+  }
+  return `attachment-${left.toString(16).padStart(8, "0")}${right.toString(16).padStart(8, "0")}`;
+}
+
+export type CloudAttachment = {
+  attachmentFileId: string;
+  attachmentKind: "voice" | "image";
+  attachmentName: string;
+  attachmentMimeType: string;
+  attachmentSize: number;
+};
+
+export async function uploadCloudAttachment(
+  profileId: string,
+  messageUuid: string,
+  kind: CloudAttachment["attachmentKind"],
+  file: { name: string; type: string; size: number; uri: string },
+): Promise<CloudAttachment> {
+  if (!storage) throw new Error("Cloud storage is not configured in this app build.");
+  const fileId = stableAttachmentId(profileId, messageUuid);
+  try {
+    await storage.getFile({ bucketId: messageAttachmentBucketId, fileId });
+  } catch (error) {
+    if (!isCloudNotFound(error)) throw error;
+    await storage.createFile({
+      bucketId: messageAttachmentBucketId,
+      fileId,
+      file,
+      permissions: rowPermissions(profileId),
+    });
+  }
+  return {
+    attachmentFileId: fileId,
+    attachmentKind: kind,
+    attachmentName: file.name,
+    attachmentMimeType: file.type,
+    attachmentSize: file.size,
+  };
+}
+
+async function downloadVoiceAttachment(message: Pick<StoredMessage, "attachmentKind" | "attachmentFileId">) {
+  if (message.attachmentKind !== "voice" || !message.attachmentFileId || !storage) return new Uint8Array();
+  try {
+    return new Uint8Array(await storage.getFileDownload({
+      bucketId: messageAttachmentBucketId,
+      fileId: message.attachmentFileId,
+    }));
+  } catch (error) {
+    // A deleted attachment must not prevent unrelated messages, devices, and
+    // sensor samples from syncing. Transient/auth failures still fail the sync
+    // so its watermark is not advanced and the download can be retried.
+    if (isCloudNotFound(error)) return new Uint8Array();
+    throw error;
+  }
+}
+
+async function uploadVoiceAttachment(profileId: string, message: StoredMessage): Promise<CloudAttachment | null> {
+  if (!message.voiceBytes.length) return null;
+  const temporary = new File(Paths.cache, `${stableAttachmentId(profileId, message.messageUuid)}.opus`);
+  temporary.create({ overwrite: true });
+  try {
+    temporary.write(message.voiceBytes);
+    return await uploadCloudAttachment(profileId, message.messageUuid, "voice", {
+      name: `${message.messageUuid}.opus`,
+      type: "audio/opus",
+      size: message.voiceBytes.length,
+      uri: temporary.uri,
+    });
+  } finally {
+    if (temporary.exists) temporary.delete();
+  }
 }
 
 export type CloudSyncResult = {
@@ -138,6 +222,7 @@ export async function syncCloudProfile(profile: StoredProfile) {
 
   const data = {
     name: profile.name,
+    identityId: profile.identityId,
     country: profile.country,
     location: profile.location,
     halowChannel: profile.halowChannel,
@@ -169,24 +254,48 @@ export async function syncCloudProfile(profile: StoredProfile) {
 
 export async function syncCloudData(
   profileId: string,
+  identityId: string,
   devices: readonly StoredDevice[],
   messages: readonly StoredMessage[],
   sensorSamples: readonly EdgezSensorSample[],
 ): Promise<CloudSyncResult> {
   if (!functions) throw new Error("Cloud access is not configured in this app build.");
   const run = cloudSyncQueue.catch(() => ({ syncedAt: "", devices: [], messages: [], sensorSamples: [] })).then(async () => {
-    const lastSyncKey = `offgrid-tracker:cloud-last-sync:${projectId}:${profileId}`;
+    if (!identityId) throw new Error("The active profile has no messaging identity.");
+    const lastSyncKey = `offgrid-tracker:cloud-last-sync:${projectId}:${identityId}`;
     const lastSyncAt = await AsyncStorage.getItem(lastSyncKey) ?? "";
     const lastSyncMs = lastSyncAt ? Date.parse(lastSyncAt) : 0;
     const changedDevices = devices.filter((device) => !lastSyncMs || Date.parse(device.updatedAt) > lastSyncMs);
     const changedMessages = messages.filter((message) => !lastSyncMs || Math.max(message.timestampMs, message.lastAttemptAtMs) > lastSyncMs);
     const changedSensorSamples = sensorSamples.filter((sample) => !lastSyncMs || sample.timestampMs > lastSyncMs);
-    const encodedMessages = changedMessages.map((message) => ({
-          ...message,
-          voicePayload: message.voiceBytes.length && message.voiceBytes.length <= 75000
-            ? fromByteArray(message.voiceBytes) : "",
-          voiceBytes: undefined,
-        }));
+    const normalizedEndpoint = (value: string) => value.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    const peerIdentity = (message: StoredMessage) => devices.find((device) =>
+      [device.serial, device.meshMacAddress].some((value) =>
+        value && normalizedEndpoint(value) === normalizedEndpoint(message.peerSerial)))?.userUuid || message.peerSerial;
+    const encodedMessages = await Promise.all(changedMessages.map(async (message) => {
+      const uploaded = message.attachmentFileId ? null : await uploadVoiceAttachment(profileId, message);
+      const peer = peerIdentity(message);
+      return {
+        messageUuid: message.messageUuid,
+        from: message.mine ? identityId : peer,
+        to: message.mine ? peer : identityId,
+        text: message.text,
+        timestampMs: message.timestampMs,
+        status: message.status,
+        voiceCodec: message.voiceCodec,
+        durationMs: message.durationMs,
+        retryCount: message.retryCount,
+        retryOfUuid: message.retryOfUuid,
+        lastAttemptAtMs: message.lastAttemptAtMs,
+        deliveryState: message.deliveryState,
+        attachmentFileId: message.attachmentFileId,
+        attachmentKind: message.attachmentKind,
+        attachmentName: message.attachmentName,
+        attachmentMimeType: message.attachmentMimeType,
+        attachmentSize: message.attachmentSize,
+        ...(uploaded ?? {}),
+      };
+    }));
     const encodedSamples = changedSensorSamples.map((sample) => ({
           nodeNum: sample.nodeNum.toString(),
           timestampMs: sample.timestampMs,
@@ -195,7 +304,7 @@ export async function syncCloudData(
     const responses: Array<{
       syncedAt?: string;
       devices?: StoredDevice[];
-      messages?: Array<Omit<StoredMessage, "voiceBytes"> & { voicePayload?: string }>;
+      messages?: Array<Omit<StoredMessage, "profileId" | "peerSerial" | "mine" | "voiceBytes"> & { from: string; to: string }>;
       sensorSamples?: Array<{ nodeNum: string; timestampMs: number; data: EdgezSensorSample["data"] }>;
     }> = [];
     const batchSize = 20;
@@ -209,6 +318,7 @@ export async function syncCloudData(
         body: JSON.stringify({
           action: "sync",
           profileId,
+          identityId,
           lastSyncAt,
           devices: changedDevices.slice(batch * batchSize, (batch + 1) * batchSize),
           messages: encodedMessages.slice(batch * batchSize, (batch + 1) * batchSize),
@@ -226,10 +336,21 @@ export async function syncCloudData(
     const result = {
       syncedAt: response.syncedAt ?? "",
       devices: unique(responses.flatMap((item) => item.devices ?? []), (device) => device.id),
-      messages: unique(responses.flatMap((item) => item.messages ?? []), (message) => message.messageUuid).map((message) => ({
+      messages: await Promise.all(unique(responses.flatMap((item) => item.messages ?? []), (message) => message.messageUuid).map(async (message) => ({
         ...message,
-        voiceBytes: message.voicePayload ? toByteArray(message.voicePayload) : new Uint8Array(),
-      })),
+        profileId,
+        mine: message.from === identityId,
+        peerSerial: (() => {
+          const endpoint = message.from === identityId ? message.to : message.from;
+          return devices.find((device) => device.userUuid === endpoint)?.serial || endpoint;
+        })(),
+        attachmentFileId: message.attachmentFileId ?? "",
+        attachmentKind: message.attachmentKind ?? "",
+        attachmentName: message.attachmentName ?? "",
+        attachmentMimeType: message.attachmentMimeType ?? "",
+        attachmentSize: message.attachmentSize ?? 0,
+        voiceBytes: await downloadVoiceAttachment(message),
+      }))),
       sensorSamples: unique(responses.flatMap((item) => item.sensorSamples ?? []), (sample) => `${sample.nodeNum}:${sample.timestampMs}`).map((sample) => ({
         ...sample,
         nodeNum: BigInt(sample.nodeNum),
@@ -244,7 +365,8 @@ export async function syncCloudData(
   return run;
 }
 
-export async function completeCloudDataSync(profileId: string, syncedAt: string) {
+export async function completeCloudDataSync(identityId: string, syncedAt: string) {
   if (!syncedAt || Number.isNaN(Date.parse(syncedAt))) throw new Error("Cloud sync returned an invalid watermark.");
-  await AsyncStorage.setItem(`offgrid-tracker:cloud-last-sync:${projectId}:${profileId}`, syncedAt);
+  if (!identityId) throw new Error("The active profile has no messaging identity.");
+  await AsyncStorage.setItem(`offgrid-tracker:cloud-last-sync:${projectId}:${identityId}`, syncedAt);
 }

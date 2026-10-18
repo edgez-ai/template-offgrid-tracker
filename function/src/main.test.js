@@ -36,6 +36,7 @@ const downlinkRows = [];
 const timeseriesWrites = [];
 const deviceLocationUpdates = [];
 const mobileRows = new Map();
+const mobileListCalls = [];
 
 beforeEach(() => {
   delete devices.get(gatewayId).firmwareVersion;
@@ -48,6 +49,7 @@ beforeEach(() => {
   timeseriesWrites.length = 0;
   deviceLocationUpdates.length = 0;
   mobileRows.clear();
+  mobileListCalls.length = 0;
   process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
   process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
   process.env.OFFGRID_TRACKER_DATABASE_ID = "database-a";
@@ -89,6 +91,7 @@ beforeEach(() => {
   };
   TablesDB.prototype.listRows = async (args) => {
     if (["mobile-devices-a", "messages-a", "sensor-samples-a"].includes(args.tableId)) {
+      mobileListCalls.push(args);
       return { rows: [...mobileRows.values()].filter((row) => row.$tableId === args.tableId) };
     }
     if (args.tableId === "telemetry-a") {
@@ -102,7 +105,7 @@ beforeEach(() => {
   };
   TablesDB.prototype.getRow = async (args) => {
     if (args.tableId === "profiles-a" && args.rowId === "profile-a") {
-      return { $id: "profile-a", ownerId: "user-a", teamId: "profile-a", $permissions: ['read("team:profile-a")'] };
+      return { $id: "profile-a", ownerId: "user-a", teamId: "profile-a", identityId: "identity-a", $permissions: ['read("team:profile-a")'] };
     }
     throw Object.assign(new Error("not found"), { code: 404 });
   };
@@ -145,7 +148,7 @@ after(() => {
 
 test("mobile sync requires an authenticated execution", async () => {
   const result = await main({
-    req: { headers: { "x-appwrite-key": "test-key" }, bodyJson: { action: "sync", profileId: "profile-a", devices: [], messages: [], sensorSamples: [] } },
+    req: { headers: { "x-appwrite-key": "test-key" }, bodyJson: { action: "sync", profileId: "profile-a", identityId: "identity-a", devices: [], messages: [], sensorSamples: [] } },
     res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
   });
   assert.equal(result.status, 401);
@@ -156,7 +159,7 @@ test("mobile sync upserts inside the function and returns a watermark", async ()
     req: {
       headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
       bodyJson: {
-        action: "sync", profileId: "profile-a", lastSyncAt: "", messages: [], sensorSamples: [],
+        action: "sync", profileId: "profile-a", identityId: "identity-a", lastSyncAt: "", messages: [], sensorSamples: [],
         devices: [{ id: "device-a", serial: "AABB", name: "Tracker", kind: "sensor", firmwareTarget: "fgh200", locationSource: "off", latitude: null, longitude: null, deviceType: "sensor", marker: "person", iconStyle: "person", userUuid: "", lastSeenAt: "2026-10-18T10:00:00.000Z", meshMacAddress: "", userPublicKey: "", updatedAt: "2026-10-18T10:00:00.000Z" }],
       },
     },
@@ -166,6 +169,71 @@ test("mobile sync upserts inside the function and returns a watermark", async ()
   assert.equal(result.body.devices[0].id, "device-a");
   assert.ok(Date.parse(result.body.syncedAt));
   assert.equal(mobileRows.size, 1);
+});
+
+test("mobile sync stores attachment metadata but never inline attachment bytes", async () => {
+  const result = await main({
+    req: {
+      headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
+      bodyJson: {
+        action: "sync", profileId: "profile-a", identityId: "identity-a", lastSyncAt: "", devices: [], sensorSamples: [],
+        messages: [{
+          messageUuid: "message-a", from: "identity-a", to: "identity-b", text: "",
+          timestampMs: 1, status: "Delivered", voiceCodec: 1, durationMs: 750,
+          retryCount: 0, retryOfUuid: "", lastAttemptAtMs: 1, deliveryState: "Delivered",
+          attachmentFileId: "attachment-a", attachmentKind: "voice", attachmentName: "message-a.opus",
+          attachmentMimeType: "audio/opus", attachmentSize: 128,
+          voicePayload: "must-not-be-stored", voiceBytes: [1, 2, 3],
+        }],
+      },
+    },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 200);
+  const stored = [...mobileRows.values()].find((row) => row.$tableId === "messages-a");
+  assert.ok(stored);
+  assert.equal(stored.attachmentFileId, "attachment-a");
+  assert.equal(stored.attachmentKind, "voice");
+  assert.equal(stored.attachmentSize, 128);
+  assert.equal(stored.from, "identity-a");
+  assert.equal(stored.to, "identity-b");
+  assert.equal("profileId" in stored, false);
+  assert.equal("peerSerial" in stored, false);
+  assert.equal("mine" in stored, false);
+  assert.equal("voicePayload" in stored, false);
+  assert.equal("voiceBytes" in stored, false);
+  const messageList = mobileListCalls.find((call) => call.tableId === "messages-a");
+  const identityQuery = messageList.queries.map((query) => JSON.parse(query)).find((query) => query.method === "or");
+  assert.deepEqual(identityQuery.values.map((query) => [query.attribute, query.values[0]]),
+    [["from", "identity-a"], ["to", "identity-a"]]);
+});
+
+test("mobile sync rejects a message unrelated to the caller identity", async () => {
+  const result = await main({
+    req: {
+      headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
+      bodyJson: {
+        action: "sync", profileId: "profile-a", identityId: "identity-a", lastSyncAt: "", devices: [], sensorSamples: [],
+        messages: [{ messageUuid: "foreign", from: "identity-b", to: "identity-c" }],
+      },
+    },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 403);
+  assert.equal(result.body.error, "Message does not belong to this identity");
+  assert.equal(mobileRows.size, 0);
+});
+
+test("mobile sync cannot claim a different profile identity", async () => {
+  const result = await main({
+    req: {
+      headers: { "x-appwrite-key": "test-key", "x-appwrite-user-id": "user-a", "x-appwrite-user-jwt": "jwt-a" },
+      bodyJson: { action: "sync", profileId: "profile-a", identityId: "identity-b", devices: [], messages: [], sensorSamples: [] },
+    },
+    res: { json: (body, status) => ({ body, status }) }, error: assert.fail,
+  });
+  assert.equal(result.status, 403);
+  assert.equal(result.body.error, "Identity access denied");
 });
 
 async function publish(payload) {

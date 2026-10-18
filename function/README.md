@@ -25,7 +25,12 @@ and longitude. Other application telemetry channels keep their JSON payloads.
 Authenticated mobile executions may call `/sync`. The app sends incremental
 SQLite changes together with its last successful sync watermark. This Function,
 not the mobile client, validates and upserts device, message, and sensor rows and
-returns cloud-side changes for the app to merge locally.
+returns cloud-side changes for the app to merge locally. Message rows contain
+text and attachment metadata only. Voice and image bytes upload directly to
+Appwrite Storage and never pass through this Function or the messages table.
+Cloud messages have no `profileId`: the Function stores canonical `from` and
+`to` identity IDs, rejects uploads unrelated to the authenticated identity,
+and queries only messages where that identity is the sender or recipient.
 
 When an Appwrite Device is deleted, the same Function removes its deterministic
 latest-telemetry row. This releases the unique HaLow MAC mapping before a device

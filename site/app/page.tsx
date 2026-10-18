@@ -1,6 +1,6 @@
 "use client";
 
-import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
+import { Account, Client, ID, Models, Query, Storage, TablesDB } from "appwrite";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "./ProfileSelector";
@@ -8,11 +8,11 @@ import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "
 import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../lib/device-status";
 
 type Device = DeviceSystemState & { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { profileId?: string; firmwareTarget?: string; [key: string]: unknown } };
-type Profile = Models.Row & { name: string };
+type Profile = Models.Row & { name: string; identityId?: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type MobileDevice = Models.Row & { profileId: string; localId: string; serial: string; name: string; kind: string; firmwareTarget: string; locationSource: string; latitude?: number | null; longitude?: number | null; deviceType: string; marker: string; iconStyle: string; lastSeenAt: string; meshMacAddress: string; updatedAt: string };
-type CloudMessage = Models.Row & { profileId: string; messageUuid: string; peerSerial: string; text: string; mine: boolean; timestampMs: number; status: string; deliveryState: string };
+type CloudMessage = Models.Row & { messageUuid: string; from: string; to: string; text: string; timestampMs: number; status: string; deliveryState: string; attachmentFileId?: string; attachmentKind?: string; attachmentName?: string; attachmentMimeType?: string; attachmentSize?: number };
 type CloudSensorSample = Models.Row & { profileId: string; nodeNum: string; timestampMs: number; latitude?: number | null; longitude?: number | null; temperature?: number | null; humidity?: number | null; pressure?: number | null; vibrationAverage?: number | null; accelX?: number | null; accelY?: number | null; accelZ?: number | null; gyroX?: number | null; gyroY?: number | null; gyroZ?: number | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type SensorPoint = { timestamp: number; value: number };
@@ -29,6 +29,7 @@ const client = new Client()
   .setProject(process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!);
 const account = new Account(client);
 const tables = new TablesDB(client);
+const storage = new Storage(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const profileTableId = "profiles";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
@@ -36,6 +37,7 @@ const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
 const mobileDeviceTableId = process.env.NEXT_PUBLIC_MOBILE_DEVICE_TABLE_ID!;
 const messageTableId = process.env.NEXT_PUBLIC_MESSAGE_TABLE_ID!;
 const sensorSampleTableId = process.env.NEXT_PUBLIC_SENSOR_SAMPLE_TABLE_ID!;
+const messageAttachmentBucketId = process.env.NEXT_PUBLIC_MESSAGE_ATTACHMENT_BUCKET_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -361,13 +363,12 @@ export default function Home() {
   const [error, setError] = useState("");
 
   const refresh = useCallback(async () => {
-    const [deviceResult, profileRows, telemetryRows, otaRows, mobileDeviceRows, messageRows, sensorRows] = await Promise.all([
+    const [deviceResult, profileRows, telemetryRows, otaRows, mobileDeviceRows, sensorRows] = await Promise.all([
       listDevices<{ devices: Device[] }>(),
       tables.listRows<Profile>({ databaseId, tableId: profileTableId, queries: [Query.limit(100)] }),
       tables.listRows({ databaseId, tableId: telemetryTableId, queries: [Query.orderDesc("receivedAt"), Query.limit(500)] }),
       tables.listRows({ databaseId, tableId: otaUpdateTableId, queries: [Query.orderDesc("reportedAt"), Query.limit(500)] }),
       tables.listRows<MobileDevice>({ databaseId, tableId: mobileDeviceTableId, queries: [Query.limit(500)] }),
-      tables.listRows<CloudMessage>({ databaseId, tableId: messageTableId, queries: [Query.limit(500)] }),
       tables.listRows<CloudSensorSample>({ databaseId, tableId: sensorSampleTableId, queries: [Query.limit(1000)] }),
     ]);
     setDevices(deviceResult.devices);
@@ -376,7 +377,6 @@ export default function Home() {
     setTopology(topologyFromDevices(deviceResult.devices));
     setOtaUpdates(otaRows.rows as unknown as OtaUpdate[]);
     setMobileDevices(mobileDeviceRows.rows);
-    setCloudMessages(messageRows.rows);
     setCloudSensorSamples(sensorRows.rows);
   }, []);
 
@@ -422,13 +422,30 @@ export default function Home() {
   const profileMobileDevices = useMemo(() => mobileDevices
     .filter((device) => device.profileId === currentProfileId)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)), [currentProfileId, mobileDevices]);
+  const currentProfile = profiles.find((profile) => profile.$id === currentProfileId);
+
+  useEffect(() => {
+    const identityId = currentProfile?.identityId;
+    if (!identityId) { setCloudMessages([]); return; }
+    let active = true;
+    const load = () => tables.listRows<CloudMessage>({
+      databaseId,
+      tableId: messageTableId,
+      queries: [Query.or([Query.equal("from", [identityId]), Query.equal("to", [identityId])]), Query.orderDesc("timestampMs"), Query.limit(500)],
+    }).then((result) => { if (active) setCloudMessages(result.rows); })
+      .catch((caught) => { if (active) setError(errorMessage(caught)); });
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [currentProfile?.identityId]);
+
   const profileCloudMessages = useMemo(() => cloudMessages
-    .filter((message) => message.profileId === currentProfileId)
-    .sort((left, right) => right.timestampMs - left.timestampMs), [cloudMessages, currentProfileId]);
+    .filter((message) => Boolean(currentProfile?.identityId) &&
+      (message.from === currentProfile?.identityId || message.to === currentProfile?.identityId))
+    .sort((left, right) => right.timestampMs - left.timestampMs), [cloudMessages, currentProfile?.identityId]);
   const profileCloudSensorSamples = useMemo(() => cloudSensorSamples
     .filter((sample) => sample.profileId === currentProfileId)
     .sort((left, right) => right.timestampMs - left.timestampMs), [cloudSensorSamples, currentProfileId]);
-  const currentProfile = profiles.find((profile) => profile.$id === currentProfileId);
 
   useEffect(() => {
     setSelectedDeviceId((current) => profileDevices.some((device) => device.$id === current) ? current : profileDevices[0]?.$id || "");
@@ -642,7 +659,7 @@ export default function Home() {
         <header><div><p className="eyebrow">MOBILE CLOUD SYNC</p><h2>Offline mesh data</h2></div><span>{profileMobileDevices.length} DEVICES · {profileCloudMessages.length} MESSAGES · {profileCloudSensorSamples.length} SAMPLES</span></header>
         <div className="cloud-sync-grid">
           <article><h3>Devices</h3>{profileMobileDevices.slice(0, 12).map((device) => <div className="cloud-row" key={device.$id}><span><strong>{device.name}</strong><small>{device.serial} · {device.deviceType}</small></span><time>{device.lastSeenAt ? relativeTime(device.lastSeenAt) : "Never seen"}</time></div>)}{!profileMobileDevices.length && <p className="empty">No mobile-synced devices.</p>}</article>
-          <article><h3>Messages</h3>{profileCloudMessages.slice(0, 12).map((message) => <div className="cloud-row" key={message.$id}><span><strong>{message.mine ? `To ${message.peerSerial}` : `From ${message.peerSerial}`}</strong><small>{message.text || "Voice message"}</small></span><time>{relativeTime(new Date(message.timestampMs).toISOString())}</time></div>)}{!profileCloudMessages.length && <p className="empty">No synced conversations.</p>}</article>
+          <article><h3>Messages</h3>{profileCloudMessages.slice(0, 12).map((message) => <div className="cloud-row" key={message.$id}><span><strong>{message.from === currentProfile?.identityId ? `To ${message.to}` : `From ${message.from}`}</strong><small>{message.text || (message.attachmentKind ? `${message.attachmentKind} attachment` : "Message")}</small>{message.attachmentFileId && <a href={storage.getFileDownload({ bucketId: messageAttachmentBucketId, fileId: message.attachmentFileId })} download={message.attachmentName || undefined}>Download {message.attachmentKind || "attachment"}</a>}</span><time>{relativeTime(new Date(message.timestampMs).toISOString())}</time></div>)}{!profileCloudMessages.length && <p className="empty">No synced conversations.</p>}</article>
           <article><h3>Sensor data</h3>{profileCloudSensorSamples.slice(0, 12).map((sample) => <div className="cloud-row" key={sample.$id}><span><strong>Node {sample.nodeNum}</strong><small>{typeof sample.temperature === "number" ? `${sample.temperature.toFixed(1)} °C` : typeof sample.vibrationAverage === "number" ? `Vibration ${sample.vibrationAverage.toFixed(2)}` : "Sensor sample"}</small></span><time>{relativeTime(new Date(sample.timestampMs).toISOString())}</time></div>)}{!profileCloudSensorSamples.length && <p className="empty">No synced sensor samples.</p>}</article>
         </div>
       </section>

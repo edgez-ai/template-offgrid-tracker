@@ -29,6 +29,9 @@ export function installDatabase() {
       ["tables-db", "get-column", ...profiles, "--key", key],
       ["tables-db", "create-string-column", ...profiles, "--key", key, "--size", size, "--required", "true"]);
   }
+  ensure(`profiles.identityId column`,
+    ["tables-db", "get-column", ...profiles, "--key", "identityId"],
+    ["tables-db", "create-string-column", ...profiles, "--key", "identityId", "--size", "64"]);
   ensure("profiles.halowChannel column",
     ["tables-db", "get-column", ...profiles, "--key", "halowChannel"],
     ["tables-db", "create-integer-column", ...profiles, "--key", "halowChannel", "--min", "0", "--max", "255", "--required", "true"]);
@@ -63,7 +66,6 @@ export function installDatabase() {
   const ensureFloat = (label, table, key) => ensure(`${label}.${key} column`,
     ["tables-db", "get-column", ...table, "--key", key],
     ["tables-db", "create-float-column", ...table, "--key", key]);
-
   const mobileDevices = ensureProfileTable(config.mobileDeviceTableId, "Mobile profile devices");
   for (const [key, size] of [
     ["profileId", 36], ["localId", 36], ["serial", 64], ["name", 128], ["kind", 16],
@@ -79,24 +81,25 @@ export function installDatabase() {
     ["tables-db", "get-index", ...mobileDevices, "--key", "profile-local-id"],
     ["tables-db", "create-index", ...mobileDevices, "--key", "profile-local-id", "--type", "unique", "--columns", "profileId", "localId"]);
 
-  const messages = ensureProfileTable(config.messageTableId, "Profile messages");
+  const messages = ensureProfileTable(config.messageTableId, "Identity messages");
   for (const [key, size, encrypt] of [
-    ["profileId", 36, false], ["messageUuid", 64, false], ["peerSerial", 64, false],
-    ["text", 10000, true], ["status", 32, false], ["voicePayload", 100000, true],
+    ["messageUuid", 64, false], ["from", 64, false], ["to", 64, false],
+    ["text", 10000, true], ["status", 32, false],
     ["retryOfUuid", 64, false], ["deliveryState", 32, false],
   ]) ensureString("messages", messages, key, size, { encrypt });
-  ensure("messages.mine column",
-    ["tables-db", "get-column", ...messages, "--key", "mine"],
-    ["tables-db", "create-boolean-column", ...messages, "--key", "mine", "--required", "true"]);
+  for (const [key, size] of [
+    ["attachmentFileId", 36], ["attachmentKind", 16], ["attachmentName", 128], ["attachmentMimeType", 128],
+  ]) ensureString("messages", messages, key, size, { required: false });
   for (const key of ["timestampMs", "voiceCodec", "durationMs", "retryCount", "lastAttemptAtMs"]) {
     ensureInteger("messages", messages, key);
   }
-  ensure("messages profile/time index",
-    ["tables-db", "get-index", ...messages, "--key", "profile-message-time"],
-    ["tables-db", "create-index", ...messages, "--key", "profile-message-time", "--type", "key", "--columns", "profileId", "timestampMs", "--orders", "ASC", "DESC"]);
+  ensureInteger("messages", messages, "attachmentSize", false);
+  for (const endpoint of ["from", "to"]) ensure(`messages ${endpoint}/time index`,
+    ["tables-db", "get-index", ...messages, "--key", `${endpoint}-time`],
+    ["tables-db", "create-index", ...messages, "--key", `${endpoint}-time`, "--type", "key", "--columns", endpoint, "timestampMs", "--orders", "ASC", "DESC"]);
   ensure("messages identity index",
-    ["tables-db", "get-index", ...messages, "--key", "profile-message-id"],
-    ["tables-db", "create-index", ...messages, "--key", "profile-message-id", "--type", "unique", "--columns", "profileId", "messageUuid"]);
+    ["tables-db", "get-index", ...messages, "--key", "message-id"],
+    ["tables-db", "create-index", ...messages, "--key", "message-id", "--type", "unique", "--columns", "messageUuid"]);
 
   const sensorSamples = ensureProfileTable(config.sensorSampleTableId, "Mobile sensor samples");
   ensureString("sensor samples", sensorSamples, "profileId", 36);

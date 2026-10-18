@@ -67,6 +67,11 @@ export type StoredMessage = {
   retryOfUuid: string;
   lastAttemptAtMs: number;
   deliveryState: string;
+  attachmentFileId: string;
+  attachmentKind: "" | "voice" | "image";
+  attachmentName: string;
+  attachmentMimeType: string;
+  attachmentSize: number;
 };
 
 export type StoredSensorSample = EdgezSensorSample & {
@@ -91,7 +96,8 @@ export type StoredProvisioningRequest = ProvisioningRequestDetails & {
 };
 
 export type MessageDeliveryMetadata = Partial<Pick<StoredMessage,
-  "retryCount" | "retryOfUuid" | "lastAttemptAtMs" | "deliveryState"
+  "retryCount" | "retryOfUuid" | "lastAttemptAtMs" | "deliveryState" |
+  "attachmentFileId" | "attachmentKind" | "attachmentName" | "attachmentMimeType" | "attachmentSize"
 >>;
 
 type ProfileRow = {
@@ -149,6 +155,11 @@ type MessageRow = {
   retry_of_uuid: string;
   last_attempt_at_ms: number;
   delivery_state: string;
+  attachment_file_id: string;
+  attachment_kind: StoredMessage["attachmentKind"];
+  attachment_name: string;
+  attachment_mime_type: string;
+  attachment_size: number;
 };
 
 type SensorSampleRow = {
@@ -297,6 +308,11 @@ function messageFromRow(row: MessageRow): StoredMessage {
     retryOfUuid: row.retry_of_uuid,
     lastAttemptAtMs: row.last_attempt_at_ms,
     deliveryState: row.delivery_state,
+    attachmentFileId: row.attachment_file_id,
+    attachmentKind: row.attachment_kind,
+    attachmentName: row.attachment_name,
+    attachmentMimeType: row.attachment_mime_type,
+    attachmentSize: row.attachment_size,
   };
 }
 
@@ -404,6 +420,11 @@ async function database() {
           retry_of_uuid TEXT NOT NULL DEFAULT '',
           last_attempt_at_ms INTEGER NOT NULL DEFAULT 0,
           delivery_state TEXT NOT NULL DEFAULT '',
+          attachment_file_id TEXT NOT NULL DEFAULT '',
+          attachment_kind TEXT NOT NULL DEFAULT '',
+          attachment_name TEXT NOT NULL DEFAULT '',
+          attachment_mime_type TEXT NOT NULL DEFAULT '',
+          attachment_size INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (profile_id, message_uuid),
           FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
         );
@@ -511,6 +532,21 @@ async function database() {
       if (!messageColumnNames.has("delivery_state")) {
         await db.execAsync("ALTER TABLE messages ADD COLUMN delivery_state TEXT NOT NULL DEFAULT ''");
       }
+      if (!messageColumnNames.has("attachment_file_id")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN attachment_file_id TEXT NOT NULL DEFAULT ''");
+      }
+      if (!messageColumnNames.has("attachment_kind")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN attachment_kind TEXT NOT NULL DEFAULT ''");
+      }
+      if (!messageColumnNames.has("attachment_name")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN attachment_name TEXT NOT NULL DEFAULT ''");
+      }
+      if (!messageColumnNames.has("attachment_mime_type")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN attachment_mime_type TEXT NOT NULL DEFAULT ''");
+      }
+      if (!messageColumnNames.has("attachment_size")) {
+        await db.execAsync("ALTER TABLE messages ADD COLUMN attachment_size INTEGER NOT NULL DEFAULT 0");
+      }
       const profilesWithoutIdentity = await db.getAllAsync<{ id: string; name: string }>(
         "SELECT id, name FROM profiles WHERE identity_id = '' OR identity_private_key = '' OR identity_public_key = ''",
       );
@@ -525,7 +561,7 @@ async function database() {
           profile.id,
         );
       }
-      await db.execAsync("PRAGMA user_version = 10");
+      await db.execAsync("PRAGMA user_version = 11");
       return db;
     });
   }
@@ -834,8 +870,9 @@ export async function saveProfileMessage(
   await db.runAsync(
     `INSERT INTO messages
       (profile_id, message_uuid, peer_serial, text, mine, timestamp_ms, status, voice_bytes, voice_codec, duration_ms,
-       retry_count, retry_of_uuid, last_attempt_at_ms, delivery_state)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       retry_count, retry_of_uuid, last_attempt_at_ms, delivery_state, attachment_file_id, attachment_kind,
+       attachment_name, attachment_mime_type, attachment_size)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(profile_id, message_uuid) DO UPDATE SET
        peer_serial = excluded.peer_serial,
        text = excluded.text,
@@ -848,7 +885,12 @@ export async function saveProfileMessage(
        retry_count = excluded.retry_count,
        retry_of_uuid = excluded.retry_of_uuid,
        last_attempt_at_ms = excluded.last_attempt_at_ms,
-       delivery_state = excluded.delivery_state`,
+       delivery_state = excluded.delivery_state,
+       attachment_file_id = CASE WHEN excluded.attachment_file_id != '' THEN excluded.attachment_file_id ELSE messages.attachment_file_id END,
+       attachment_kind = CASE WHEN excluded.attachment_file_id != '' THEN excluded.attachment_kind ELSE messages.attachment_kind END,
+       attachment_name = CASE WHEN excluded.attachment_file_id != '' THEN excluded.attachment_name ELSE messages.attachment_name END,
+       attachment_mime_type = CASE WHEN excluded.attachment_file_id != '' THEN excluded.attachment_mime_type ELSE messages.attachment_mime_type END,
+       attachment_size = CASE WHEN excluded.attachment_file_id != '' THEN excluded.attachment_size ELSE messages.attachment_size END`,
     profileId,
     message.messageUuid,
     peerSerial,
@@ -863,6 +905,11 @@ export async function saveProfileMessage(
     delivery.retryOfUuid ?? "",
     delivery.lastAttemptAtMs ?? message.timestampMs,
     delivery.deliveryState ?? "",
+    delivery.attachmentFileId ?? "",
+    delivery.attachmentKind ?? "",
+    delivery.attachmentName ?? "",
+    delivery.attachmentMimeType ?? "",
+    delivery.attachmentSize ?? 0,
   );
 }
 

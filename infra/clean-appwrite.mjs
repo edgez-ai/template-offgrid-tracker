@@ -56,6 +56,11 @@ removeIfPresent(
 );
 await removeTimeseries();
 removeIfPresent(
+  "message attachments bucket",
+  ["storage", "get-bucket", "--bucket-id", config.messageAttachmentBucket.$id],
+  ["storage", "delete-bucket", "--bucket-id", config.messageAttachmentBucket.$id],
+);
+removeIfPresent(
   "telemetry database",
   ["tables-db", "get", "--database-id", config.databaseId],
   ["tables-db", "delete", "--database-id", config.databaseId],

@@ -209,7 +209,7 @@ export default function App() {
         listProfileMessages(runtimeProfile.id),
         listProfileSensorSamples(runtimeProfile.id),
         ]);
-        const remote = await syncCloudData(runtimeProfile.id, localDevices, localMessages, localSensorSamples);
+        const remote = await syncCloudData(runtimeProfile.id, runtimeProfile.identityId, localDevices, localMessages, localSensorSamples);
         for (const device of remote.devices) {
           const existing = localDevices.find((candidate) => candidate.id === device.id ||
             normalizedDeviceSerial(candidate.serial) === normalizedDeviceSerial(device.serial));
@@ -236,6 +236,9 @@ export default function App() {
           }, {
             retryCount: message.retryCount, retryOfUuid: message.retryOfUuid,
             lastAttemptAtMs: message.lastAttemptAtMs, deliveryState: message.deliveryState,
+            attachmentFileId: message.attachmentFileId, attachmentKind: message.attachmentKind,
+            attachmentName: message.attachmentName, attachmentMimeType: message.attachmentMimeType,
+            attachmentSize: message.attachmentSize,
           });
         }
         await saveProfileSensorSamples(runtimeProfile.id, remote.sensorSamples);
@@ -245,7 +248,7 @@ export default function App() {
         if (!active || activeProfileIdRef.current !== runtimeProfile.id) return;
         setProfileDevices(devices);
         setProfileMessages(messages);
-        await completeCloudDataSync(runtimeProfile.id, remote.syncedAt);
+        await completeCloudDataSync(runtimeProfile.identityId, remote.syncedAt);
         setCloudDataHydrated(true);
       } catch (caught) {
         if (active) setSettingsError(`Cloud sync failed: ${cloudErrorMessage(caught)}`);

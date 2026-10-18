@@ -59,7 +59,8 @@
         { "key": "meshId", "type": "varchar", "size": 32, "required": true, "array": false },
         { "key": "meshPassphrase", "type": "varchar", "size": 63, "required": true, "array": false, "encrypt": true },
         { "key": "teamId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "ownerId", "type": "varchar", "size": 36, "required": true, "array": false }
+        { "key": "ownerId", "type": "varchar", "size": 36, "required": true, "array": false },
+        { "key": "identityId", "type": "varchar", "size": 64, "required": false, "array": false }
       ],
       "indexes": [
         { "key": "team-id", "type": "key", "attributes": ["teamId"] }
@@ -99,19 +100,22 @@
     {
       "$id": "messages",
       "databaseId": "offgrid-tracker",
-      "name": "Profile messages",
+      "name": "Identity messages",
       "permissions": ["create(\"users\")"],
       "rowSecurity": true,
       "enabled": true,
       "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
         { "key": "messageUuid", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "peerSerial", "type": "varchar", "size": 64, "required": true, "array": false },
+        { "key": "from", "type": "varchar", "size": 64, "required": true, "array": false },
+        { "key": "to", "type": "varchar", "size": 64, "required": true, "array": false },
         { "key": "text", "type": "varchar", "size": 10000, "required": true, "array": false, "encrypt": true },
-        { "key": "mine", "type": "boolean", "required": true, "array": false },
         { "key": "timestampMs", "type": "integer", "required": true, "array": false },
         { "key": "status", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "voicePayload", "type": "varchar", "size": 100000, "required": true, "array": false, "encrypt": true },
+        { "key": "attachmentFileId", "type": "varchar", "size": 36, "required": false, "array": false },
+        { "key": "attachmentKind", "type": "varchar", "size": 16, "required": false, "array": false },
+        { "key": "attachmentName", "type": "varchar", "size": 128, "required": false, "array": false },
+        { "key": "attachmentMimeType", "type": "varchar", "size": 128, "required": false, "array": false },
+        { "key": "attachmentSize", "type": "integer", "required": false, "array": false },
         { "key": "voiceCodec", "type": "integer", "required": true, "array": false },
         { "key": "durationMs", "type": "integer", "required": true, "array": false },
         { "key": "retryCount", "type": "integer", "required": true, "array": false },
@@ -120,8 +124,9 @@
         { "key": "deliveryState", "type": "varchar", "size": 32, "required": true, "array": false }
       ],
       "indexes": [
-        { "key": "profile-message-time", "type": "key", "attributes": ["profileId", "timestampMs"], "orders": ["ASC", "DESC"] },
-        { "key": "profile-message-id", "type": "unique", "attributes": ["profileId", "messageUuid"] }
+        { "key": "from-time", "type": "key", "attributes": ["from", "timestampMs"], "orders": ["ASC", "DESC"] },
+        { "key": "to-time", "type": "key", "attributes": ["to", "timestampMs"], "orders": ["ASC", "DESC"] },
+        { "key": "message-id", "type": "unique", "attributes": ["messageUuid"] }
       ]
     },
     {
@@ -291,7 +296,21 @@
       ]
     }
   ],
-  "buckets": [],
+  "buckets": [
+    {
+      "$id": "message-attachments",
+      "name": "Message attachments",
+      "permissions": ["create(\"users\")"],
+      "fileSecurity": true,
+      "enabled": true,
+      "maximumFileSize": 10485760,
+      "allowedFileExtensions": ["opus", "ogg", "wav", "m4a", "aac", "jpg", "jpeg", "png", "webp", "gif", "bin"],
+      "compression": "none",
+      "encryption": true,
+      "antivirus": true,
+      "transformations": true
+    }
+  ],
   "functions": [
     {
       "$id": "offgrid-tracker",

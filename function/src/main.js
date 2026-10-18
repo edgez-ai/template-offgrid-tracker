@@ -379,10 +379,14 @@ async function syncMobileData(req, res, error) {
   if (!userId || !userJwt) return json(res, { error: "Authentication required" }, 401);
   const body = bodyOf(req);
   const profileId = typeof body.profileId === "string" ? body.profileId : "";
+  const identityId = typeof body.identityId === "string" ? body.identityId : "";
   const lastSyncAt = typeof body.lastSyncAt === "string" && !Number.isNaN(Date.parse(body.lastSyncAt))
     ? body.lastSyncAt : "";
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(profileId)) {
     return json(res, { error: "Invalid profile" }, 400);
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$/.test(identityId)) {
+    return json(res, { error: "Invalid identity" }, 400);
   }
   const groups = [body.devices, body.messages, body.sensorSamples];
   if (groups.some((group) => !Array.isArray(group) || group.length > 100) || JSON.stringify(body).length > 4000000) {
@@ -394,6 +398,7 @@ async function syncMobileData(req, res, error) {
     const userTables = new TablesDB(new Client().setEndpoint(endpoint).setProject(project).setJWT(userJwt));
     const profile = await userTables.getRow({ databaseId: DATABASE_ID, tableId: PROFILE_TABLE_ID, rowId: profileId });
     if (profile.ownerId !== userId && profile.teamId !== profileId) return json(res, { error: "Profile access denied" }, 403);
+    if (profile.identityId !== identityId) return json(res, { error: "Identity access denied" }, 403);
 
     const tables = new TablesDB(new Client().setEndpoint(endpoint).setProject(project).setKey(req.headers["x-appwrite-key"]));
     const permissions = profile.$permissions || [];
@@ -403,12 +408,14 @@ async function syncMobileData(req, res, error) {
         key: (item) => item.id,
         names: ["serial", "name", "kind", "firmwareTarget", "locationSource", "latitude", "longitude", "deviceType", "marker", "iconStyle", "userUuid", "lastSeenAt", "meshMacAddress", "userPublicKey", "updatedAt"],
         identify: (item) => ({ localId: item.id }),
+        profileScoped: true,
       },
       {
         tableId: MESSAGE_TABLE_ID, prefix: "m", items: body.messages,
         key: (item) => item.messageUuid,
-        names: ["messageUuid", "peerSerial", "text", "mine", "timestampMs", "status", "voicePayload", "voiceCodec", "durationMs", "retryCount", "retryOfUuid", "lastAttemptAtMs", "deliveryState"],
+        names: ["messageUuid", "from", "to", "text", "timestampMs", "status", "attachmentFileId", "attachmentKind", "attachmentName", "attachmentMimeType", "attachmentSize", "voiceCodec", "durationMs", "retryCount", "retryOfUuid", "lastAttemptAtMs", "deliveryState"],
         identify: () => ({}),
+        profileScoped: false,
       },
       {
         tableId: SENSOR_SAMPLE_TABLE_ID, prefix: "s", items: body.sensorSamples,
@@ -416,6 +423,7 @@ async function syncMobileData(req, res, error) {
         names: ["nodeNum", "timestampMs", "latitude", "longitude", "altitude", "temperature", "humidity", "pressure", "vibrationAverage", "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", "binaryLengthBytes"],
         identify: () => ({}),
         flatten: (item) => ({ nodeNum: item.nodeNum, timestampMs: item.timestampMs, ...(item.data || {}) }),
+        profileScoped: true,
       },
     ];
     for (const spec of specs) {
@@ -423,19 +431,31 @@ async function syncMobileData(req, res, error) {
         const item = spec.flatten ? spec.flatten(original) : original;
         const key = spec.key(original);
         if (typeof key !== "string" || !key || key.length > 200) return json(res, { error: "Invalid sync item" }, 400);
+        if (!spec.profileScoped && (typeof item.from !== "string" || typeof item.to !== "string" ||
+            (item.from !== identityId && item.to !== identityId))) {
+          return json(res, { error: "Message does not belong to this identity" }, 403);
+        }
         await tables.upsertRow({
           databaseId: DATABASE_ID,
           tableId: spec.tableId,
-          rowId: stableRowId(spec.prefix, `${profileId}:${key}`),
-          data: { profileId, ...spec.identify(original), ...fields(item, spec.names) },
+          rowId: stableRowId(spec.prefix, spec.profileScoped ? `${profileId}:${key}` : key),
+          data: { ...(spec.profileScoped ? { profileId } : {}), ...spec.identify(original), ...fields(item, spec.names) },
           permissions,
         });
       }
     }
 
-    const queries = [Query.equal("profileId", [profileId]), ...(lastSyncAt ? [Query.greaterThan("$updatedAt", lastSyncAt)] : []), Query.limit(5000)];
-    const [devices, messages, sensorSamples] = await Promise.all(specs.map((spec) =>
-      tables.listRows({ databaseId: DATABASE_ID, tableId: spec.tableId, queries, total: false })));
+    const changedSince = lastSyncAt ? [Query.greaterThan("$updatedAt", lastSyncAt)] : [];
+    const profileQueries = [Query.equal("profileId", [profileId]), ...changedSince, Query.limit(5000)];
+    const messageQueries = [Query.or([
+      Query.equal("from", [identityId]),
+      Query.equal("to", [identityId]),
+    ]), ...changedSince, Query.limit(5000)];
+    const [devices, messages, sensorSamples] = await Promise.all([
+      tables.listRows({ databaseId: DATABASE_ID, tableId: MOBILE_DEVICE_TABLE_ID, queries: profileQueries, total: false }),
+      tables.listRows({ databaseId: DATABASE_ID, tableId: MESSAGE_TABLE_ID, queries: messageQueries, total: false }),
+      tables.listRows({ databaseId: DATABASE_ID, tableId: SENSOR_SAMPLE_TABLE_ID, queries: profileQueries, total: false }),
+    ]);
     const clean = (row) => Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("$")));
     return json(res, {
       syncedAt,

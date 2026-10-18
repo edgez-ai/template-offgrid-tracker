@@ -14,6 +14,14 @@ When cloud access is enabled and online, the app runs an incremental sync every
 15 seconds. It sends only records newer than the profile's last successful sync
 to the authenticated Appwrite Function. The Function owns validation and cloud
 database writes, and returns remote changes for the app to merge into SQLite.
+Text stays in the message row. Voice and image bytes upload directly to the
+profile-secured `message-attachments` Storage bucket; the row contains only
+the file ID, kind, name, MIME type, and size.
+
+Cloud message rows are independent of local profiles. They use canonical
+`from` and `to` identity IDs, and sync requests return only rows where the
+active profile identity is one of those endpoints. The Function verifies that
+the requested identity matches the authenticated profile before querying.
 
 ## Data model
 

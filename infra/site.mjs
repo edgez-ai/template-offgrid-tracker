@@ -20,6 +20,7 @@ export function installSite() {
     ["OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID", config.mobileDeviceTableId],
     ["OFFGRID_TRACKER_MESSAGE_TABLE_ID", config.messageTableId],
     ["OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID", config.sensorSampleTableId],
+    ["OFFGRID_TRACKER_MESSAGE_ATTACHMENT_BUCKET_ID", config.messageAttachmentBucket.$id],
     ["OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", config.otaUpdateTableId],
   ];
   if (process.env.APPWRITE_VCS_REPOSITORY_URL) {

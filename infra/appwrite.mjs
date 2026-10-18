@@ -13,6 +13,7 @@ const profileTable = appwriteConfig.tables?.find((table) => table.$id === "profi
 const mobileDeviceTable = appwriteConfig.tables?.find((table) => table.$id === "mobile-devices");
 const messageTable = appwriteConfig.tables?.find((table) => table.$id === "messages");
 const sensorSampleTable = appwriteConfig.tables?.find((table) => table.$id === "sensor-samples");
+const messageAttachmentBucket = appwriteConfig.buckets?.find((bucket) => bucket.$id === "message-attachments");
 const otaUpdateTable = appwriteConfig.tables?.find((table) => table.$id === "ota-updates");
 const downlinkTable = appwriteConfig.tables?.find((table) => table.$id === "downlinks");
 const geofenceAreaTable = appwriteConfig.tables?.find((table) => table.$id === "geofence-areas");
@@ -24,7 +25,7 @@ const database = appwriteConfig.tablesDB?.find(
 const timeseriesStore = appwriteConfig.timeseriesStores?.find(
   (candidate) => candidate.enabled !== false && candidate.$id === "<PROJECT_ID>",
 );
-if (!database || !telemetryTable || !profileTable || !mobileDeviceTable || !messageTable || !sensorSampleTable || !otaUpdateTable || !downlinkTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
+if (!database || !telemetryTable || !profileTable || !mobileDeviceTable || !messageTable || !sensorSampleTable || !messageAttachmentBucket || !otaUpdateTable || !downlinkTable || !geofenceAreaTable || !geofenceRuleTable || !geofenceAlarmTable ||
     !timeseriesStore || !timeseriesStore.name || !Array.isArray(timeseriesStore.permissions) ||
     [profileTable, mobileDeviceTable, messageTable, sensorSampleTable, otaUpdateTable, downlinkTable, geofenceAreaTable, geofenceRuleTable, geofenceAlarmTable]
       .some((table) => table.databaseId !== database.$id)) {
@@ -71,6 +72,7 @@ export const config = {
   mobileDeviceTableId: mobileDeviceTable.$id,
   messageTableId: messageTable.$id,
   sensorSampleTableId: sensorSampleTable.$id,
+  messageAttachmentBucket,
   otaUpdateTableId: otaUpdateTable.$id,
   downlinkTableId: downlinkTable.$id,
   geofenceAreaTableId: geofenceAreaTable.$id,
