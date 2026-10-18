@@ -40,15 +40,22 @@ jobs:
           SELECTED_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           set -euo pipefail
+          targets='[
+            {"environment":"heltec-hc33","label":"HT-HC33","artifact":"ht-hc33","image":"firmware.factory.bin","output":"offgrid-tracker-ht-hc33.bin"},
+            {"environment":"edgez-nrf54l15-fgh200m-companion","label":"nRF54L15 companion","artifact":"nrf54l15-companion","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-companion.hex"},
+            {"environment":"edgez-nrf54l15-fgh200m-sensor","label":"nRF54L15 sensor","artifact":"nrf54l15-sensor","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-sensor.hex"}
+          ]'
           if [[ "$SELECTED_ENVIRONMENT" == "all" ]]; then
-            matrix='{"environment":["heltec-hc33","edgez-nrf54l15-fgh200m-companion","edgez-nrf54l15-fgh200m-sensor"]}'
+            matrix="$(jq -cn --argjson include "$targets" '{include: $include}')"
           else
-            matrix="$(jq -cn --arg environment "$SELECTED_ENVIRONMENT" \
-              '{environment: [$environment]}')"
+            matrix="$(jq -cn --argjson targets "$targets" --arg environment "$SELECTED_ENVIRONMENT" \
+              '{include: [$targets[] | select(.environment == $environment)]}')"
+            test "$(jq '.include | length' <<< "$matrix")" -eq 1
           fi
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   build:
+    name: Build ${{ matrix.label }}
     needs: compliance
     strategy:
       fail-fast: false
@@ -87,6 +94,8 @@ jobs:
         shell: bash
         env:
           PIO_ENV: ${{ matrix.environment }}
+          SOURCE_IMAGE: ${{ matrix.image }}
+          OUTPUT_NAME: ${{ matrix.output }}
         run: |
           set -euo pipefail
           build_dir="firmware/.pio/build/$PIO_ENV"
@@ -94,10 +103,8 @@ jobs:
           test -d "$build_dir"
           mkdir -p "$artifact_dir/licenses"
 
-          find "$build_dir" -maxdepth 1 -type f \
-            \( -name '*.bin' -o -name '*.hex' -o -name '*.uf2' \) \
-            -exec cp '{}' "$artifact_dir/" ';'
-          test "$(find "$artifact_dir" -maxdepth 1 -type f | wc -l)" -gt 0
+          test -s "$build_dir/$SOURCE_IMAGE"
+          cp "$build_dir/$SOURCE_IMAGE" "$artifact_dir/$OUTPUT_NAME"
 
           cp FIRMWARE-LICENSING.md "$artifact_dir/"
           cp LICENSE "$artifact_dir/licenses/OFFGRID-TRACKER-APACHE-2.0"
@@ -120,7 +127,7 @@ jobs:
           } > "$artifact_dir/SOURCE-MANIFEST.txt"
       - uses: actions/upload-artifact@v6
         with:
-          name: offgrid-tracker-${{ matrix.environment }}
+          name: offgrid-tracker-${{ matrix.artifact }}
           path: dist/firmware/${{ matrix.environment }}/
           if-no-files-found: error
           retention-days: 7
