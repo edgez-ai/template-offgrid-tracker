@@ -175,6 +175,24 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .cloud-row small, .cloud-row time { color: #718783; font-size: 8px; }
 .cloud-row time { flex: none; }
 
+.messages-dashboard { padding: 42px 0 60px; }
+.messages-dashboard h1 { font-size: clamp(38px, 4vw, 56px); }
+.conversation-list { display: grid; gap: 16px; }
+.conversation-card { overflow: hidden; border: 1px solid #cfddda; border-radius: 20px; background: #f7faf9; box-shadow: 0 18px 44px rgb(9 46 53 / 7%); }
+.conversation-card > header { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 20px; border-bottom: 1px solid #d8e4e1; background: white; }
+.conversation-card > header div { display: grid; gap: 3px; }
+.conversation-card > header span { color: #718783; font-size: 8px; font-weight: 900; letter-spacing: .8px; }
+.conversation-card > header strong { color: #0a3037; font-size: 13px; overflow-wrap: anywhere; }
+.conversation-card > header time { color: #718783; font-size: 9px; }
+.conversation-card > div { display: grid; gap: 9px; padding: 16px; }
+.message-row { width: min(720px, 88%); padding: 13px 15px; border: 1px solid #d8e4e1; border-radius: 14px; background: white; }
+.message-row.mine { justify-self: end; border-color: #a9d8d3; background: #e9f7f5; }
+.message-row > div, .message-row footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.message-row strong { color: #0a8c87; font-size: 9px; }
+.message-row time, .message-row footer { color: #718783; font-size: 8px; }
+.message-row p { margin: 8px 0; color: #173f42; font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.message-row footer a { color: #0a7c78; font-weight: 900; text-decoration: none; }
+
 .topology-loading { display: grid; min-height: 100vh; place-content: center; justify-items: center; gap: 12px; color: #59716f; }
 .topology-loading p { margin: 0; font-size: 12px; font-weight: 800; }
 .topology-dashboard { padding: 38px 0 60px; }
@@ -257,6 +275,7 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
   .auth-grid { min-height: calc(100vh - 64px); grid-template-columns: 1fr; padding: 38px 0; gap: 28px; }
   h1 { letter-spacing: -2px; }
   .dashboard { padding: 26px 0; }
+  .messages-dashboard { padding: 26px 0 40px; }
   .mobile-showing-detail .topbar, .mobile-showing-detail .heading-row { display: none; }
   .mobile-showing-detail .dashboard { padding-top: 0; }
   .heading-row { align-items: start; gap: 12px; margin-bottom: 22px; }
@@ -288,6 +307,8 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
   .chart { min-height: 190px; }
   .chart-empty { min-height: 190px; }
   .recent article header { display: grid; gap: 3px; }
+  .conversation-card > header { align-items: start; }
+  .message-row { width: 96%; }
   .cloud-sync-panel { padding: 17px; }
   .cloud-sync-panel > header { display: grid; align-items: start; }
   .cloud-sync-grid { grid-template-columns: 1fr; }
