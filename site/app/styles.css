@@ -87,9 +87,6 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .metric-card span { color: #69cfc7; font-size: 9px; font-weight: 900; letter-spacing: 1px; }
 .metric-card strong { font-size: 48px; line-height: 1.12; letter-spacing: -2px; }
 .metric-card small { color: #90aaa7; font-size: 10px; }
-.temperature-metric { margin-top: 18px; background: linear-gradient(135deg, #7a4b14, #a86418); }
-.temperature-metric span { color: #ffe0a3; }
-.temperature-metric small { color: #f2d4a8; }
 .range-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 22px 0 12px; }
 .range-row > span { color: #49635e; font-size: 9px; font-weight: 900; letter-spacing: .8px; }
 .range-row > div { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: #d8e5e2; }
