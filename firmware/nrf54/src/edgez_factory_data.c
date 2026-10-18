@@ -8,11 +8,8 @@
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
 #include <string.h>
 
-#include <psa/crypto.h>
-#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/crc.h>
@@ -43,93 +40,25 @@ static uint32_t record_crc(const struct edgez_factory_record *record)
 
 static bool record_valid(const struct edgez_factory_record *record)
 {
+	static const uint8_t zero_key[EDGEZ_FACTORY_KEY_SIZE];
+
 	return record->magic == EDGEZ_FACTORY_MAGIC &&
 		record->version == EDGEZ_FACTORY_VERSION &&
 		record->length == sizeof(*record) &&
 		record->serial[0] != '\0' &&
 		memchr(record->serial, '\0', sizeof(record->serial)) != NULL &&
+		memcmp(record->public_key, zero_key, sizeof(zero_key)) != 0 &&
+		memcmp(record->private_key, zero_key, sizeof(zero_key)) != 0 &&
 		record->crc32 == record_crc(record);
-}
-
-static int create_identity(struct edgez_factory_record *record)
-{
-	uint8_t device_id[16];
-	ssize_t id_len = hwinfo_get_device_id(device_id, sizeof(device_id));
-	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
-	psa_key_id_t key_id = 0;
-	size_t public_len = 0;
-	size_t private_len = 0;
-	psa_status_t status;
-
-	if (id_len <= 0) {
-		return id_len < 0 ? (int)id_len : -ENODATA;
-	}
-	memset(record, 0, sizeof(*record));
-	record->magic = EDGEZ_FACTORY_MAGIC;
-	record->version = EDGEZ_FACTORY_VERSION;
-	record->length = sizeof(*record);
-	for (ssize_t index = 0; index < id_len && index < 16; ++index) {
-		snprintf(record->serial + index * 2U,
-			 sizeof(record->serial) - index * 2U, "%02X", device_id[index]);
-	}
-
-	status = psa_crypto_init();
-	if (status != PSA_SUCCESS) {
-		return -EIO;
-	}
-	psa_set_key_type(&attributes,
-		PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
-	psa_set_key_bits(&attributes, 255);
-	psa_set_key_usage_flags(&attributes,
-		PSA_KEY_USAGE_EXPORT | PSA_KEY_USAGE_DERIVE);
-	psa_set_key_algorithm(&attributes, PSA_ALG_ECDH);
-	status = psa_generate_key(&attributes, &key_id);
-	psa_reset_key_attributes(&attributes);
-	if (status == PSA_SUCCESS) {
-		status = psa_export_public_key(key_id, record->public_key,
-			sizeof(record->public_key), &public_len);
-	}
-	if (status == PSA_SUCCESS) {
-		status = psa_export_key(key_id, record->private_key,
-			sizeof(record->private_key), &private_len);
-	}
-	if (key_id != 0) {
-		(void)psa_destroy_key(key_id);
-	}
-	if (status != PSA_SUCCESS || public_len != EDGEZ_FACTORY_KEY_SIZE ||
-	    private_len != EDGEZ_FACTORY_KEY_SIZE) {
-		memset(record->public_key, 0, sizeof(record->public_key));
-		memset(record->private_key, 0, sizeof(record->private_key));
-		return -EIO;
-	}
-	record->crc32 = record_crc(record);
-	return 0;
-}
-
-static int store_record(const struct edgez_factory_record *record)
-{
-	const struct flash_area *area;
-	int rc = flash_area_open(FIXED_PARTITION_ID(factory_partition), &area);
-
-	if (rc != 0) {
-		return rc;
-	}
-	if (area->fa_size < sizeof(*record)) {
-		flash_area_close(area);
-		return -ENOSPC;
-	}
-	rc = flash_area_erase(area, 0, area->fa_size);
-	if (rc == 0) {
-		rc = flash_area_write(area, 0, record, sizeof(*record));
-	}
-	flash_area_close(area);
-	return rc;
 }
 
 int edgez_factory_data_init(void)
 {
 	const struct flash_area *area;
 	struct edgez_factory_record record = {0};
+
+	identity_ready = false;
+	memset(&cached_identity, 0, sizeof(cached_identity));
 	int rc = flash_area_open(FIXED_PARTITION_ID(factory_partition), &area);
 
 	if (rc != 0) {
@@ -141,20 +70,11 @@ int edgez_factory_data_init(void)
 		return rc;
 	}
 	if (!record_valid(&record)) {
-		rc = create_identity(&record);
-		if (rc != 0) {
-			LOG_ERR("factory identity generation failed rc=%d", rc);
-			return rc;
-		}
-		rc = store_record(&record);
-		if (rc != 0) {
-			LOG_ERR("factory identity write failed rc=%d", rc);
-			return rc;
-		}
-		LOG_INF("factory identity initialized serial=%s", record.serial);
-	} else {
-		LOG_INF("factory identity loaded serial=%s", record.serial);
+		memset(&record, 0, sizeof(record));
+		LOG_ERR("factory identity is blank or invalid; provision the factory partition");
+		return -ENOENT;
 	}
+	LOG_INF("factory identity loaded serial=%s", record.serial);
 	strcpy(cached_identity.serial, record.serial);
 	memcpy(cached_identity.public_key, record.public_key,
 	       sizeof(cached_identity.public_key));
@@ -163,6 +83,11 @@ int edgez_factory_data_init(void)
 	identity_ready = true;
 	memset(&record, 0, sizeof(record));
 	return 0;
+}
+
+bool edgez_factory_data_is_ready(void)
+{
+	return identity_ready;
 }
 
 int edgez_factory_data_get(struct edgez_factory_identity *identity)

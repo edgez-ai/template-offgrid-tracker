@@ -1,17 +1,26 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { Interface, Mime, Operation, edgezNodeDisplayName, edgezNodeId, edgezNodeOpensConversation, edgezPublicChannelNode, edgezPublicChannelPorts, encodeNetworkPacket } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { toByteArray } from "base64-js";
 import type { EdgezMeshSession, EdgezMeshState, EdgezSensorData } from "@edgez/react-native-sdk";
 import React, { useEffect, useMemo, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { SwipeableDeviceRow } from "./DeviceComponents";
+import { SwipeableDeviceRow, SwipeableListRow } from "./DeviceComponents";
 import { localMessageId, nodeNumFromSerial, normalizedDeviceSerial } from "./mesh-utils";
 import { displayedMessageStatus, isPeerOnline, peerLastSeenMs } from "./message-delivery";
-import { saveProfileMessage } from "./profile-store";
-import type { StoredDevice, StoredMessage } from "./profile-store";
+import { deleteProfileProvisioningRequest, markProvisioningRequestAccepted, profileIdentity, saveProfileDevice, saveProfileMessage } from "./profile-store";
+import type { StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
+import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
+import { applyProvisionedProfileExtensions, provisioningNodeAddress } from "./halow-provisioning";
+import { encryptProvisioningEnvelope } from "./halow-provisioning-crypto";
+import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes } from "./beacon-options";
+import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
+import { coordinatesFromLocation } from "./mesh-utils";
+import { ProfileLocationPicker } from "./ProfileScreens";
 
-type InboxTab = "channels" | "people" | "sensors";
+type InboxTab = "channels" | "people" | "sensors" | "discovered";
 type ConversationPeer = { id: string; name: string; serial: string; nodeNum: bigint | null; publicChannel: boolean; device: StoredDevice | null };
 
 const inboxTabStorageKey = "offgrid-tracker:last-inbox-tab:v1";
@@ -32,15 +41,19 @@ const sensorFields: ReadonlyArray<{ key: keyof EdgezSensorData; label: string; u
   { key: "longitude", label: "Longitude", unit: "°", decimals: 5 },
 ];
 
-export function MeshMessages({ visible, profileId, session, meshState, devices, messages, initialPeerSerial, onMessagesChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
+export function MeshMessages({ visible, profile, profileId, session, meshState, devices, messages, provisioningRequests, initialPeerSerial, onMessagesChanged, onDevicesChanged, onProvisioningRequestsChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
   visible: boolean;
+  profile: StoredProfile;
   profileId: string;
   session: EdgezMeshSession | null;
   meshState: EdgezMeshState | null;
   devices: StoredDevice[];
   messages: StoredMessage[];
+  provisioningRequests: StoredProvisioningRequest[];
   initialPeerSerial: string | null;
   onMessagesChanged: () => Promise<void>;
+  onDevicesChanged: () => Promise<void>;
+  onProvisioningRequestsChanged: () => Promise<void>;
   onResendMessage: (message: StoredMessage) => Promise<void>;
   onShowDevice: (device: StoredDevice) => void;
   onRemoveDevice: (device: StoredDevice) => void;
@@ -62,13 +75,32 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
   const [tab, setTab] = useState<InboxTab>("channels");
   const [peerSerial, setPeerSerial] = useState<string | null>(null);
   const [sensorId, setSensorId] = useState<string | null>(null);
+  const [requestId, setRequestId] = useState<string | null>(null);
   const [channelInfo, setChannelInfo] = useState(false);
   const [message, setMessage] = useState("");
   const [sending, setSending] = useState(false);
+  const [acceptingRequest, setAcceptingRequest] = useState(false);
   const [resendingUuid, setResendingUuid] = useState<string | null>(null);
   const [error, setError] = useState("");
+  const [requestName, setRequestName] = useState("");
+  const [requestLocationMode, setRequestLocationMode] = useState<"none" | "map" | "live">("none");
+  const [requestLocation, setRequestLocation] = useState("");
+  const [requestMapOpen, setRequestMapOpen] = useState(false);
+  const [requestIcon, setRequestIcon] = useState<BeaconIconType>("explorer");
+  const [requestColor, setRequestColor] = useState<BeaconIconColor>("blue");
   const selectedPeer = peerSerial ? peers.find((peer) => sameSerial(peer.serial, peerSerial)) ?? null : null;
   const selectedSensor = sensorId ? sensors.find((device) => device.id === sensorId) ?? null : null;
+  const selectedRequest = requestId ? provisioningRequests.find((request) => request.id === requestId) ?? null : null;
+
+  useEffect(() => {
+    if (!selectedRequest) return;
+    setRequestName(selectedRequest.serial);
+    setRequestLocationMode("none");
+    setRequestLocation("");
+    setRequestIcon("explorer");
+    setRequestColor("blue");
+  }, [selectedRequest?.id]);
+
   const selectedNode = selectedPeer?.nodeNum == null ? null : meshState?.nodes.get(selectedPeer.nodeNum) ?? null;
   const conversation = selectedPeer ? messages.filter((item) => !item.retryOfUuid && sameSerial(item.peerSerial, selectedPeer.serial)).sort((a, b) => a.timestampMs - b.timestampMs) : [];
   const sensorNodeNum = selectedSensor ? nodeNumFromSerial(selectedSensor.meshMacAddress || selectedSensor.serial) : null;
@@ -77,7 +109,7 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
   useEffect(() => {
     let mounted = true;
     void AsyncStorage.getItem(inboxTabStorageKey).then((storedTab) => {
-      if (mounted && (storedTab === "channels" || storedTab === "people" || storedTab === "sensors")) setTab(storedTab);
+      if (mounted && (storedTab === "channels" || storedTab === "people" || storedTab === "sensors" || storedTab === "discovered")) setTab(storedTab);
     }).catch(() => undefined);
     return () => { mounted = false; };
   }, []);
@@ -89,14 +121,14 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
     if (!initialPeerSerial) return;
     const sensor = sensors.find((device) => sameSerial(device.meshMacAddress || device.serial, initialPeerSerial));
     if (sensor) {
-      setTab("sensors"); setSensorId(sensor.id); setPeerSerial(null);
+      setTab("sensors"); setSensorId(sensor.id); setPeerSerial(null); setRequestId(null);
       void AsyncStorage.setItem(inboxTabStorageKey, "sensors").catch(() => undefined);
       return;
     }
     const peer = peers.find((item) => sameSerial(item.serial, initialPeerSerial));
     if (peer) {
       const peerTab = peer.publicChannel ? "channels" : "people";
-      setTab(peerTab); setPeerSerial(peer.serial); setSensorId(null);
+      setTab(peerTab); setPeerSerial(peer.serial); setSensorId(null); setRequestId(null);
       void AsyncStorage.setItem(inboxTabStorageKey, peerTab).catch(() => undefined);
     }
   }, [initialPeerSerial, visible]);
@@ -111,10 +143,10 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
   }, [messages]);
 
   const selectTab = (next: InboxTab) => {
-    setTab(next); setPeerSerial(null); setSensorId(null); setChannelInfo(false); setError("");
+    setTab(next); setPeerSerial(null); setSensorId(null); setRequestId(null); setChannelInfo(false); setError("");
     void AsyncStorage.setItem(inboxTabStorageKey, next).catch(() => undefined);
   };
-  const closeDetail = () => { setPeerSerial(null); setSensorId(null); setChannelInfo(false); setError(""); };
+  const closeDetail = () => { setPeerSerial(null); setSensorId(null); setRequestId(null); setChannelInfo(false); setError(""); };
 
   const send = async () => {
     const text = message.trim();
@@ -150,10 +182,146 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
     }
   };
 
+  const acceptProvisioningRequest = async () => {
+    if (!selectedRequest || !session || acceptingRequest) return;
+    const channel = channelsForCountry(profile.country)
+      .find(({ number }) => number === profile.halowChannel);
+    if (!channel) {
+      setError("The active profile has no valid HaLow channel.");
+      return;
+    }
+    setAcceptingRequest(true);
+    setError("");
+    try {
+      const name = requestName.trim();
+      if (!name) throw new Error("Enter a device name.");
+      if (name.length > 64) throw new Error("The device name must not exceed 64 characters.");
+      const coordinates = requestLocationMode === "map" ? coordinatesFromLocation(requestLocation) : null;
+      if (requestLocationMode === "map" && !coordinates) throw new Error("Choose a valid device location.");
+      const from = meshState?.status?.macAddress;
+      if (!from) throw new Error("Local HaLow address is not ready.");
+      const to = BigInt(selectedRequest.nodeNum);
+      const identity = profileIdentity(profile);
+      const encodedProfile = encodeNetworkPacket({
+        from,
+        to,
+        operation: Operation.request,
+        interface: Interface.halow,
+        init: {
+          countryCode: profile.country,
+          meshId: profile.meshId,
+          passphrase: profile.meshPassphrase,
+          maxHop: 4,
+          userIdHigh: BigInt(selectedRequest.userIdHigh),
+          userIdLow: BigInt(selectedRequest.userIdLow),
+          userName: name,
+          userPublicKey: toByteArray(selectedRequest.userPublicKey),
+          marker: requestColor,
+          hasLocation: Boolean(coordinates),
+          latitude: coordinates?.latitude ?? 0,
+          longitude: coordinates?.longitude ?? 0,
+          meshBandwidthMhz: bandwidthForChannel(channel),
+          meshFrequencyKhz: Math.round(channel.frequencyMHz * 1000),
+        },
+      });
+      const innerPacket = applyProvisionedProfileExtensions(encodedProfile, {
+        deviceGpsEnabled: requestLocationMode === "live",
+        iconStyle: requestIcon,
+      });
+      const encrypted = encryptProvisioningEnvelope({
+        from,
+        to,
+        senderPrivateKey: identity.privateKey,
+        senderPublicKey: identity.publicKey,
+        recipientPublicKey: toByteArray(selectedRequest.userPublicKey),
+        plaintext: innerPacket,
+      });
+      const messageId = localMessageId();
+      const packet = encodeNetworkPacket({
+        from,
+        to,
+        operation: Operation.request,
+        interface: Interface.halow,
+        msg: {
+          messageIdHigh: messageId.high,
+          messageIdLow: messageId.low,
+          sequence: 1,
+          mime: Mime.binary,
+          payload: encrypted,
+        },
+      });
+      await session.sdk.transport.invoke("sendPacket", {
+        label: `Accept zero-touch sensor ${selectedRequest.serial}`,
+        packet: Array.from(packet),
+        waitForDrainMs: 3000,
+      });
+      await saveProfileDevice({
+        profileId,
+        serial: selectedRequest.serial,
+        name,
+        kind: "nrf54",
+        firmwareTarget: "edgez-nrf54l15-fgh200m-sensor",
+        locationSource: requestLocationMode === "live" ? "gps" : requestLocationMode,
+        latitude: coordinates?.latitude ?? null,
+        longitude: coordinates?.longitude ?? null,
+        deviceType: "sensor",
+        marker: requestColor,
+        iconStyle: requestIcon,
+        userUuid: `${selectedRequest.userIdHigh}:${selectedRequest.userIdLow}`,
+        lastSeenAt: selectedRequest.lastSeenAt,
+        meshMacAddress: provisioningNodeAddress(selectedRequest.nodeNum),
+        userPublicKey: selectedRequest.userPublicKey,
+      });
+      await markProvisioningRequestAccepted(profileId, selectedRequest.id);
+      await onDevicesChanged();
+      await onProvisioningRequestsChanged();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not accept the provisioning request.");
+    } finally {
+      setAcceptingRequest(false);
+    }
+  };
+
+  const removeProvisioningRequest = (request: StoredProvisioningRequest) => {
+    Alert.alert(
+      "Remove discovery?",
+      `${request.serial} will be removed from this profile. It can appear again if the sensor sends another provisioning request.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => {
+            void (async () => {
+              setError("");
+              await deleteProfileProvisioningRequest(profileId, request.id);
+              if (requestId === request.id) setRequestId(null);
+              await onProvisioningRequestsChanged();
+            })().catch((caught) => {
+              setError(caught instanceof Error ? caught.message : "Could not remove the discovery request.");
+            });
+          },
+        },
+      ],
+    );
+  };
+
+  if (requestMapOpen) {
+    return <Modal visible={visible} animationType="slide" onRequestClose={() => setRequestMapOpen(false)}>
+      <ProfileLocationPicker
+        location={requestLocation}
+        country={profile.country}
+        subject="device"
+        onCancel={() => setRequestMapOpen(false)}
+        onSelect={(location) => { setRequestLocation(location); setRequestLocationMode("map"); setRequestMapOpen(false); }}
+      />
+    </Modal>;
+  }
+
   return <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
     <SafeAreaView style={styles.page}>
       <View style={styles.header}>
-        <View><Text style={styles.eyebrow}>OFFGRID</Text><Text style={styles.title}>{selectedPeer?.name ?? selectedSensor?.name ?? "Messages"}</Text></View>
+        <View><Text style={styles.eyebrow}>OFFGRID</Text><Text style={styles.title}>{selectedPeer?.name ?? selectedSensor?.name ?? selectedRequest?.serial ?? "Messages"}</Text></View>
         <View style={styles.headerActions}>
           {selectedPeer || selectedSensor ? <Pressable style={styles.iconButton} onPress={() => {
             const device = selectedPeer?.device ?? selectedSensor;
@@ -163,19 +331,19 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
         </View>
       </View>
 
-      {!selectedPeer && !selectedSensor ? <View style={styles.tabs}>{(["channels", "people", "sensors"] as const).map((item) => <Pressable key={item} style={[styles.tab, tab === item && styles.activeTab]} onPress={() => selectTab(item)} accessibilityRole="tab" accessibilityState={{ selected: tab === item }}><Text style={[styles.tabText, tab === item && styles.activeTabText]}>{item.toUpperCase()}</Text></Pressable>)}</View> : null}
+      {!selectedPeer && !selectedSensor && !selectedRequest ? <View style={styles.tabs}>{(["channels", "people", "sensors", "discovered"] as const).map((item) => <Pressable key={item} style={[styles.tab, tab === item && styles.activeTab]} onPress={() => selectTab(item)} accessibilityRole="tab" accessibilityState={{ selected: tab === item }}><Text style={[styles.tabText, tab === item && styles.activeTabText]}>{item.toUpperCase()}</Text></Pressable>)}</View> : null}
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
-        {!selectedPeer && !selectedSensor && tab === "channels" ? <View style={styles.list}>{channels.map((peer) => <ChannelRow key={peer.id} peer={peer} latest={latestBySerial.get(normalizedDeviceSerial(peer.serial))} onOpen={() => setPeerSerial(peer.serial)} />)}</View> : null}
+        {!selectedPeer && !selectedSensor && !selectedRequest && tab === "channels" ? <View style={styles.list}>{channels.map((peer) => <ChannelRow key={peer.id} peer={peer} latest={latestBySerial.get(normalizedDeviceSerial(peer.serial))} onOpen={() => setPeerSerial(peer.serial)} />)}</View> : null}
 
-        {!selectedPeer && !selectedSensor && tab === "people" ? people.length ? <View style={styles.list}>{people.map((device) => {
+        {!selectedPeer && !selectedSensor && !selectedRequest && tab === "people" ? people.length ? <View style={styles.list}>{people.map((device) => {
           const serial = device.meshMacAddress || device.serial;
           const latest = latestBySerial.get(normalizedDeviceSerial(serial));
           const lastSeen = peerLastSeenMs(serial, devices, meshState);
           return <SwipeableDeviceRow key={device.id} device={device} icon="person-outline" subtitle={latest?.text || "Start a mesh conversation"} meta={lastSeenLabel(lastSeen, isPeerOnline(serial, devices, meshState))} badge={latest?.mine ? displayedMessageStatus(latest).toUpperCase() : undefined} onOpen={() => setPeerSerial(serial)} onRemove={onRemoveDevice} />;
         })}</View> : <EmptyState icon="people-outline" title="No people discovered" text="People appear here after their beacon reaches this profile. They remain available before the first message." /> : null}
 
-        {!selectedPeer && !selectedSensor && tab === "sensors" ? sensors.length ? <View style={styles.list}>{sensors.map((device) => {
+        {!selectedPeer && !selectedSensor && !selectedRequest && tab === "sensors" ? sensors.length ? <View style={styles.list}>{sensors.map((device) => {
           const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
           const deviceSamples = nodeNum === null ? [] : meshState?.sensorSamples.get(nodeNum) ?? [];
           const latest = deviceSamples[deviceSamples.length - 1];
@@ -183,6 +351,18 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
           const lastSeen = peerLastSeenMs(serial, devices, meshState);
           return <SwipeableDeviceRow key={device.id} device={device} icon="pulse-outline" subtitle={latest ? sensorSummary(latest.data) : "No sensor data yet"} meta={lastSeenLabel(lastSeen, isPeerOnline(serial, devices, meshState))} badge={deviceSamples.length ? `${deviceSamples.length} SAMPLE${deviceSamples.length === 1 ? "" : "S"}` : undefined} onOpen={() => setSensorId(device.id)} onRemove={onRemoveDevice} />;
         })}</View> : <EmptyState icon="pulse-outline" title="No sensors discovered" text="Sensors and other mesh devices appear here after their beacon reaches this profile." /> : null}
+
+        {!selectedPeer && !selectedSensor && !selectedRequest && tab === "discovered" ? provisioningRequests.length ? <View style={styles.list}>{provisioningRequests.map((request) => <SwipeableListRow
+          key={request.id}
+          accessibilityName={request.serial}
+          icon="radio-outline"
+          name={request.serial}
+          subtitle={provisioningNodeAddress(request.nodeNum)}
+          meta={`LAST SEEN ${timestamp(Date.parse(request.lastSeenAt))}`}
+          badge={request.status === "accepted" ? "ACCEPTED" : "WAITING"}
+          onOpen={() => setRequestId(request.id)}
+          onRemove={() => removeProvisioningRequest(request)}
+        />)}</View> : <EmptyState icon="radio-outline" title="No sensors waiting" text="Unprovisioned HaLow sensors appear here when a companion receives their zero-touch request." /> : null}
 
         {selectedPeer ? <>
           <BackButton label={tab} onPress={closeDetail} />
@@ -214,6 +394,55 @@ export function MeshMessages({ visible, profileId, session, meshState, devices, 
             <Text style={styles.sampleTime}>Latest sample · {timestamp(samples[samples.length - 1].timestampMs)}</Text>
           </View>}
         </> : null}
+
+        {selectedRequest ? <>
+          <BackButton label="discovered" onPress={closeDetail} />
+          <View style={styles.infoCard}>
+            <View style={styles.infoIcon}><Ionicons name="radio-outline" size={28} color="#0a8c87" /></View>
+            <Text style={styles.infoTitle}>{selectedRequest.serial}</Text>
+            <Text style={styles.muted}>Zero-touch Wi-Fi HaLow provisioning request</Text>
+            <InfoRow label="HALOW ADDRESS" value={provisioningNodeAddress(selectedRequest.nodeNum)} />
+            <InfoRow label="FIRST SEEN" value={timestamp(Date.parse(selectedRequest.firstSeenAt))} />
+            <InfoRow label="LAST SEEN" value={timestamp(Date.parse(selectedRequest.lastSeenAt))} />
+            <InfoRow label="PUBLIC KEY" value={`${selectedRequest.userPublicKey.slice(0, 12)}…`} />
+            <InfoRow label="STATUS" value={selectedRequest.status.toUpperCase()} />
+          </View>
+          <View style={styles.setupCard}>
+            <Text style={styles.setupTitle}>SENSOR PROFILE</Text>
+            <TextInput
+              style={styles.setupInput}
+              value={requestName}
+              onChangeText={setRequestName}
+              maxLength={64}
+              placeholder="Device name"
+              placeholderTextColor="#8aa09d"
+            />
+            <Text style={styles.setupLabel}>LOCATION</Text>
+            <View style={styles.choiceRow}>
+              <ChoiceButton label="OFF" selected={requestLocationMode === "none"} onPress={() => { setRequestLocationMode("none"); setRequestLocation(""); }} />
+              <ChoiceButton label="MAP" selected={requestLocationMode === "map"} onPress={() => setRequestMapOpen(true)} />
+              <ChoiceButton label="LIVE" selected={requestLocationMode === "live"} onPress={() => { setRequestLocationMode("live"); setRequestLocation(""); }} />
+            </View>
+            {requestLocationMode === "map" && requestLocation ? <Text style={styles.locationValue}>{requestLocation}</Text> : null}
+            {requestLocationMode === "live" ? <Text style={styles.locationValue}>Uses the device L76K GPS</Text> : null}
+            <Text style={styles.setupLabel}>ICON</Text>
+            <View style={styles.iconGrid}>
+              {beaconIconTypes.map((icon) => <Pressable key={icon} style={[styles.iconChoice, requestIcon === icon && styles.iconChoiceSelected]} onPress={() => setRequestIcon(icon)} accessibilityRole="radio" accessibilityState={{ selected: requestIcon === icon }} accessibilityLabel={icon}>
+                <MaterialCommunityIcons name={beaconIconNames[icon]} size={21} color={requestIcon === icon ? "white" : "#0a8c87"} />
+              </Pressable>)}
+            </View>
+            <Text style={styles.setupLabel}>COLOR</Text>
+            <View style={styles.colorRow}>
+              {beaconIconColors.map((color) => <Pressable key={color} style={[styles.colorChoice, { backgroundColor: beaconColorValues[color] }, requestColor === color && styles.colorChoiceSelected]} onPress={() => setRequestColor(color)} accessibilityRole="radio" accessibilityState={{ selected: requestColor === color }} accessibilityLabel={color} />)}
+            </View>
+            <View style={styles.encryptionNotice}><Ionicons name="lock-closed" size={14} color="#0a8c87" /><Text style={styles.encryptionText}>Mesh ID, passphrase, channel and sensor settings are encrypted for this sensor.</Text></View>
+          </View>
+          <Pressable style={[styles.send, (acceptingRequest || !meshState?.bleReady) && styles.disabled]} disabled={acceptingRequest || !meshState?.bleReady} onPress={() => void acceptProvisioningRequest()} accessibilityRole="button">
+            {acceptingRequest ? <ActivityIndicator color="white" /> : <Text style={styles.sendText}>{selectedRequest.status === "accepted" ? "SEND PROFILE AGAIN" : "ACCEPT AND PROVISION"}</Text>}
+          </Pressable>
+          {!meshState?.bleReady ? <Text style={styles.error}>BLE control channel is not ready.</Text> : null}
+          {error ? <Text style={styles.error}>{error}</Text> : null}
+        </> : null}
       </ScrollView>
     </SafeAreaView>
   </Modal>;
@@ -225,6 +454,7 @@ function ChannelRow({ peer, latest, onOpen }: { peer: ConversationPeer; latest?:
 function BackButton({ label, onPress }: { label: string; onPress: () => void }) { return <Pressable style={styles.back} onPress={onPress} accessibilityRole="button"><Ionicons name="chevron-back" size={18} color="#0a8c87" /><Text style={styles.actionText}>{label.toUpperCase()}</Text></Pressable>; }
 function EmptyState({ icon, title, text }: { icon: React.ComponentProps<typeof Ionicons>["name"]; title: string; text: string }) { return <View style={styles.empty}><Ionicons name={icon} size={25} color="#0a8c87" /><Text style={styles.emptyTitle}>{title}</Text><Text style={styles.muted}>{text}</Text></View>; }
 function InfoRow({ label, value }: { label: string; value: string }) { return <View style={styles.infoRow}><Text style={styles.infoLabel}>{label}</Text><Text style={styles.infoValue}>{value}</Text></View>; }
+function ChoiceButton({ label, selected, loading, onPress }: { label: string; selected: boolean; loading?: boolean; onPress: () => void }) { return <Pressable style={[styles.choiceButton, selected && styles.choiceButtonSelected]} onPress={onPress} accessibilityRole="radio" accessibilityState={{ selected }}>{loading ? <ActivityIndicator size="small" color={selected ? "white" : "#0a8c87"} /> : <Text style={[styles.choiceText, selected && styles.choiceTextSelected]}>{label}</Text>}</Pressable>; }
 function sameSerial(a: string, b: string) { return normalizedDeviceSerial(a) === normalizedDeviceSerial(b); }
 function timestamp(value: number) { return new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
 function lastSeenLabel(value: number, online: boolean) { return value > 0 ? `${online ? "ONLINE · " : ""}LAST SEEN ${timestamp(value)}` : "LAST SEEN UNKNOWN"; }
@@ -249,5 +479,6 @@ const styles = StyleSheet.create({
   conversation: { minHeight: 220, padding: 12, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 8 }, bubble: { maxWidth: "86%", paddingHorizontal: 12, paddingVertical: 9, borderRadius: 12, gap: 3 }, mine: { alignSelf: "flex-end", backgroundColor: "#ccefeb" }, peer: { alignSelf: "flex-start", backgroundColor: "#edf3f2" }, messageText: { color: "#0a3037", fontSize: 14, lineHeight: 19 }, messageFooter: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, messageStatus: { flexShrink: 1, color: "#718783", fontSize: 8, textTransform: "uppercase" }, resendButton: { minHeight: 30, paddingHorizontal: 8, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 3 }, resendText: { color: "#0a8c87", fontSize: 8, fontWeight: "900", letterSpacing: 0.5 },
   input: { minHeight: 72, maxHeight: 140, padding: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 12, color: "#0a3037", backgroundColor: "white", textAlignVertical: "top" }, send: { minHeight: 52, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" }, sendText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: 0.8 }, disabled: { opacity: 0.5 }, error: { color: "#b9472f", fontSize: 11, textAlign: "center", marginTop: 4 },
   infoCard: { padding: 22, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 16, backgroundColor: "white", alignItems: "center", gap: 8 }, infoIcon: { width: 62, height: 62, borderRadius: 31, backgroundColor: "#e9f7f5", alignItems: "center", justifyContent: "center", marginBottom: 4 }, infoTitle: { color: "#0a3037", fontSize: 21, fontWeight: "900" }, infoRow: { width: "100%", minHeight: 48, marginTop: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: "#dce6e5", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }, infoLabel: { color: "#718783", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 }, infoValue: { flex: 1, color: "#0a3037", fontSize: 11, fontWeight: "700", textAlign: "right" },
+  setupCard: { padding: 16, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 16, backgroundColor: "white", gap: 11 }, setupTitle: { color: "#0a3037", fontSize: 13, fontWeight: "900", letterSpacing: 0.7 }, setupLabel: { color: "#718783", fontSize: 9, fontWeight: "900", letterSpacing: 0.7, marginTop: 2 }, setupInput: { minHeight: 48, paddingHorizontal: 13, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 11, color: "#0a3037", backgroundColor: "#f7faf9" }, choiceRow: { flexDirection: "row", gap: 7 }, choiceButton: { flex: 1, minHeight: 40, borderWidth: 1, borderColor: "#bcd0cd", borderRadius: 10, alignItems: "center", justifyContent: "center" }, choiceButtonSelected: { borderColor: "#0a8c87", backgroundColor: "#0a8c87" }, choiceText: { color: "#59716f", fontSize: 9, fontWeight: "900" }, choiceTextSelected: { color: "white" }, locationValue: { color: "#59716f", fontSize: 10 }, iconGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 }, iconChoice: { width: 40, height: 40, borderWidth: 1, borderColor: "#bcd0cd", borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "#f7faf9" }, iconChoiceSelected: { borderColor: "#0a8c87", backgroundColor: "#0a8c87" }, colorRow: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, colorChoice: { width: 28, height: 28, borderRadius: 14, borderWidth: 2, borderColor: "white" }, colorChoiceSelected: { borderColor: "#0a3037", transform: [{ scale: 1.12 }] }, encryptionNotice: { padding: 10, borderRadius: 10, backgroundColor: "#e9f7f5", flexDirection: "row", alignItems: "center", gap: 8 }, encryptionText: { flex: 1, color: "#385753", fontSize: 10, lineHeight: 14 },
   sensorHero: { padding: 17, borderRadius: 14, backgroundColor: "#e9f7f5", flexDirection: "row", alignItems: "center", gap: 13 }, sensorHeroText: { flex: 1, gap: 3 }, sensorTitle: { color: "#0a3037", fontSize: 18, fontWeight: "900" }, statsGrid: { gap: 9 }, statCard: { padding: 15, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 5 }, statLabel: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 }, statValue: { color: "#0a3037", fontSize: 24, fontWeight: "900" }, statRange: { color: "#718783", fontSize: 9, lineHeight: 14 }, sampleTime: { color: "#718783", fontSize: 9, textAlign: "center", marginTop: 4 },
 });

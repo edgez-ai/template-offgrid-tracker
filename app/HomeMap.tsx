@@ -14,28 +14,34 @@ import { styles } from "./app-styles";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, nodeNumFromSerial } from "./mesh-utils";
 import { listProfileMessages } from "./profile-store";
-import type { StoredDevice, StoredMessage, StoredProfile } from "./profile-store";
+import type { StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
 
 export function HomeMap({
   profile,
   devices,
   messages,
+  provisioningRequests,
   bleStatus,
   meshLink,
   onAddDevice,
   onRemoveDevice,
   onMessagesChanged,
+  onDevicesChanged,
+  onProvisioningRequestsChanged,
   onResendMessage,
   onOpenSettings,
 }: {
   profile: StoredProfile;
   devices: StoredDevice[];
   messages: StoredMessage[];
+  provisioningRequests: StoredProvisioningRequest[];
   bleStatus: BleLinkStatus;
   meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;
   onAddDevice: () => void;
   onRemoveDevice: (device: StoredDevice) => void;
   onMessagesChanged: () => Promise<void>;
+  onDevicesChanged: () => Promise<void>;
+  onProvisioningRequestsChanged: () => Promise<void>;
   onResendMessage: (message: StoredMessage) => Promise<void>;
   onOpenSettings: () => void;
 }) {
@@ -55,7 +61,7 @@ export function HomeMap({
   const [currentLocation, setCurrentLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const locatedDevices = devices.filter((device) => device.latitude !== null && device.longitude !== null);
   const mapIconForDevice = (device: StoredDevice) => {
-    switch (device.deviceType.trim().toLowerCase()) {
+    switch ((device.iconStyle || device.deviceType).trim().toLowerCase()) {
       case "user":
       case "person":
       case "hiker":
@@ -264,13 +270,17 @@ export function HomeMap({
       />
       <MeshMessages
         visible={messagesOpen}
+        profile={profile}
         profileId={profile.id}
         session={meshLink?.session ?? null}
         meshState={meshLink?.state ?? null}
         devices={devices}
         messages={messages}
+        provisioningRequests={provisioningRequests}
         initialPeerSerial={conversationPeer}
         onMessagesChanged={onMessagesChanged}
+        onDevicesChanged={onDevicesChanged}
+        onProvisioningRequestsChanged={onProvisioningRequestsChanged}
         onResendMessage={onResendMessage}
         onShowDevice={setSelectedDevice}
         onRemoveDevice={onRemoveDevice}

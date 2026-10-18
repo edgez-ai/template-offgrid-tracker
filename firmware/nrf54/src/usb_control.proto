@@ -179,6 +179,7 @@ message Beacon {
   DeviceType device_type = 8;
   uint32 channel_number = 9;  // country-specific S1G receive channel
   bool sleeping = 10;
+  string icon_style = 11;
   GeoFence geo_fence = 100;
   repeated SensorData sensor_data = 101;  // only for beacon and sensor type
 }
@@ -217,6 +218,8 @@ message HaLowInitConfig {
   float longitude = 12;
   uint32 mesh_bandwidth_mhz = 13;
   uint32 mesh_frequency_khz = 14;
+  bool device_gps_enabled = 20;
+  string icon_style = 21;
 }
 
 message DeviceSettings {
@@ -248,6 +251,7 @@ message DeviceSettings {
   uint32 mesh_frequency_khz = 26;
   uint32 mesh_bandwidth_mhz = 27;
   bool device_gps_enabled = 28;
+  string icon_style = 29;
 }
 
 message ScriptConfig {

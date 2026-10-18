@@ -1,0 +1,6 @@
+// Run JLinkExe from the firmware/ directory after building the companion target.
+r
+loadfile .pio/build/edgez-nrf54l15-fgh200m-companion/firmware.hex
+r
+g
+q

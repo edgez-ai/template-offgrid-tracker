@@ -1,5 +1,6 @@
 ai.edgez.halow.Beacon.user_name type:FT_STATIC max_length:64
 ai.edgez.halow.Beacon.user_public_key type:FT_STATIC max_size:32
+ai.edgez.halow.Beacon.icon_style type:FT_STATIC max_length:16
 ai.edgez.halow.Beacon.sensor_data type:FT_STATIC max_count:9
 ai.edgez.halow.Peer.sensor_data type:FT_STATIC max_count:9
 ai.edgez.halow.Report.peers type:FT_STATIC max_count:6
@@ -15,6 +16,7 @@ ai.edgez.halow.HaLowInitConfig.passphrase type:FT_STATIC max_length:64
 ai.edgez.halow.HaLowInitConfig.user_name type:FT_STATIC max_length:64
 ai.edgez.halow.HaLowInitConfig.user_public_key type:FT_STATIC max_size:32
 ai.edgez.halow.HaLowInitConfig.marker type:FT_STATIC max_length:16
+ai.edgez.halow.HaLowInitConfig.icon_style type:FT_STATIC max_length:16
 ai.edgez.halow.DeviceSettings.mesh_id type:FT_STATIC max_length:32
 ai.edgez.halow.HaLowInterfaceStatus.firmware_version type:FT_STATIC max_length:32
 ai.edgez.halow.DeviceSettings.passphrase type:FT_STATIC max_length:64
@@ -25,6 +27,7 @@ ai.edgez.halow.DeviceSettings.user_public_key type:FT_STATIC max_size:32
 ai.edgez.halow.DeviceSettings.user_private_key type:FT_STATIC max_size:32
 ai.edgez.halow.DeviceSettings.uart_i2c_sensor_type type:FT_STATIC max_length:32
 ai.edgez.halow.DeviceSettings.rs485_sensor_type type:FT_STATIC max_length:32
+ai.edgez.halow.DeviceSettings.icon_style type:FT_STATIC max_length:16
 ai.edgez.halow.ScriptConfig.name type:FT_STATIC max_length:64
 ai.edgez.halow.ScriptConfig.chunk type:FT_STATIC max_size:220
 ai.edgez.halow.ScriptConfig.sensor_type type:FT_STATIC max_length:32

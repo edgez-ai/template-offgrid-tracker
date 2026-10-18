@@ -2,6 +2,7 @@ import "react-native-get-random-values";
 import { edgezNodeDisplayName, edgezNodeId, isEdgezPublicChannel } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { fromByteArray } from "base64-js";
+import { rememberedBeaconIcon } from "./halow-provisioning";
 import type { EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
 import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -16,6 +17,7 @@ import {
   initializeProfileStore,
   listProfileDevices,
   listProfileMessages,
+  listProfileProvisioningRequests,
   listProfiles,
   reconcileProfileMessageDelivery,
   saveProfileDevice,
@@ -23,7 +25,7 @@ import {
   setActiveProfile,
   updateProfile,
 } from "./profile-store";
-import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile } from "./profile-store";
+import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
 import { ActiveProfileBleLink } from "./ActiveProfileBleLink";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
 import { styles } from "./app-styles";
@@ -48,6 +50,7 @@ export default function App() {
   const [profile, setProfile] = useState<StoredProfile | null>(null);
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
   const [profileMessages, setProfileMessages] = useState<StoredMessage[]>([]);
+  const [provisioningRequests, setProvisioningRequests] = useState<StoredProvisioningRequest[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [sharedSettings, setSharedSettings] = useState<SharedProfileSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -77,6 +80,11 @@ export default function App() {
     const refreshedMessages = await listProfileMessages(runtimeProfile.id);
     if (activeProfileIdRef.current === runtimeProfile.id) setProfileMessages(refreshedMessages);
   }, [runtimeProfile?.id]);
+  const refreshProvisioningRequests = useCallback(async () => {
+    if (!runtimeProfile) return;
+    const refreshed = await listProfileProvisioningRequests(runtimeProfile.id);
+    if (activeProfileIdRef.current === runtimeProfile.id) setProvisioningRequests(refreshed);
+  }, [runtimeProfile?.id]);
   const { resendMessage } = useMessageDeliveryRetries({
     profileId: runtimeProfile?.id ?? null,
     session: currentMeshLink?.session ?? null,
@@ -89,11 +97,12 @@ export default function App() {
     setMeshLink({ profileId: runtimeProfile.id, ...value });
   }, [runtimeProfile?.id]);
 
-  const applyProfileData = (currentProfile: StoredProfile | null, devices: StoredDevice[], messages: StoredMessage[]) => {
+  const applyProfileData = (currentProfile: StoredProfile | null, devices: StoredDevice[], messages: StoredMessage[], requests: StoredProvisioningRequest[]) => {
     activeProfileIdRef.current = currentProfile?.id ?? null;
     setProfile(currentProfile);
     setProfileDevices(devices);
     setProfileMessages(messages);
+    setProvisioningRequests(requests);
   };
 
   const resetProfileRuntime = () => {
@@ -103,15 +112,16 @@ export default function App() {
     setMeshLink(null);
     setProfileDevices([]);
     setProfileMessages([]);
+    setProvisioningRequests([]);
   };
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
-    const [availableDevices, availableMessages] = currentProfile
-      ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
-      : [[], []];
+    const [availableDevices, availableMessages, availableRequests] = currentProfile
+      ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
+      : [[], [], []];
     setProfiles(availableProfiles);
-    applyProfileData(currentProfile, availableDevices, availableMessages);
+    applyProfileData(currentProfile, availableDevices, availableMessages, availableRequests);
     return currentProfile;
   };
 
@@ -132,15 +142,16 @@ export default function App() {
       }
       const currentProfile = await activeProfile();
       const settings = await loadSharedProfileSettings(currentProfile ?? availableProfiles[0]);
-      const [availableDevices, availableMessages] = currentProfile
-        ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id)])
-        : [[], []];
+      const [availableDevices, availableMessages, availableRequests] = currentProfile
+        ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
+        : [[], [], []];
       setProfiles(availableProfiles);
       activeProfileIdRef.current = currentProfile?.id ?? null;
       setProfile(currentProfile);
       setSharedSettings(settings);
       setProfileDevices(availableDevices);
       setProfileMessages(availableMessages);
+      setProvisioningRequests(availableRequests);
     })()
       .catch((caught) => setSettingsError(caught instanceof Error ? caught.message : "Could not open the local profile database."))
       .finally(() => setProfileLoaded(true));
@@ -152,7 +163,7 @@ export default function App() {
       .filter((node) => !isEdgezPublicChannel(node.nodeNum) && node.lastSeenMs > 0);
     if (!discovered.length) return;
     const fingerprint = `${profile.id}:` + discovered
-      .map((node) => `${node.nodeNum}:${node.lastSeenMs}:${node.latitude ?? ""}:${node.longitude ?? ""}`)
+      .map((node) => `${node.nodeNum}:${node.lastSeenMs}:${node.latitude ?? ""}:${node.longitude ?? ""}:${node.marker}:${node.deviceType}:${rememberedBeaconIcon(node.nodeNum) ?? ""}`)
       .sort()
       .join("|");
     if (persistedNodeFingerprint.current === fingerprint) return;
@@ -176,6 +187,7 @@ export default function App() {
             longitude: hasLocation ? node.longitude as number : existing?.longitude ?? null,
             deviceType: node.deviceType || existing?.deviceType || "Unspecified",
             marker: node.marker || existing?.marker || "default",
+            iconStyle: rememberedBeaconIcon(node.nodeNum) || existing?.iconStyle || "sensor",
             userUuid: node.userUuid || existing?.userUuid || "",
             lastSeenAt: new Date(node.lastSeenMs).toISOString(),
             meshMacAddress: edgezNodeId(node.nodeNum).toUpperCase(),
@@ -269,11 +281,11 @@ export default function App() {
                 const nextProfile = await deleteProfile(profile.id);
                 resetProfileRuntime();
                 const availableProfiles = await listProfiles();
-                const [availableDevices, availableMessages] = nextProfile
-                  ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id)])
-                  : [[], []];
+                const [availableDevices, availableMessages, availableRequests] = nextProfile
+                  ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id), listProfileProvisioningRequests(nextProfile.id)])
+                  : [[], [], []];
                 setProfiles(availableProfiles);
-                applyProfileData(nextProfile, availableDevices, availableMessages);
+                applyProfileData(nextProfile, availableDevices, availableMessages, availableRequests);
                 if (!nextProfile) setSettingsOpen(false);
               } catch (caught) {
                 setSettingsError(caught instanceof Error ? caught.message : "Could not delete the profile.");
@@ -329,6 +341,7 @@ export default function App() {
               iconColor={sharedSettings?.iconColor ?? "blue"}
               onStatusChange={setBleStatus}
               onMeshChange={handleMeshChange}
+              onProvisioningRequestsChanged={refreshProvisioningRequests}
             />
           ) : null}
           <HomeMap
@@ -336,6 +349,7 @@ export default function App() {
             profile={runtimeProfile}
             devices={profileDevices}
             messages={profileMessages}
+            provisioningRequests={provisioningRequests}
             bleStatus={bleStatus}
             meshLink={currentMeshLink}
             onAddDevice={() => setProvisioningOpen(true)}
@@ -343,6 +357,11 @@ export default function App() {
             onMessagesChanged={async () => {
               await refreshProfileMessages();
             }}
+            onDevicesChanged={async () => {
+              const refreshedDevices = await listProfileDevices(runtimeProfile.id);
+              if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+            }}
+            onProvisioningRequestsChanged={refreshProvisioningRequests}
             onResendMessage={resendMessage}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />

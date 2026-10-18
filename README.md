@@ -184,6 +184,44 @@ JLinkExe -device NRF54L15_M33 -if SWD -speed 4000 -SelectEmuBySN <JLINK_SN>
 At the J-Link prompt, reset, load
 `.pio/build/edgez-nrf54l15-fgh200m-sensor/firmware.hex`, reset again, and run
 the image. `O.K.` or `Contents already match` confirms flash verification.
+The reusable Commander files can run the same sequence directly:
+
+```sh
+cd firmware
+JLinkExe -device NRF54L15_M33 -if SWD -speed 4000 \
+  -SelectEmuBySN <JLINK_SN> \
+  -CommanderScript scripts/jlink/flash_fgh200m_sensor.jlink
+```
+
+Use `scripts/jlink/flash_fgh200m_companion.jlink` for the companion image.
+
+### nRF54 factory identity
+
+Each FGH200M needs an immutable serial number and X25519 keypair in its
+dedicated factory partition before zero-touch HaLow provisioning. Generate and
+program it independently of the application image:
+
+```sh
+firmware/scripts/provision_nrf54_factory.sh \
+  --serial FGH200M-000001 \
+  --jlink-serial <JLINK_SN> \
+  --output-dir .factory/FGH200M-000001
+```
+
+Pass `--private-key existing-x25519-private.pem` to import an existing key, or
+omit it to generate a new one. Use `--build-only` to create and inspect the
+image without touching hardware. The script writes and verifies only the 4 KiB
+factory partition at `0x165000`; normal profile reset and application flashing
+do not modify it. Keep `identity-private.pem` secret and backed up. Avoid a
+whole-chip erase after manufacturing because that also removes factory data.
+The factory write/verify sequence is committed as
+`firmware/scripts/jlink/factory_partition.jlink.in`; the shell script fills in
+the generated image path in a temporary copy.
+
+Firmware reads and validates this record once during boot. Provisioning packets
+always use the cached factory public key. If the sensor has no valid factory
+keypair, it leaves the MM8108 off and sleeps instead of advertising an
+undecryptable temporary identity.
 
 ### Factory reset
 

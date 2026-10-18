@@ -36,6 +36,7 @@
 #define EDGEZ_STATUS_INTERVAL_MS 5000U
 #define EDGEZ_INVALID_CONNECTION_HANDLE BLE_HS_CONN_HANDLE_NONE
 #define EDGEZ_BLE_NOTIFY_QUEUE_DEPTH 8U
+#define EDGEZ_PROVISIONING_CACHE_SLOTS 4U
 
 static const char *TAG = "edgez_ble";
 static uint8_t own_address_type;
@@ -51,6 +52,17 @@ static QueueHandle_t notify_queue;
 static TaskHandle_t status_task_handle;
 static uint8_t settings_reports_remaining;
 static bool mesh_init_in_progress;
+
+typedef struct {
+    bool valid;
+    uint64_t destination;
+    size_t length;
+    uint8_t packet[EDGEZ_MAX_PACKET_SIZE];
+} edgez_provisioning_cache_entry_t;
+
+static edgez_provisioning_cache_entry_t
+    provisioning_cache[EDGEZ_PROVISIONING_CACHE_SLOTS];
+static size_t provisioning_cache_next;
 
 typedef struct {
     uint16_t connection_handle;
@@ -70,6 +82,7 @@ typedef struct {
     uint8_t user_public_key[32];
     size_t user_public_key_len;
     ai_edgez_halow_MarkerColor marker;
+    char icon_style[17];
     bool share_location;
     float latitude;
     float longitude;
@@ -83,6 +96,7 @@ typedef struct {
 
 static edgez_control_state_t control_state = {
     .marker = ai_edgez_halow_MarkerColor_MARKER_BLUE,
+    .icon_style = "person",
     .max_hop = 4,
     .beacon_interval_seconds = 30,
 };
@@ -106,6 +120,74 @@ static uint64_t mac_to_u64(const uint8_t mac[6])
     }
     return value;
 }
+
+#if CONFIG_DAB_START_NETWORK_PACKET_RELAY
+static esp_err_t queue_unicast_packet(const uint8_t destination[6],
+                                      const uint8_t *packet,
+                                      size_t packet_len);
+
+static esp_err_t cache_provisioning_response(uint64_t destination,
+                                               const uint8_t *packet,
+                                               size_t packet_len)
+{
+    if (destination == 0 || packet == NULL || packet_len == 0 ||
+        packet_len > EDGEZ_MAX_PACKET_SIZE || state_lock == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    edgez_provisioning_cache_entry_t *entry = NULL;
+    for (size_t i = 0; i < EDGEZ_PROVISIONING_CACHE_SLOTS; ++i) {
+        if (provisioning_cache[i].valid &&
+            provisioning_cache[i].destination == destination) {
+            entry = &provisioning_cache[i];
+            break;
+        }
+    }
+    if (entry == NULL) {
+        entry = &provisioning_cache[provisioning_cache_next];
+        provisioning_cache_next =
+            (provisioning_cache_next + 1U) % EDGEZ_PROVISIONING_CACHE_SLOTS;
+    }
+    entry->valid = true;
+    entry->destination = destination;
+    entry->length = packet_len;
+    memcpy(entry->packet, packet, packet_len);
+    xSemaphoreGive(state_lock);
+    ESP_LOGI(TAG, "Cached zero-touch response for node=%012llx bytes=%u",
+             (unsigned long long)destination, (unsigned)packet_len);
+    return ESP_OK;
+}
+
+static esp_err_t replay_provisioning_response(const uint8_t destination[6])
+{
+    if (destination == NULL || state_lock == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t packet[EDGEZ_MAX_PACKET_SIZE];
+    size_t packet_len = 0;
+    const uint64_t node = mac_to_u64(destination);
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    for (size_t i = 0; i < EDGEZ_PROVISIONING_CACHE_SLOTS; ++i) {
+        if (provisioning_cache[i].valid &&
+            provisioning_cache[i].destination == node) {
+            packet_len = provisioning_cache[i].length;
+            memcpy(packet, provisioning_cache[i].packet, packet_len);
+            break;
+        }
+    }
+    xSemaphoreGive(state_lock);
+    if (packet_len == 0) return ESP_ERR_NOT_FOUND;
+    /* This is called from the HaLow vendor-action receive callback. Never
+     * re-enter the radio TX path from that callback: doing so can leave the
+     * driver critical section locked until the interrupt watchdog fires. */
+    const esp_err_t err = queue_unicast_packet(destination, packet, packet_len);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Queued zero-touch response replay to node=%012llx bytes=%u",
+                 (unsigned long long)node, (unsigned)packet_len);
+    }
+    return err;
+}
+#endif
 
 static ai_edgez_halow_MarkerColor marker_from_name(const char *name)
 {
@@ -248,6 +330,8 @@ static void fill_device_settings(ai_edgez_halow_DeviceSettings *settings)
     strlcpy(settings->user_name, control_state.user_name,
             sizeof(settings->user_name));
     settings->marker = control_state.marker;
+    strlcpy(settings->icon_style, control_state.icon_style,
+            sizeof(settings->icon_style));
     settings->beacon_interval_seconds = control_state.beacon_interval_seconds;
     settings->user_id_high = control_state.user_id_high;
     settings->user_id_low = control_state.user_id_low;
@@ -288,6 +372,24 @@ typedef struct {
 } edgez_ble_mesh_tx_item_t;
 
 static QueueHandle_t mesh_tx_queue;
+
+static esp_err_t queue_unicast_packet(const uint8_t destination[6],
+                                      const uint8_t *packet,
+                                      size_t packet_len)
+{
+    if (mesh_tx_queue == NULL || destination == NULL || packet == NULL ||
+        packet_len == 0 || packet_len > EDGEZ_MAX_PACKET_SIZE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    edgez_ble_mesh_tx_item_t item = {
+        .broadcast = false,
+        .length = packet_len,
+    };
+    memcpy(item.destination, destination, sizeof(item.destination));
+    memcpy(item.payload, packet, packet_len);
+    return xQueueSend(mesh_tx_queue, &item, 0) == pdTRUE ?
+        ESP_OK : ESP_ERR_NO_MEM;
+}
 
 static bool is_public_channel(uint64_t destination)
 {
@@ -371,6 +473,8 @@ static esp_err_t broadcast_beacon(void)
         packet->body.beacon.longitude = control_state.longitude;
     }
     packet->body.beacon.marker = control_state.marker;
+    strlcpy(packet->body.beacon.icon_style, control_state.icon_style,
+            sizeof(packet->body.beacon.icon_style));
     packet->body.beacon.device_type =
         ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
     xSemaphoreGive(state_lock);
@@ -458,6 +562,14 @@ esp_err_t edgez_ble_control_route_pawr_beacon(const uint8_t source_mac[6],
         encoded_length = output.bytes_written;
     }
     free(packet);
+
+    if (zero_touch) {
+        const esp_err_t replay_err = replay_provisioning_response(source_mac);
+        if (replay_err != ESP_OK && replay_err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(TAG, "Cached zero-touch response replay failed: %s",
+                     esp_err_to_name(replay_err));
+        }
+    }
 
     esp_err_t err = notify_raw_packet(encoded, encoded_length);
     if (err == ESP_OK) {
@@ -565,6 +677,8 @@ static void apply_init(const ai_edgez_halow_HaLowInitConfig *init)
     memcpy(control_state.user_public_key, init->user_public_key.bytes,
            init->user_public_key.size);
     control_state.marker = marker_from_name(init->marker);
+    strlcpy(control_state.icon_style, init->icon_style,
+            sizeof(control_state.icon_style));
     control_state.share_location = init->has_location;
     control_state.latitude = init->latitude;
     control_state.longitude = init->longitude;
@@ -598,6 +712,19 @@ static void apply_device_settings(const ai_edgez_halow_DeviceSettings *settings)
     }
     bool reconfigure_mesh = false;
     xSemaphoreTake(state_lock, portMAX_DELAY);
+    const bool icon_only = settings->icon_style[0] != '\0' &&
+        settings->mesh_id[0] == '\0' && settings->passphrase[0] == '\0' &&
+        settings->user_name[0] == '\0' && settings->user_id_high == 0 &&
+        settings->user_id_low == 0 && settings->user_public_key.size == 0 &&
+        settings->mesh_frequency_khz == 0 &&
+        settings->mesh_bandwidth_mhz == 0;
+    if (icon_only) {
+        strlcpy(control_state.icon_style, settings->icon_style,
+                sizeof(control_state.icon_style));
+        xSemaphoreGive(state_lock);
+        ESP_LOGI(TAG, "Beacon icon style updated: %s", settings->icon_style);
+        return;
+    }
     const bool complete_mesh_profile = settings->mesh_id[0] != '\0' &&
         settings->mesh_frequency_khz != 0 &&
         settings->mesh_bandwidth_mhz != 0;
@@ -633,6 +760,10 @@ static void apply_device_settings(const ai_edgez_halow_DeviceSettings *settings)
     control_state.latitude = settings->latitude;
     control_state.longitude = settings->longitude;
     control_state.marker = settings->marker;
+    if (settings->icon_style[0] != '\0') {
+        strlcpy(control_state.icon_style, settings->icon_style,
+                sizeof(control_state.icon_style));
+    }
     if (settings->beacon_interval_seconds != 0) {
         control_state.beacon_interval_seconds =
             settings->beacon_interval_seconds;
@@ -680,6 +811,21 @@ static esp_err_t handle_packet(const uint8_t *payload, size_t length)
     xSemaphoreGive(state_lock);
 #if CONFIG_DAB_START_NETWORK_PACKET_RELAY
     if (request->to != 0 && request->to != local_node) {
+        const bool encrypted_provisioning =
+            request->which_body == ai_edgez_halow_NetworkPacket_msg_tag &&
+            request->body.msg.mime == ai_edgez_halow_Mime_MIME_BINARY &&
+            request->body.msg.payload.size >= 4 &&
+            memcmp(request->body.msg.payload.bytes, "EZP\x01", 4) == 0;
+        if ((request->which_body == ai_edgez_halow_NetworkPacket_init_tag ||
+             request->which_body == ai_edgez_halow_NetworkPacket_device_settings_tag ||
+             encrypted_provisioning) &&
+            request->operation == ai_edgez_halow_Operation_REQUEST) {
+            err = cache_provisioning_response(request->to, payload, length);
+            if (err != ESP_OK) {
+                free(request);
+                return err;
+            }
+        }
         err = relay_network_packet(request, payload, length);
         if (err == ESP_OK) {
             ESP_LOGI(TAG,
@@ -1133,8 +1279,11 @@ esp_err_t edgez_ble_control_start(void)
 #if CONFIG_DAB_START_NETWORK_PACKET_RELAY
     mesh_tx_queue = xQueueCreate(EDGEZ_BLE_MESH_TX_QUEUE_DEPTH,
                                  sizeof(edgez_ble_mesh_tx_item_t));
+    /* edgez_halow_mesh_packet_send() traverses the PAwR fallback and management
+     * frame encoder on this task. 4 KiB overflowed on a 254-byte encrypted
+     * provisioning response; keep enough headroom for the complete RF path. */
     if (mesh_tx_queue == NULL ||
-        xTaskCreate(mesh_tx_task, "edgez_ble_mesh_tx", 4096, NULL, 5, NULL) != pdPASS) {
+        xTaskCreate(mesh_tx_task, "edgez_ble_mesh_tx", 8192, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Could not start BLE-to-mesh TX worker");
         if (mesh_tx_queue != NULL) {
             vQueueDelete(mesh_tx_queue);

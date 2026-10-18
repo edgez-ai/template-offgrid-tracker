@@ -65,7 +65,9 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_MESH_BEACON_INTERVAL_TU 100U
 #define EDGEZ_MESH_TICK_MS 100U
 #define EDGEZ_MESH_REPORT_MS 2000U
-#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 500U
+#define EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS 100U
+#define EDGEZ_SENSOR_PROVISIONING_ACK_TIMEOUT_MS 100U
+#define EDGEZ_SENSOR_PROVISIONING_WINDOW_MS 200U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
@@ -107,6 +109,8 @@ static bool mesh_services_initialized;
 static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
+static uint8_t sensor_bootstrap_channel =
+	CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL;
 K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 static const struct gpio_dt_spec user_button =
@@ -210,6 +214,12 @@ static int route_pawr_beacon(const uint8_t source[6], const uint8_t *beacon,
 		encoded_len = output.bytes_written;
 	}
 	k_free(packet);
+	if (zero_touch) {
+		int replay_rc = edgez_config_replay_provisioning_response(source);
+		if (replay_rc != 0 && replay_rc != -ENOENT) {
+			LOG_WRN("Cached zero-touch response replay failed rc=%d", replay_rc);
+		}
+	}
 
 	if (edgez_ble_can_notify()) {
 		rc = edgez_ble_notify_packet(encoded, encoded_len);
@@ -729,8 +739,8 @@ static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
 	if (!profile || strlen(CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY) != 2U ||
 	    !edgez_rf_resolve_s1g_channel(
 		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
-		&frequency_khz, &bandwidth_mhz)) {
+		sensor_bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
+	    bandwidth_mhz != 1U) {
 		return -EINVAL;
 	}
 	memset(profile, 0, sizeof(*profile));
@@ -744,6 +754,75 @@ static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
 		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS;
 	profile->device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
 	profile->sleep_mode_enabled = true;
+	return 0;
+}
+
+static bool sensor_advance_bootstrap_channel(void)
+{
+	const uint8_t previous = sensor_bootstrap_channel;
+	uint32_t frequency_khz;
+	uint8_t bandwidth_mhz;
+
+	/* Channel numbers are country-specific and may be sparse. Probe through
+	 * the public RF policy API so the rotation follows the MM8108 regulatory
+	 * database rather than duplicating a US/EU channel table here. Zero-touch
+	 * discovery deliberately uses only 1 MHz channels so companions have one
+	 * predictable provisioning bandwidth to monitor. */
+	for (uint16_t offset = 1U; offset <= UINT8_MAX; ++offset) {
+		uint8_t candidate = (uint8_t)(previous + offset);
+
+		if (candidate == 0U) {
+			continue;
+		}
+		if (edgez_rf_resolve_s1g_channel(
+			    CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+			    candidate, &frequency_khz, &bandwidth_mhz) &&
+		    bandwidth_mhz == 1U) {
+			sensor_bootstrap_channel = candidate;
+			LOG_INF("zero-touch discovery channel %u -> %u (%u kHz/%u MHz)",
+				previous, candidate, frequency_khz, bandwidth_mhz);
+			return true;
+		}
+	}
+	LOG_WRN("no alternate valid zero-touch channel for country=%s",
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY);
+	return false;
+}
+
+static int sensor_retune_bootstrap_channel(void)
+{
+	uint32_t frequency_khz;
+	uint8_t bandwidth_mhz;
+
+	if (!mesh_started || !mesh_runtime.umac.driver ||
+	    !mesh_runtime.umac.driver->set_channel ||
+	    !edgez_rf_resolve_s1g_channel(
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+		sensor_bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
+	    bandwidth_mhz != 1U) {
+		return -EINVAL;
+	}
+
+	const struct edgez_umac_channel channel = {
+		.operating_frequency_hz = frequency_khz * 1000U,
+		.operating_bw_mhz = 1U,
+		.primary_bw_mhz = EDGEZ_MESH_PRIMARY_BANDWIDTH_MHZ,
+		.primary_1mhz_channel_index = 0U,
+	};
+	int rc = mesh_runtime.umac.driver->set_channel(
+		mesh_runtime.umac.driver_ctx, &channel);
+
+	if (rc != 0) {
+		LOG_WRN("zero-touch retune failed channel=%u frequency=%u kHz rc=%d",
+			sensor_bootstrap_channel, frequency_khz, rc);
+		return -EIO;
+	}
+	mesh_runtime.config.channel = channel;
+	applied_profile.mesh_frequency_khz = frequency_khz;
+	applied_profile.mesh_bandwidth_mhz = 1U;
+	/* mmdrv_set_channel() is synchronous. Leave a short guard for the RX path
+	 * before transmitting the next connectionless action frame. */
+	k_msleep(10);
 	return 0;
 }
 
@@ -762,9 +841,13 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	size_t action_len = 0U;
 	uint32_t request_id = ++pawr_request_id;
 	uint32_t hash;
+	const bool provisioning = !edgez_config_should_autostart();
+	const uint32_t response_timeout_ms = provisioning ?
+		EDGEZ_SENSOR_PROVISIONING_ACK_TIMEOUT_MS :
+		EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS;
 	int rc;
 
-	if (!edgez_config_should_autostart()) {
+	if (provisioning) {
 		rc = edgez_config_build_zero_touch_request(
 			mesh_runtime.radio_info.mac_addr, beacon, sizeof(beacon),
 			&beacon_len);
@@ -829,11 +912,18 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	}
 	edgez_imu_note_halow_tx();
 	LOG_INF("sensor PAwR %s request=%u queued payload=%u interval=%ums hash=%08x; waiting up to %ums for acknowledgement",
-		edgez_config_should_autostart() ? "telemetry" : "zero-touch",
+		provisioning ? "zero-touch" : "telemetry",
 		request_id, (unsigned)beacon_len, wake_interval_ms, hash,
-		EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS);
+		response_timeout_ms);
 	if (k_sem_take(&sensor_pawr_response_sem,
-			       K_MSEC(EDGEZ_SENSOR_RESPONSE_TIMEOUT_MS)) == 0) {
+			       K_MSEC(response_timeout_ms)) == 0) {
+		/* The acknowledgement only confirms that a companion received this
+		 * request.  A cached encrypted profile is returned in a separate PAwR
+		 * mesh-packet action frame, so an unprovisioned sensor must keep RX up
+		 * briefly after the ACK instead of cutting the HaLow rail immediately. */
+		if (provisioning) {
+			k_msleep(EDGEZ_SENSOR_PROVISIONING_WINDOW_MS);
+		}
 		return 0;
 	}
 	key = k_spin_lock(&sensor_pawr_lock);
@@ -1497,8 +1587,15 @@ static void sensor_finish_cycle(uint32_t now)
 	uint32_t interval_ms = sensor_update_interval_ms();
 
 	edgez_gps_stop();
-	sensor_power.next_wake_ms = elapsed_ms < interval_ms ?
-		sensor_power.cycle_started_ms + interval_ms : now + 1000U;
+	/* A zero-touch wake may spend several seconds sweeping all regulatory
+	 * 1 MHz channels. Its configured interval is sleep time after that sweep,
+	 * not a period measured from the beginning of the radio activity. */
+	if (!edgez_config_should_autostart()) {
+		sensor_power.next_wake_ms = now + interval_ms;
+	} else {
+		sensor_power.next_wake_ms = elapsed_ms < interval_ms ?
+			sensor_power.cycle_started_ms + interval_ms : now + 1000U;
+	}
 	sensor_power.phase = SENSOR_POWER_SLEEPING;
 	LOG_INF("sensor cycle complete; HaLow %s for %u ms",
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
@@ -1543,6 +1640,20 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			sensor_power.generation);
 		return;
 	}
+	if (!edgez_config_should_autostart() &&
+	    !edgez_factory_data_is_ready()) {
+		/* An unprovisioned sensor without its factory X25519 identity cannot
+		 * create an actionable request. Keep MM8108 off and sleep. */
+		edgez_gps_stop();
+		if (mesh_started) {
+			(void)stop_mesh_profile(true);
+		}
+		if (edgez_halow_power_is_ready()) {
+			(void)edgez_halow_power_set(false);
+		}
+		sensor_finish_cycle(now);
+		return;
+	}
 
 	if (sensor_power.phase == SENSOR_POWER_SLEEPING) {
 		if ((int32_t)(now - sensor_power.next_wake_ms) >= 0) {
@@ -1552,7 +1663,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	}
 	if (sensor_power.phase == SENSOR_POWER_READY) {
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS)
-		int gps_rc = edgez_gps_init();
+		int gps_rc = profile->device_gps_enabled ? edgez_gps_init() : -ENOTSUP;
 
 		if (gps_rc == 0) {
 			sensor_power.gps_deadline_ms = now + EDGEZ_SENSOR_GPS_TIMEOUT_MS;
@@ -1561,7 +1672,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
 			return;
 		}
-		LOG_WRN("sensor GPS wake failed rc=%d; sending without location", gps_rc);
+		if (profile->device_gps_enabled) {
+			LOG_WRN("sensor GPS wake failed rc=%d; sending without location", gps_rc);
+		}
 #endif
 		sensor_power.phase = SENSOR_POWER_TRANSMIT;
 	}
@@ -1584,6 +1697,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	if (sensor_power.phase != SENSOR_POWER_TRANSMIT) {
 		return;
 	}
+	const bool provisioning_cycle = !edgez_config_should_autostart();
 
 	/* The reporting timer is the only periodic MCU wake source in the power
 	 * build. Collect the samples accumulated by the IMU hardware FIFO before
@@ -1611,8 +1725,24 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		rc = edgez_halow_power_set(true);
 	}
 	if (rc == 0 && !mesh_started) {
-		rc = start_sensor_radio(profile);
-		radio_cold_started = rc == EDGEZ_UMAC_OK;
+		struct edgez_halow_profile start_profile = *profile;
+		const uint8_t first_start_channel = sensor_bootstrap_channel;
+
+		do {
+			rc = start_sensor_radio(&start_profile);
+			if (rc == EDGEZ_UMAC_OK) {
+				radio_cold_started = true;
+				break;
+			}
+			if (!provisioning_cycle ||
+			    !sensor_advance_bootstrap_channel() ||
+			    sensor_bootstrap_channel == first_start_channel ||
+			    sensor_bootstrap_profile(&start_profile) != 0) {
+				break;
+			}
+			LOG_INF("zero-touch cold-start retry on channel=%u",
+				sensor_bootstrap_channel);
+		} while (!mesh_started);
 	}
 	if (rc != EDGEZ_UMAC_OK) {
 		LOG_ERR("sensor HaLow wake failed rc=%d; retrying next cycle", rc);
@@ -1623,16 +1753,39 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		if (radio_cold_started) {
 			k_msleep(100);
 		}
-		rc = sensor_pawr_send_once(sensor_update_interval_ms());
-		/* A provisioning acceptance is returned as a direct PAwR mesh packet.
-		 * Drain it before putting the radio back to sleep. */
-		edgez_nrf_mesh_tick();
-		edgez_nrf_relay_tick();
-		LOG_INF("sensor telemetry %s after single PAwR transmission",
-			rc == 0 ? "acknowledged" : "unacknowledged");
+		const uint8_t sweep_first_channel = sensor_bootstrap_channel;
+		do {
+			rc = sensor_pawr_send_once(sensor_update_interval_ms());
+			/* A provisioning acceptance is returned as a direct PAwR mesh
+			 * packet. Drain it before changing channel or sleeping. */
+			edgez_nrf_mesh_tick();
+			edgez_nrf_relay_tick();
+			LOG_INF("sensor telemetry %s after PAwR transmission channel=%u",
+				rc == 0 ? "acknowledged" : "unacknowledged",
+				sensor_bootstrap_channel);
+
+			if (!provisioning_cycle || edgez_config_should_autostart() ||
+			    !sensor_advance_bootstrap_channel() ||
+			    sensor_bootstrap_channel == sweep_first_channel) {
+				break;
+			}
+			/* Visit every regulatory 1 MHz channel while the MM8108 stays
+			 * booted. Skip a channel that the backend cannot apply. */
+			while (sensor_retune_bootstrap_channel() != 0) {
+				if (!sensor_advance_bootstrap_channel() ||
+				    sensor_bootstrap_channel == sweep_first_channel) {
+					break;
+				}
+			}
+		} while (sensor_bootstrap_channel != sweep_first_channel);
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
-		bool ps_ready = sensor_halow_ps_configured ||
-			sensor_configure_halow_power_save();
+		/* Zero-touch discovery tears down after the complete channel sweep.
+		 * A sensor that began the cycle provisioned stays on its assigned
+		 * channel and uses MM8108 chip sleep between reports. */
+		bool keep_radio = !provisioning_cycle &&
+			edgez_config_should_autostart();
+		bool ps_ready = keep_radio && (sensor_halow_ps_configured ||
+			sensor_configure_halow_power_save());
 		if (!ps_ready || !sensor_set_halow_wake(false)) {
 			LOG_WRN("sensor HaLow power save failed; cutting rail");
 			int stop_rc = stop_mesh_profile(true);

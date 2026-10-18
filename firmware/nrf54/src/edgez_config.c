@@ -4,9 +4,9 @@
 #include <math.h>
 #include <string.h>
 
+#include <psa/crypto.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
-#include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 
 #include "nanopb/pb_decode.h"
@@ -30,6 +30,14 @@ LOG_MODULE_REGISTER(edgez_config, LOG_LEVEL_INF);
 #define EDGEZ_PROFILE_MAGIC 0x455A5031U
 #define EDGEZ_PROFILE_VERSION 1U
 #define EDGEZ_PROVISIONING_COMMIT_GRACE_MS 5000
+#define EDGEZ_PROVISIONING_CACHE_SLOTS 4U
+#define EDGEZ_PROVISIONING_PACKET_MAX 512U
+#define EDGEZ_PROVISIONING_ENVELOPE_HEADER_LEN 48U
+#define EDGEZ_PROVISIONING_NONCE_LEN 12U
+#define EDGEZ_PROVISIONING_TAG_LEN 16U
+
+static const uint8_t provisioning_envelope_magic[] = {0x45, 0x5a, 0x50, 0x01};
+static const uint8_t conversation_label[] = "EdgeZ conversation v1";
 
 struct edgez_persisted_profile {
 	uint32_t magic;
@@ -40,8 +48,19 @@ struct edgez_persisted_profile {
 	uint8_t settings_data[ai_edgez_halow_DeviceSettings_size];
 };
 
+struct edgez_provisioning_cache_entry {
+	bool valid;
+	uint64_t destination;
+	size_t length;
+	uint8_t packet[EDGEZ_PROVISIONING_PACKET_MAX];
+};
+
 K_MUTEX_DEFINE(config_lock);
+K_MUTEX_DEFINE(provisioning_cache_lock);
+static struct edgez_provisioning_cache_entry provisioning_cache[EDGEZ_PROVISIONING_CACHE_SLOTS];
+static size_t provisioning_cache_next;
 static ai_edgez_halow_DeviceSettings settings;
+static char factory_serial[EDGEZ_FACTORY_SERIAL_MAX + 1U];
 static uint32_t mesh_frequency_khz;
 static uint32_t mesh_bandwidth_mhz;
 static char country_code[3];
@@ -54,9 +73,215 @@ static atomic_t halow_beacon_build_count;
 static atomic_t halow_beacon_last_ies_len;
 static uint8_t beacon_vendor_ies[EDGEZ_VENDOR_IES_MAX_LEN];
 static size_t beacon_vendor_ies_len;
+volatile uint32_t edgez_config_provisioning_stage;
+volatile int32_t edgez_config_provisioning_last_rc;
+volatile int32_t edgez_config_provisioning_psa_status;
+volatile uint64_t edgez_config_provisioning_outer_to;
+volatile uint64_t edgez_config_provisioning_outer_from;
+volatile uint64_t edgez_config_provisioning_local_node;
+volatile uint32_t edgez_config_provisioning_envelope_len;
+volatile int32_t edgez_config_provisioning_factory_rc;
 
 static uint64_t mac_to_node_id(const uint8_t mac[6]);
 static struct k_spinlock beacon_vendor_ies_lock;
+
+static bool provisioning_envelope(const ai_edgez_halow_NetworkPacket *packet)
+{
+	return packet && packet->which_body == ai_edgez_halow_NetworkPacket_msg_tag &&
+		packet->operation == ai_edgez_halow_Operation_REQUEST &&
+		packet->body.msg.mime == ai_edgez_halow_Mime_MIME_BINARY &&
+		packet->body.msg.payload.size >=
+			EDGEZ_PROVISIONING_ENVELOPE_HEADER_LEN + EDGEZ_PROVISIONING_TAG_LEN &&
+		memcmp(packet->body.msg.payload.bytes, provisioning_envelope_magic,
+		       sizeof(provisioning_envelope_magic)) == 0;
+}
+
+static void put_le64(uint8_t output[8], uint64_t value)
+{
+	for (size_t index = 0; index < 8; ++index) {
+		output[index] = (uint8_t)(value >> (index * 8U));
+	}
+}
+
+static int compare_identity(uint64_t left_node, const uint8_t left_key[32],
+			    uint64_t right_node, const uint8_t right_key[32])
+{
+	if (left_node < right_node) return -1;
+	if (left_node > right_node) return 1;
+	return memcmp(left_key, right_key, 32);
+}
+
+static int decrypt_provisioning_envelope(const ai_edgez_halow_NetworkPacket *outer,
+					 uint8_t *plaintext, size_t plaintext_cap,
+					 size_t *plaintext_len)
+{
+	struct edgez_factory_identity factory;
+	const uint8_t *envelope = outer->body.msg.payload.bytes;
+	const size_t envelope_len = outer->body.msg.payload.size;
+	const uint8_t *sender_public_key = envelope + sizeof(provisioning_envelope_magic);
+	const uint8_t *nonce = sender_public_key + EDGEZ_FACTORY_KEY_SIZE;
+	const uint8_t *ciphertext = nonce + EDGEZ_PROVISIONING_NONCE_LEN;
+	const size_t ciphertext_len = envelope_len - EDGEZ_PROVISIONING_ENVELOPE_HEADER_LEN;
+	uint8_t shared[32] = {0};
+	uint8_t key_material[sizeof(conversation_label) - 1U + 32U + 40U + 40U];
+	uint8_t sender_identity[40];
+	uint8_t recipient_identity[40];
+	uint8_t aes_key[32] = {0};
+	uint8_t aad[18U + EDGEZ_PROVISIONING_NONCE_LEN];
+	psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+	psa_key_id_t key_id = 0;
+	psa_status_t status;
+	size_t shared_len = 0;
+	size_t offset = 0;
+	int rc = -EACCES;
+	int factory_rc = edgez_factory_data_get(&factory);
+
+	edgez_config_provisioning_stage = 10U;
+	edgez_config_provisioning_outer_from = outer->from;
+	edgez_config_provisioning_envelope_len = envelope_len;
+	edgez_config_provisioning_factory_rc = factory_rc;
+	if (!plaintext || !plaintext_len || ciphertext_len <= EDGEZ_PROVISIONING_TAG_LEN ||
+	    outer->from == 0 || outer->to == 0 || factory_rc != 0) {
+		edgez_config_provisioning_stage = 11U;
+		return -EINVAL;
+	}
+	status = psa_crypto_init();
+	edgez_config_provisioning_psa_status = status;
+	if (status != PSA_SUCCESS) goto cleanup;
+	edgez_config_provisioning_stage = 12U;
+	psa_set_key_type(&attributes,
+		PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+	psa_set_key_bits(&attributes, 255);
+	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DERIVE);
+	psa_set_key_algorithm(&attributes, PSA_ALG_ECDH);
+	status = psa_import_key(&attributes, factory.private_key,
+				sizeof(factory.private_key), &key_id);
+	edgez_config_provisioning_psa_status = status;
+	psa_reset_key_attributes(&attributes);
+	if (status != PSA_SUCCESS) goto cleanup;
+	edgez_config_provisioning_stage = 13U;
+	status = psa_raw_key_agreement(PSA_ALG_ECDH, key_id, sender_public_key, 32,
+				       shared, sizeof(shared), &shared_len);
+	edgez_config_provisioning_psa_status = status;
+	(void)psa_destroy_key(key_id);
+	key_id = 0;
+	if (status != PSA_SUCCESS || shared_len != sizeof(shared)) goto cleanup;
+	edgez_config_provisioning_stage = 14U;
+
+	put_le64(sender_identity, outer->from);
+	memcpy(sender_identity + 8, sender_public_key, 32);
+	put_le64(recipient_identity, outer->to);
+	memcpy(recipient_identity + 8, factory.public_key, 32);
+	memcpy(key_material + offset, conversation_label, sizeof(conversation_label) - 1U);
+	offset += sizeof(conversation_label) - 1U;
+	memcpy(key_material + offset, shared, sizeof(shared));
+	offset += sizeof(shared);
+	if (compare_identity(outer->from, sender_public_key,
+			     outer->to, factory.public_key) <= 0) {
+		memcpy(key_material + offset, sender_identity, sizeof(sender_identity));
+		offset += sizeof(sender_identity);
+		memcpy(key_material + offset, recipient_identity, sizeof(recipient_identity));
+	} else {
+		memcpy(key_material + offset, recipient_identity, sizeof(recipient_identity));
+		offset += sizeof(recipient_identity);
+		memcpy(key_material + offset, sender_identity, sizeof(sender_identity));
+	}
+	status = psa_hash_compute(PSA_ALG_SHA_256, key_material, sizeof(key_material),
+				  aes_key, sizeof(aes_key), &offset);
+	edgez_config_provisioning_psa_status = status;
+	if (status != PSA_SUCCESS || offset != sizeof(aes_key)) goto cleanup;
+	edgez_config_provisioning_stage = 15U;
+	put_le64(aad, outer->from);
+	put_le64(aad + 8, outer->to);
+	aad[16] = EDGEZ_PROVISIONING_NONCE_LEN;
+	aad[17] = 0;
+	memcpy(aad + 18, nonce, EDGEZ_PROVISIONING_NONCE_LEN);
+
+	psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+	psa_set_key_bits(&attributes, 256);
+	psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
+	psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
+	status = psa_import_key(&attributes, aes_key, sizeof(aes_key), &key_id);
+	edgez_config_provisioning_psa_status = status;
+	psa_reset_key_attributes(&attributes);
+	if (status != PSA_SUCCESS) goto cleanup;
+	edgez_config_provisioning_stage = 16U;
+	status = psa_aead_decrypt(key_id, PSA_ALG_GCM, nonce,
+				  EDGEZ_PROVISIONING_NONCE_LEN, aad, sizeof(aad),
+				  ciphertext, ciphertext_len, plaintext, plaintext_cap,
+				  plaintext_len);
+	edgez_config_provisioning_psa_status = status;
+	if (status == PSA_SUCCESS) {
+		rc = 0;
+		edgez_config_provisioning_stage = 17U;
+	}
+
+cleanup:
+	if (key_id != 0) (void)psa_destroy_key(key_id);
+	memset(&factory, 0, sizeof(factory));
+	memset(shared, 0, sizeof(shared));
+	memset(key_material, 0, sizeof(key_material));
+	memset(aes_key, 0, sizeof(aes_key));
+	return rc;
+}
+
+static int cache_provisioning_response(uint64_t destination,
+				       const uint8_t *packet, size_t packet_len)
+{
+	if (destination == 0 || !packet || packet_len == 0 ||
+	    packet_len > EDGEZ_PROVISIONING_PACKET_MAX) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&provisioning_cache_lock, K_FOREVER);
+	struct edgez_provisioning_cache_entry *entry = NULL;
+	for (size_t i = 0; i < ARRAY_SIZE(provisioning_cache); ++i) {
+		if (provisioning_cache[i].valid &&
+		    provisioning_cache[i].destination == destination) {
+			entry = &provisioning_cache[i];
+			break;
+		}
+	}
+	if (!entry) {
+		entry = &provisioning_cache[provisioning_cache_next];
+		provisioning_cache_next =
+			(provisioning_cache_next + 1U) % ARRAY_SIZE(provisioning_cache);
+	}
+	entry->valid = true;
+	entry->destination = destination;
+	entry->length = packet_len;
+	memcpy(entry->packet, packet, packet_len);
+	k_mutex_unlock(&provisioning_cache_lock);
+	LOG_INF("Cached zero-touch response for node=%012llx bytes=%u",
+		(unsigned long long)destination, (unsigned int)packet_len);
+	return 0;
+}
+
+int edgez_config_replay_provisioning_response(const uint8_t destination[6])
+{
+	uint8_t packet[EDGEZ_PROVISIONING_PACKET_MAX];
+	size_t packet_len = 0;
+	uint64_t node;
+
+	if (!destination) return -EINVAL;
+	node = mac_to_node_id(destination);
+	k_mutex_lock(&provisioning_cache_lock, K_FOREVER);
+	for (size_t i = 0; i < ARRAY_SIZE(provisioning_cache); ++i) {
+		if (provisioning_cache[i].valid &&
+		    provisioning_cache[i].destination == node) {
+			packet_len = provisioning_cache[i].length;
+			memcpy(packet, provisioning_cache[i].packet, packet_len);
+			break;
+		}
+	}
+	k_mutex_unlock(&provisioning_cache_lock);
+	if (packet_len == 0) return -ENOENT;
+	int rc = edgez_nrf_relay_send(destination, packet, packet_len);
+	if (rc == 0) {
+		LOG_INF("Replayed zero-touch response to node=%012llx bytes=%u",
+			(unsigned long long)node, (unsigned int)packet_len);
+	}
+	return rc;
+}
 
 /*
  * Called by the Morse mesh beacon builder. This must stay non-blocking because
@@ -129,6 +354,23 @@ static void copy_string(char *dst, size_t dst_size, const char *src)
 	dst[dst_size - 1] = '\0';
 }
 
+static ai_edgez_halow_MarkerColor marker_from_string(const char *marker)
+{
+	static const char *const names[] = {
+		"default", "red", "blue", "purple", "yellow", "pink", "brown",
+		"green", "orange", "deep_purple", "light_blue", "cyan", "teal",
+		"lime", "deep_orange", "gray", "blue_gray",
+	};
+
+	if (!marker) return ai_edgez_halow_MarkerColor_MARKER_DEFAULT;
+	for (size_t index = 0; index < ARRAY_SIZE(names); ++index) {
+		if (strcmp(marker, names[index]) == 0) {
+			return (ai_edgez_halow_MarkerColor)index;
+		}
+	}
+	return ai_edgez_halow_MarkerColor_MARKER_DEFAULT;
+}
+
 static void normalize_settings(ai_edgez_halow_DeviceSettings *value)
 {
 	if (value->beacon_interval_seconds < 5 || value->beacon_interval_seconds > 3600) {
@@ -137,14 +379,22 @@ static void normalize_settings(ai_edgez_halow_DeviceSettings *value)
 	if (value->max_hop == 0 || value->max_hop > UINT8_MAX) {
 		value->max_hop = 2;
 	}
-	if (value->user_name[0] == '\0') {
-		copy_string(value->user_name, sizeof(value->user_name), "EdgeZ User");
+	if (value->user_name[0] == '\0' ||
+	    (value->device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR &&
+	     strcmp(value->user_name, "EdgeZ User") == 0)) {
+		copy_string(value->user_name, sizeof(value->user_name),
+			factory_serial[0] != '\0' ? factory_serial : "EdgeZ User");
 	}
 	if (value->device_type < ai_edgez_halow_DeviceType_DEVICE_TYPE_USER ||
 	    value->device_type > ai_edgez_halow_DeviceType_DEVICE_TYPE_RELAY) {
 		value->device_type = value->device_mode_enabled ?
 			ai_edgez_halow_DeviceType_DEVICE_TYPE_BEACON :
 			ai_edgez_halow_DeviceType_DEVICE_TYPE_USER;
+	}
+	if (value->icon_style[0] == '\0') {
+		copy_string(value->icon_style, sizeof(value->icon_style),
+			value->device_type == ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR ?
+			"sensor" : "person");
 	}
 
 	/* BEACON and SENSOR are battery-powered request clients.  Treat the role as
@@ -302,35 +552,35 @@ static int load_persisted_profile_locked(void)
 
 void edgez_config_init(const char *mesh_id, const char *passphrase)
 {
-	uint8_t random_identity[40];
 	struct edgez_factory_identity factory_identity;
 	bool have_factory_identity =
 		edgez_factory_data_get(&factory_identity) == 0;
 	int settings_rc;
 	int load_rc;
 
-	sys_rand_get(random_identity, sizeof(random_identity));
 	settings_rc = settings_subsys_init();
 	LOG_INF("Persistent HaLow settings subsystem init rc=%d", settings_rc);
 	if (settings_rc != 0 && settings_rc != -EALREADY) {
 		LOG_WRN("Persistent HaLow settings init failed: %d", settings_rc);
 	}
 	k_mutex_lock(&config_lock, K_FOREVER);
+	copy_string(factory_serial, sizeof(factory_serial),
+		have_factory_identity ? factory_identity.serial : "");
 	settings = (ai_edgez_halow_DeviceSettings)ai_edgez_halow_DeviceSettings_init_zero;
 	settings.action = ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
 	copy_string(settings.mesh_id, sizeof(settings.mesh_id), mesh_id);
 	copy_string(settings.passphrase, sizeof(settings.passphrase), passphrase);
 	copy_string(settings.user_name, sizeof(settings.user_name),
 		have_factory_identity ? factory_identity.serial : "EdgeZ User");
-	memcpy(&settings.user_id_high,
-		have_factory_identity ? factory_identity.public_key : random_identity,
-		sizeof(settings.user_id_high));
-	memcpy(&settings.user_id_low,
-		have_factory_identity ? factory_identity.public_key + 8 : random_identity + 8,
-		sizeof(settings.user_id_low));
-	settings.user_public_key.size = 32;
-	memcpy(settings.user_public_key.bytes,
-		have_factory_identity ? factory_identity.public_key : random_identity + 8, 32);
+	if (have_factory_identity) {
+		memcpy(&settings.user_id_high, factory_identity.public_key,
+		       sizeof(settings.user_id_high));
+		memcpy(&settings.user_id_low, factory_identity.public_key + 8,
+		       sizeof(settings.user_id_low));
+		settings.user_public_key.size = EDGEZ_FACTORY_KEY_SIZE;
+		memcpy(settings.user_public_key.bytes, factory_identity.public_key,
+		       EDGEZ_FACTORY_KEY_SIZE);
+	}
 	settings.user_private_key.size = have_factory_identity ? 32 : 0;
 	if (have_factory_identity) {
 		memcpy(settings.user_private_key.bytes, factory_identity.private_key, 32);
@@ -526,9 +776,9 @@ static void fill_status_locked(ai_edgez_halow_HaLowInterfaceStatus *status)
 		ai_edgez_halow_LicenseStatus_LICENSE_STATUS_AUTHORIZED;
 }
 
-int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
-			       uint8_t *response_buf, size_t response_cap,
-			       size_t *response_len)
+static int handle_packet_internal(const uint8_t *payload, size_t payload_len,
+				  uint8_t *response_buf, size_t response_cap,
+				  size_t *response_len, bool encrypted_profile)
 {
 	ai_edgez_halow_NetworkPacket request = ai_edgez_halow_NetworkPacket_init_zero;
 	ai_edgez_halow_NetworkPacket response = ai_edgez_halow_NetworkPacket_init_zero;
@@ -541,6 +791,8 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	*response_len = 0;
 	input = pb_istream_from_buffer(payload, payload_len);
 	if (!pb_decode(&input, ai_edgez_halow_NetworkPacket_fields, &request)) {
+		edgez_config_provisioning_stage = 1U;
+		edgez_config_provisioning_last_rc = -EBADMSG;
 		LOG_WRN("BLE NetworkPacket decode failed: %s", PB_GET_ERROR(&input));
 		return -EBADMSG;
 	}
@@ -551,13 +803,24 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	k_mutex_lock(&config_lock, K_FOREVER);
 	local_node = mac_to_node_id(halow_mac);
 	k_mutex_unlock(&config_lock);
+	edgez_config_provisioning_outer_to = request.to;
+	edgez_config_provisioning_local_node = local_node;
 	if (request.to != 0 && request.to != local_node) {
+		edgez_config_provisioning_stage = 2U;
 		uint8_t destination[6];
 		uint64_t node = request.to;
 
 		for (int i = 5; i >= 0; --i) {
 			destination[i] = (uint8_t)(node & 0xffU);
 			node >>= 8;
+		}
+		if ((request.which_body == ai_edgez_halow_NetworkPacket_init_tag ||
+		     request.which_body == ai_edgez_halow_NetworkPacket_device_settings_tag ||
+		     provisioning_envelope(&request)) &&
+		    request.operation == ai_edgez_halow_Operation_REQUEST) {
+			int cache_rc = cache_provisioning_response(request.to, payload,
+							   payload_len);
+			if (cache_rc != 0) return cache_rc;
 		}
 		int relay_rc = edgez_nrf_relay_send(destination, payload, payload_len);
 		if (relay_rc == 0) {
@@ -566,6 +829,24 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 				(unsigned int)payload_len);
 		}
 		return relay_rc;
+	}
+	if (provisioning_envelope(&request)) {
+		edgez_config_provisioning_stage = 3U;
+		uint8_t plaintext[ai_edgez_halow_NetworkPacket_size];
+		size_t plaintext_len = 0;
+		int decrypt_rc = decrypt_provisioning_envelope(&request, plaintext,
+						       sizeof(plaintext), &plaintext_len);
+
+		if (decrypt_rc != 0) {
+			edgez_config_provisioning_last_rc = decrypt_rc;
+			LOG_WRN("Encrypted zero-touch profile rejected rc=%d", decrypt_rc);
+			return decrypt_rc;
+		}
+		edgez_config_provisioning_stage = 18U;
+		LOG_INF("Encrypted zero-touch profile authenticated bytes=%u",
+			(unsigned int)plaintext_len);
+		return handle_packet_internal(plaintext, plaintext_len, response_buf,
+					      response_cap, response_len, true);
 	}
 
 	if (request.which_body == ai_edgez_halow_NetworkPacket_device_settings_tag) {
@@ -589,6 +870,27 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 		    ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_SET) {
 			ai_edgez_halow_DeviceSettings updated = request.body.device_settings;
 			int persist_rc;
+			bool icon_only = updated.icon_style[0] != '\0' &&
+				updated.mesh_id[0] == '\0' && updated.passphrase[0] == '\0' &&
+				updated.user_name[0] == '\0' && updated.user_id_high == 0 &&
+				updated.user_id_low == 0 && updated.user_public_key.size == 0 &&
+				updated.mesh_frequency_khz == 0 &&
+				updated.mesh_bandwidth_mhz == 0;
+
+			if (icon_only) {
+				copy_string(settings.icon_style, sizeof(settings.icon_style),
+					    updated.icon_style);
+				config_generation++;
+				persist_rc = save_persisted_profile_locked();
+				LOG_INF("Beacon icon style updated style=%s persist_rc=%d generation=%u",
+					settings.icon_style, persist_rc, config_generation);
+				response.body.device_settings = settings;
+				response.body.device_settings.action =
+					ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
+				k_mutex_unlock(&config_lock);
+				response.which_body = ai_edgez_halow_NetworkPacket_device_settings_tag;
+				goto encode_response;
+			}
 
 			/* DeviceSettings is also used for partial mode/interval updates. Proto3
 			 * scalar fields have no presence bit here, so omitted strings and identity
@@ -650,17 +952,20 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
 		k_mutex_unlock(&config_lock);
 	} else if (request.which_body == ai_edgez_halow_NetworkPacket_init_tag) {
+		if (encrypted_profile) {
+			edgez_config_provisioning_stage = 20U;
+		}
 		const ai_edgez_halow_HaLowInitConfig *init = &request.body.init;
 		bool has_configuration;
 
 		k_mutex_lock(&config_lock, K_FOREVER);
-		LOG_INF("BLE HaLowInitConfig received country=\"%s\" mesh_id_len=%u passphrase_len=%u user_name_len=%u public_key_len=%u max_hop=%u frequency=%u kHz bandwidth=%u MHz location=%u",
+		LOG_INF("BLE HaLowInitConfig received country=\"%s\" mesh_id_len=%u passphrase_len=%u user_name_len=%u public_key_len=%u max_hop=%u frequency=%u kHz bandwidth=%u MHz location=%u gps=%u",
 			init->country_code, (unsigned int)strlen(init->mesh_id),
 			(unsigned int)strlen(init->passphrase),
 			(unsigned int)strlen(init->user_name),
 			(unsigned int)init->user_public_key.size, init->max_hop,
 			init->mesh_frequency_khz, init->mesh_bandwidth_mhz,
-			init->has_location);
+			init->has_location, init->device_gps_enabled);
 
 		/* The mobile SDK also sends a completely empty HaLowInitConfig as its
 		 * reconnect/status and license probe. It is not a provisioning command.
@@ -670,8 +975,16 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			init->passphrase[0] != '\0' || init->max_hop != 0 ||
 			init->user_id_high != 0 || init->user_id_low != 0 ||
 			init->user_name[0] != '\0' || init->user_public_key.size != 0 ||
-			init->has_location || init->mesh_frequency_khz != 0 ||
+			init->has_location || init->device_gps_enabled || init->icon_style[0] != '\0' ||
+			init->mesh_frequency_khz != 0 ||
 			init->mesh_bandwidth_mhz != 0;
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
+		if (has_configuration && !encrypted_profile) {
+			k_mutex_unlock(&config_lock);
+			LOG_WRN("Plaintext zero-touch HaLow profile rejected");
+			return -EACCES;
+		}
+#endif
 		if (!has_configuration) {
 			LOG_INF("BLE HaLowInitConfig is an empty status/license probe; preserving persisted profile generation=%u",
 				config_generation);
@@ -689,6 +1002,10 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			memcpy(settings.user_public_key.bytes, init->user_public_key.bytes,
 			       init->user_public_key.size);
 			settings.share_location = init->has_location;
+			settings.device_gps_enabled = init->device_gps_enabled;
+			settings.marker = marker_from_string(init->marker);
+			copy_string(settings.icon_style, sizeof(settings.icon_style),
+				    init->icon_style);
 			settings.latitude = init->latitude;
 			settings.longitude = init->longitude;
 			if (init->mesh_frequency_khz > 0 && init->mesh_bandwidth_mhz > 0) {
@@ -708,6 +1025,11 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			}
 			if (persistent_device_mode(settings.device_type)) {
 				int persist_rc = save_persisted_profile_locked();
+				if (encrypted_profile) {
+					edgez_config_provisioning_last_rc = persist_rc;
+					edgez_config_provisioning_stage =
+						persist_rc == 0 ? 22U : 21U;
+				}
 
 				if (persist_rc != 0) {
 					LOG_WRN("Persistent HaLow radio update failed: %d", persist_rc);
@@ -755,6 +1077,7 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 		return -ENOTSUP;
 	}
 
+encode_response:
 	if (response.which_body == ai_edgez_halow_NetworkPacket_status_tag) {
 		k_mutex_lock(&config_lock, K_FOREVER);
 		fill_status_locked(&response.body.status);
@@ -774,6 +1097,14 @@ int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 	LOG_INF("BLE NetworkPacket response body=%u operation=%u len=%u",
 		response.which_body, response.operation, (unsigned int)*response_len);
 	return 0;
+}
+
+int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
+			       uint8_t *response_buf, size_t response_cap,
+			       size_t *response_len)
+{
+	return handle_packet_internal(payload, payload_len, response_buf, response_cap,
+				      response_len, false);
 }
 
 static uint64_t mac_to_node_id(const uint8_t mac[6])
@@ -810,10 +1141,16 @@ int edgez_config_build_zero_touch_request(const uint8_t current_mac[6],
 					   size_t *out_len)
 {
 	ai_edgez_halow_NetworkPacket packet = ai_edgez_halow_NetworkPacket_init_zero;
+	struct edgez_factory_identity factory;
 	pb_ostream_t stream;
 
 	if (!current_mac || !out || !out_len) {
 		return -EINVAL;
+	}
+	/* This copies the boot-time factory cache; it does not read flash. A
+	 * zero-touch request must never advertise a profile or temporary key. */
+	if (edgez_factory_data_get(&factory) != 0) {
+		return -ENODATA;
 	}
 	packet.from = mac_to_node_id(current_mac);
 	packet.operation = ai_edgez_halow_Operation_REQUEST;
@@ -821,16 +1158,20 @@ int edgez_config_build_zero_touch_request(const uint8_t current_mac[6],
 	packet.which_body = ai_edgez_halow_NetworkPacket_device_settings_tag;
 	packet.body.device_settings.action =
 		ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
-	k_mutex_lock(&config_lock, K_FOREVER);
 	copy_string(packet.body.device_settings.user_name,
-		    sizeof(packet.body.device_settings.user_name), settings.user_name);
-	packet.body.device_settings.user_id_high = settings.user_id_high;
-	packet.body.device_settings.user_id_low = settings.user_id_low;
-	packet.body.device_settings.user_public_key = settings.user_public_key;
+		    sizeof(packet.body.device_settings.user_name),
+		    factory.serial);
+	memcpy(&packet.body.device_settings.user_id_high, factory.public_key,
+	       sizeof(packet.body.device_settings.user_id_high));
+	memcpy(&packet.body.device_settings.user_id_low, factory.public_key + 8,
+	       sizeof(packet.body.device_settings.user_id_low));
+	packet.body.device_settings.user_public_key.size = EDGEZ_FACTORY_KEY_SIZE;
+	memcpy(packet.body.device_settings.user_public_key.bytes, factory.public_key,
+	       EDGEZ_FACTORY_KEY_SIZE);
 	packet.body.device_settings.device_type =
 		ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
 	packet.body.device_settings.sleep_mode_enabled = true;
-	k_mutex_unlock(&config_lock);
+	memset(&factory, 0, sizeof(factory));
 	stream = pb_ostream_from_buffer(out, out_cap);
 	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
 		return -EMSGSIZE;
@@ -866,6 +1207,8 @@ int edgez_config_build_network_beacon(const uint8_t current_mac[6],
 	}
 	packet.body.beacon.marker = settings.marker;
 	packet.body.beacon.device_type = settings.device_type;
+	copy_string(packet.body.beacon.icon_style,
+		    sizeof(packet.body.beacon.icon_style), settings.icon_style);
 	k_mutex_unlock(&config_lock);
 	stream = pb_ostream_from_buffer(out, out_cap);
 	if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
@@ -907,6 +1250,7 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 	       snapshot.user_public_key.size);
 	beacon.marker = snapshot.marker;
 	beacon.device_type = snapshot.device_type;
+	copy_string(beacon.icon_style, sizeof(beacon.icon_style), snapshot.icon_style);
 	/* Match edge-device-esp32-internal management beacon encoding exactly:
 	 * location is SensorData and is reserved before the sampled IMU entries.
 	 * The legacy top-level latitude/longitude and sleeping fields remain zero. */

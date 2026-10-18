@@ -320,7 +320,7 @@ export function SettingsPage({
                     accessibilityState={{ selected: locationMode === mode }}
                   >
                     <Text style={[styles.locationModeText, locationMode === mode && styles.locationModeTextSelected]}>
-                      {mode === "off" ? "Off" : mode === "fixed" ? "Fixed" : "Live"}
+                      {mode === "off" ? "Off" : mode === "fixed" ? "Map" : "Live"}
                     </Text>
                   </Pressable>
                 ))}

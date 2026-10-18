@@ -228,6 +228,7 @@ export function ProvisioningFlow({
         longitude: coordinates?.longitude ?? null,
         deviceType: "Unspecified",
         marker: "default",
+        iconStyle: "sensor",
         userUuid: "",
         lastSeenAt: "",
         meshMacAddress: selectedDevice.serial,

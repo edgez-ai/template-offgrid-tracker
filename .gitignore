@@ -6,6 +6,7 @@ dist/
 .env*.local
 app/android/
 app/signing/
+.factory/
 infra/appwrite.config.json
 site/.next
 site/out

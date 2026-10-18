@@ -62,6 +62,9 @@ K_MSGQ_DEFINE(relay_tx_queue, sizeof(struct relay_tx_item), RELAY_TX_QUEUE_DEPTH
 static struct relay_assembly assemblies[RELAY_ASSEMBLIES];
 static uint8_t local_mac[6];
 static bool initialized;
+volatile uint32_t edgez_relay_provisioning_received;
+volatile uint32_t edgez_relay_provisioning_accepted;
+volatile int32_t edgez_relay_provisioning_last_rc;
 
 static struct relay_assembly *find_assembly(const uint8_t source[6],
 					     uint32_t message_id,
@@ -125,12 +128,16 @@ static void receive_relay(const uint8_t originator[6], const uint8_t *frame,
 			uint8_t response[256];
 			size_t response_len = 0;
 
+			edgez_relay_provisioning_received++;
+			edgez_relay_provisioning_last_rc = -EINPROGRESS;
 			rc = edgez_config_handle_packet(item->payload + 1,
 				item->total_length - 1U, response, sizeof(response),
 				&response_len);
+			edgez_relay_provisioning_last_rc = rc;
 			if (rc != 0) {
 				LOG_WRN("Direct PAwR provisioning packet rejected rc=%d", rc);
 			} else {
+				edgez_relay_provisioning_accepted++;
 				LOG_INF("Direct PAwR provisioning packet accepted");
 			}
 #else

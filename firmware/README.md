@@ -211,6 +211,25 @@ and wait up to 500 ms for a receiver-generated application acknowledgement.
 There is no same-cycle retry. The MM8108 then returns to chip sleep without a
 firmware reload, and Zephyr returns to tickless System ON idle.
 
+Before using zero-touch provisioning, manufacture the sensor identity separately:
+
+```sh
+./scripts/provision_nrf54_factory.sh \
+  --serial FGH200M-000001 \
+  --jlink-serial <JLINK_SN> \
+  --output-dir ../.factory/FGH200M-000001
+```
+
+The script generates or imports an X25519 keypair and writes only the dedicated
+factory partition at `0x165000`. The firmware loads that record once at boot;
+the provisioning serial and public key then come exclusively from its RAM
+cache. A sensor with no valid factory keypair keeps HaLow powered down and
+sleeps. Preserve the generated private key and never commit `.factory/`.
+Reusable J-Link Commander files live under `scripts/jlink/`. Run
+`flash_fgh200m_sensor.jlink` or `flash_fgh200m_companion.jlink` from this
+`firmware/` directory. The factory script expands
+`factory_partition.jlink.in` with the generated image path before programming.
+
 See the [narrated low-power sensor demonstration](../docs/halow-pawr-low-power-sensor.md)
 for the mobile sensor view and measured wake/transmit waveform.
 

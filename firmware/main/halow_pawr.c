@@ -85,7 +85,10 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg)
     }
     beacon_callback = callback;
     beacon_callback_arg = arg;
-    if (xTaskCreate(pawr_worker, "halow_pawr", 4096, NULL, 6, &worker_task) != pdPASS) {
+    /* The worker decodes a maximum-size NetworkPacket and can forward it to
+     * both the BLE notification queue and the mesh TX queue.  The previous
+     * 4 KiB stack was exhausted by that nested protobuf/BLE call chain. */
+    if (xTaskCreate(pawr_worker, "halow_pawr", 8192, NULL, 6, &worker_task) != pdPASS) {
         vQueueDelete(action_queue);
         action_queue = NULL;
         return ESP_ERR_NO_MEM;

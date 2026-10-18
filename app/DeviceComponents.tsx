@@ -72,6 +72,37 @@ export function SwipeableDeviceRow({
   onOpen: (device: StoredDevice) => void;
   onRemove: (device: StoredDevice) => void;
 }) {
+  return <SwipeableListRow
+    accessibilityName={device.name}
+    icon={icon}
+    name={device.name}
+    subtitle={subtitle ?? (device.meshMacAddress || device.serial)}
+    meta={meta ?? (device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(5)}, ${device.longitude.toFixed(5)}` : "Location not shared")}
+    badge={badge}
+    onOpen={() => onOpen(device)}
+    onRemove={() => onRemove(device)}
+  />;
+}
+
+export function SwipeableListRow({
+  accessibilityName,
+  icon,
+  name,
+  subtitle,
+  meta,
+  badge,
+  onOpen,
+  onRemove,
+}: {
+  accessibilityName: string;
+  icon: React.ComponentProps<typeof Ionicons>["name"];
+  name: string;
+  subtitle: string;
+  meta: string;
+  badge?: string;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
   const translateX = useRef(new Animated.Value(0)).current;
   const open = useRef(false);
   const settle = (showActions: boolean) => {
@@ -90,16 +121,16 @@ export function SwipeableDeviceRow({
 
   return (
     <View style={styles.swipeContainer}>
-      <Pressable style={styles.removeAction} onPress={() => onRemove(device)} accessibilityRole="button" accessibilityLabel={`Remove ${device.name}`}>
+      <Pressable style={styles.removeAction} onPress={onRemove} accessibilityRole="button" accessibilityLabel={`Remove ${accessibilityName}`}>
         <Ionicons name="trash-outline" size={21} color="white" /><Text style={styles.removeText}>REMOVE</Text>
       </Pressable>
       <Animated.View style={[styles.card, { transform: [{ translateX }] }]} {...panResponder.panHandlers}>
-        <Pressable style={styles.open} onPress={() => onOpen(device)} accessibilityRole="button">
+        <Pressable style={styles.open} onPress={onOpen} accessibilityRole="button">
           <View style={styles.nodeIcon}><Ionicons name={icon} size={21} color="#0a8c87" /></View>
           <View style={styles.body}>
-            <Text style={styles.name}>{device.name}</Text>
-            <Text style={styles.serial} numberOfLines={1}>{subtitle ?? (device.meshMacAddress || device.serial)}</Text>
-            <Text style={styles.meta} numberOfLines={1}>{meta ?? (device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(5)}, ${device.longitude.toFixed(5)}` : "Location not shared")}</Text>
+            <Text style={styles.name}>{name}</Text>
+            <Text style={styles.serial} numberOfLines={1}>{subtitle}</Text>
+            <Text style={styles.meta} numberOfLines={1}>{meta}</Text>
           </View>
           <View style={styles.rowEnd}>
             {badge ? <Text style={styles.badge}>{badge}</Text> : null}

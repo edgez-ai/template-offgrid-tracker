@@ -38,6 +38,7 @@ export type DeviceDetails = {
   longitude: number | null;
   deviceType: string;
   marker: string;
+  iconStyle: string;
   userUuid: string;
   lastSeenAt: string;
   meshMacAddress: string;
@@ -65,6 +66,23 @@ export type StoredMessage = {
   retryOfUuid: string;
   lastAttemptAtMs: number;
   deliveryState: string;
+};
+
+export type ProvisioningRequestDetails = {
+  profileId: string;
+  serial: string;
+  nodeNum: string;
+  userIdHigh: string;
+  userIdLow: string;
+  userPublicKey: string;
+  lastSeenAt: string;
+};
+
+export type StoredProvisioningRequest = ProvisioningRequestDetails & {
+  id: string;
+  status: "pending" | "accepted";
+  firstSeenAt: string;
+  acceptedAt: string;
 };
 
 export type MessageDeliveryMetadata = Partial<Pick<StoredMessage,
@@ -101,6 +119,7 @@ type DeviceRow = {
   longitude: number | null;
   device_type: string;
   marker: string;
+  icon_style: string;
   user_uuid: string;
   last_seen_at: string;
   mesh_mac_address: string;
@@ -124,6 +143,20 @@ type MessageRow = {
   retry_of_uuid: string;
   last_attempt_at_ms: number;
   delivery_state: string;
+};
+
+type ProvisioningRequestRow = {
+  id: string;
+  profile_id: string;
+  serial: string;
+  node_num: string;
+  user_id_high: string;
+  user_id_low: string;
+  user_public_key: string;
+  status: StoredProvisioningRequest["status"];
+  first_seen_at: string;
+  last_seen_at: string;
+  accepted_at: string;
 };
 
 const databaseName = "offgrid-tracker.db";
@@ -187,6 +220,7 @@ function deviceFromRow(row: DeviceRow): StoredDevice {
     longitude: row.longitude,
     deviceType: row.device_type,
     marker: row.marker,
+    iconStyle: row.icon_style || "sensor",
     userUuid: row.user_uuid,
     lastSeenAt: row.last_seen_at,
     meshMacAddress: row.mesh_mac_address,
@@ -212,6 +246,22 @@ function messageFromRow(row: MessageRow): StoredMessage {
     retryOfUuid: row.retry_of_uuid,
     lastAttemptAtMs: row.last_attempt_at_ms,
     deliveryState: row.delivery_state,
+  };
+}
+
+function provisioningRequestFromRow(row: ProvisioningRequestRow): StoredProvisioningRequest {
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    serial: row.serial,
+    nodeNum: row.node_num,
+    userIdHigh: row.user_id_high,
+    userIdLow: row.user_id_low,
+    userPublicKey: row.user_public_key,
+    status: row.status,
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    acceptedAt: row.accepted_at,
   };
 }
 
@@ -276,6 +326,7 @@ async function database() {
           longitude REAL,
           device_type TEXT NOT NULL DEFAULT 'Unspecified',
           marker TEXT NOT NULL DEFAULT 'default',
+          icon_style TEXT NOT NULL DEFAULT 'sensor',
           user_uuid TEXT NOT NULL DEFAULT '',
           last_seen_at TEXT NOT NULL DEFAULT '',
           mesh_mac_address TEXT NOT NULL DEFAULT '',
@@ -306,6 +357,23 @@ async function database() {
         );
         CREATE INDEX IF NOT EXISTS messages_profile_peer_time_idx
           ON messages(profile_id, peer_serial, timestamp_ms);
+        CREATE TABLE IF NOT EXISTS provisioning_requests (
+          id TEXT PRIMARY KEY NOT NULL,
+          profile_id TEXT NOT NULL,
+          serial TEXT NOT NULL,
+          node_num TEXT NOT NULL,
+          user_id_high TEXT NOT NULL DEFAULT '0',
+          user_id_low TEXT NOT NULL DEFAULT '0',
+          user_public_key TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          accepted_at TEXT NOT NULL DEFAULT '',
+          UNIQUE (profile_id, node_num),
+          FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS provisioning_requests_profile_seen_idx
+          ON provisioning_requests(profile_id, last_seen_at DESC);
       `);
       const profileColumns = await db.getAllAsync<{ name: string }>("PRAGMA table_info(profiles)");
       const profileColumnNames = new Set(profileColumns.map(({ name }) => name));
@@ -334,6 +402,9 @@ async function database() {
       }
       if (!deviceColumnNames.has("marker")) {
         await db.execAsync("ALTER TABLE devices ADD COLUMN marker TEXT NOT NULL DEFAULT 'default'");
+      }
+      if (!deviceColumnNames.has("icon_style")) {
+        await db.execAsync("ALTER TABLE devices ADD COLUMN icon_style TEXT NOT NULL DEFAULT 'sensor'");
       }
       if (!deviceColumnNames.has("user_uuid")) {
         await db.execAsync("ALTER TABLE devices ADD COLUMN user_uuid TEXT NOT NULL DEFAULT ''");
@@ -376,7 +447,7 @@ async function database() {
           profile.id,
         );
       }
-      await db.execAsync("PRAGMA user_version = 7");
+      await db.execAsync("PRAGMA user_version = 8");
       return db;
     });
   }
@@ -497,6 +568,83 @@ export async function listProfileMessages(profileId: string): Promise<StoredMess
     profileId,
   );
   return rows.map(messageFromRow);
+}
+
+export async function listProfileProvisioningRequests(profileId: string): Promise<StoredProvisioningRequest[]> {
+  const db = await database();
+  const rows = await db.getAllAsync<ProvisioningRequestRow>(
+    "SELECT * FROM provisioning_requests WHERE profile_id = ? ORDER BY last_seen_at DESC",
+    profileId,
+  );
+  return rows.map(provisioningRequestFromRow);
+}
+
+export async function saveProfileProvisioningRequest(
+  details: ProvisioningRequestDetails,
+): Promise<StoredProvisioningRequest> {
+  const db = await database();
+  const existing = await db.getFirstAsync<ProvisioningRequestRow>(
+    "SELECT * FROM provisioning_requests WHERE profile_id = ? AND node_num = ?",
+    details.profileId,
+    details.nodeNum,
+  );
+  if (existing) {
+    await db.runAsync(
+      `UPDATE provisioning_requests
+       SET serial = ?, user_id_high = ?, user_id_low = ?, user_public_key = ?, last_seen_at = ?
+       WHERE id = ?`,
+      details.serial,
+      details.userIdHigh,
+      details.userIdLow,
+      details.userPublicKey,
+      details.lastSeenAt,
+      existing.id,
+    );
+    return provisioningRequestFromRow({ ...existing, serial: details.serial,
+      user_id_high: details.userIdHigh, user_id_low: details.userIdLow,
+      user_public_key: details.userPublicKey, last_seen_at: details.lastSeenAt });
+  }
+  const id = localUuid();
+  await db.runAsync(
+    `INSERT INTO provisioning_requests
+      (id, profile_id, serial, node_num, user_id_high, user_id_low, user_public_key,
+       status, first_seen_at, last_seen_at, accepted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, '')`,
+    id,
+    details.profileId,
+    details.serial,
+    details.nodeNum,
+    details.userIdHigh,
+    details.userIdLow,
+    details.userPublicKey,
+    details.lastSeenAt,
+    details.lastSeenAt,
+  );
+  return { id, ...details, status: "pending", firstSeenAt: details.lastSeenAt, acceptedAt: "" };
+}
+
+export async function markProvisioningRequestAccepted(profileId: string, id: string): Promise<void> {
+  const db = await database();
+  const acceptedAt = new Date().toISOString();
+  const result = await db.runAsync(
+    "UPDATE provisioning_requests SET status = 'accepted', accepted_at = ? WHERE profile_id = ? AND id = ?",
+    acceptedAt,
+    profileId,
+    id,
+  );
+  if (!result.changes) throw new Error("Provisioning request no longer exists.");
+}
+
+export async function deleteProfileProvisioningRequest(
+  profileId: string,
+  requestId: string,
+): Promise<void> {
+  const db = await database();
+  await db.runAsync(
+    "DELETE FROM provisioning_requests WHERE profile_id = ? AND id = ?",
+    profileId,
+    requestId,
+  );
 }
 
 export async function replaceProfileConversation(
@@ -639,7 +787,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
     await db.runAsync(
       `UPDATE devices
        SET serial = ?, name = ?, kind = ?, firmware_target = ?, location_source = ?, latitude = ?, longitude = ?,
-           device_type = ?, marker = ?, user_uuid = ?, last_seen_at = ?, mesh_mac_address = ?, user_public_key = ?, updated_at = ?
+           device_type = ?, marker = ?, icon_style = ?, user_uuid = ?, last_seen_at = ?, mesh_mac_address = ?, user_public_key = ?, updated_at = ?
        WHERE id = ?`,
       details.serial,
       details.name,
@@ -650,6 +798,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
       details.longitude,
       details.deviceType,
       details.marker,
+      details.iconStyle,
       details.userUuid,
       details.lastSeenAt,
       details.meshMacAddress,
@@ -662,8 +811,8 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
   const id = deviceId ?? localUuid();
   await db.runAsync(
     `INSERT INTO devices
-      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, device_type, marker, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude, device_type, marker, icon_style, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     id,
     details.profileId,
     details.serial,
@@ -675,6 +824,7 @@ export async function saveProfileDevice(details: DeviceDetails, deviceId?: strin
     details.longitude,
     details.deviceType,
     details.marker,
+    details.iconStyle,
     details.userUuid,
     details.lastSeenAt,
     details.meshMacAddress,

@@ -1,15 +1,16 @@
-import { useEdgezMeshSession } from "@edgez/react-native-sdk";
+import { encodeNetworkPacket, Interface, Operation, useEdgezMeshSession } from "@edgez/react-native-sdk";
 import type { EdgezMeshConfig, EdgezMeshNode, EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import React, { useEffect, useRef, useState } from "react";
 import { bandwidthForChannel, channelsForCountry } from "./halowChannels";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, messagesByNode, storedDeviceNode } from "./mesh-utils";
-import { listProfileDevices, listProfileMessages, profileIdentity } from "./profile-store";
+import { listProfileDevices, listProfileMessages, profileIdentity, saveProfileProvisioningRequest } from "./profile-store";
 import type { StoredProfile } from "./profile-store";
 import type { LocationMode } from "./app-settings";
 import { beaconDeviceType } from "./beacon-options";
 import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
+import { applyDeviceSettingsIcon, provisioningRequestFromPacket, rememberBeaconIconFromPacket } from "./halow-provisioning";
 
 type BeaconLocation = { latitude: number; longitude: number };
 
@@ -51,6 +52,7 @@ export function ActiveProfileBleLink({
   iconColor,
   onStatusChange,
   onMeshChange,
+  onProvisioningRequestsChanged,
 }: {
   profile: StoredProfile;
   locationMode: LocationMode;
@@ -58,6 +60,7 @@ export function ActiveProfileBleLink({
   iconColor: BeaconIconColor;
   onStatusChange: (status: BleLinkStatus) => void;
   onMeshChange: (value: { session: EdgezMeshSession; state: EdgezMeshState }) => void;
+  onProvisioningRequestsChanged: () => Promise<void>;
 }) {
   const sessionRef = useRef<EdgezMeshSession | null>(null);
   const retryDelayMs = useRef(BLE_CONNECT_INITIAL_RETRY_MS);
@@ -75,6 +78,16 @@ export function ActiveProfileBleLink({
     },
   });
   sessionRef.current = session;
+
+  useEffect(() => session.sdk.subscribe((event) => {
+    if (event.type !== "packet" || !event.packet?.length) return;
+    rememberBeaconIconFromPacket(event.packet);
+    const request = provisioningRequestFromPacket(profile.id, event.packet);
+    if (!request) return;
+    void saveProfileProvisioningRequest(request)
+      .then(onProvisioningRequestsChanged)
+      .catch(() => undefined);
+  }), [onProvisioningRequestsChanged, profile.id, session]);
 
   useEffect(() => onMeshChange({ session, state }), [onMeshChange, session, state]);
 
@@ -203,7 +216,18 @@ export function ActiveProfileBleLink({
       longitude: beaconLocation?.longitude,
       meshBandwidthMhz: channel ? bandwidthForChannel(channel) : 0,
       meshFrequencyKhz: channel ? Math.round(channel.frequencyMHz * 1000) : 0,
-    }, profileIdentity(profile)).catch((caught) => {
+    }, profileIdentity(profile)).then(async () => {
+      const iconPacket = applyDeviceSettingsIcon(encodeNetworkPacket({
+        operation: Operation.request,
+        interface: Interface.halow,
+        deviceSettings: { action: 2 },
+      }), iconType);
+      await session.sdk.transport.invoke("sendPacket", {
+        label: "Beacon icon update",
+        packet: Array.from(iconPacket),
+        waitForDrainMs: 1000,
+      });
+    }).catch((caught) => {
       lastBeaconSettingsKey.current = "";
       setBeaconSettingsError(caught instanceof Error ? caught.message : "Could not update beacon settings");
     });

@@ -1,11 +1,7 @@
 #include "edgez_nrf54l15_fgh200m_companion.overlay"
 
-/* Low-power sensor variant: leave the L76K fully off. The disabled UART keeps
- * P1.11/P1.12 disconnected, and the GPIO hog holds its P1.09 power/wake input
- * low from PRE_KERNEL initialization onward. */
-&uart22 {
-	status = "disabled";
-};
+/* The L76K remains available for profiles using Live location. Application
+ * device-PM and its wake GPIO keep it off for Off/Map profiles and sleep. */
 
 /* Battery measurement is omitted from this power profile.  Disabling the DT
  * device as well as CONFIG_ADC prevents the SAADC from being initialized and
@@ -19,13 +15,6 @@
 };
 
 &gpio1 {
-	gps_power_off: gps_power_off {
-		gpio-hog;
-		gpios = <9 GPIO_ACTIVE_HIGH>;
-		output-low;
-		line-name = "l76k-power-off";
-	};
-
 	/* The XIAO base-board regulator node is disabled by the FGH200M overlay.
 	 * Keep its otherwise-unclaimed VBAT divider enable in a defined off state. */
 	xiao_vbat_off: xiao_vbat_off {
