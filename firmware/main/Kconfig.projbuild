@@ -226,6 +226,15 @@ menu "HaLow initialization"
             Receive EdgeZ PAwR beacon requests over HaLow vendor action
             frames and return the compatible beacon hash acknowledgement.
 
+    config OFFGRID_PAWR_BULK_TEST_RECEIVER
+        bool "Validate nRF54 connectionless PAwR bulk-transfer tests"
+        depends on HALOW_PAWR_ENABLE
+        default n
+        help
+            Recognize the deterministic bulk-test envelope in PAwR Beacon
+            payloads, validate chunks without buffering the complete object,
+            and print one PASS or FAIL summary when each test case completes.
+
     config HALOW_BLE_PROVISIONING
         bool "Provision the HaLow mesh over ESP32 BLE"
         depends on IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32P4

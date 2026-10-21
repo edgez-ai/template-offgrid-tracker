@@ -63,7 +63,8 @@ else()
 
 # ESP32-S3 uses its local BLE controller. ESP32-P4 uses the ESP32-C6
 # controller on the Waveshare board through ESP-Hosted.
-    if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
+    if(CONFIG_HALOW_BLE_PROVISIONING AND
+       (IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4"))
         list(APPEND component_sources "halow_provisioning.c")
         list(APPEND component_private_dependencies
             bt
@@ -74,7 +75,8 @@ else()
         )
     endif()
 
-    if(IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4")
+    if(CONFIG_HALOW_BLE_PROVISIONING AND
+       (IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4"))
         list(APPEND component_sources
             "edgez_ble_control.c"
             "../nrf54/src/usb_control.pb.c")
@@ -93,7 +95,7 @@ list(APPEND component_private_dependencies nanopb)
 idf_component_register(
     SRCS ${component_sources}
     INCLUDE_DIRS "include"
-    PRIV_INCLUDE_DIRS "../nrf54/src"
+    PRIV_INCLUDE_DIRS "../nrf54/src" "../shared"
     PRIV_REQUIRES ${component_private_dependencies}
 )
 

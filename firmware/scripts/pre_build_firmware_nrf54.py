@@ -71,7 +71,12 @@ if not is_complete_morse_module(mm_root):
     print(f"ERROR: Complete mm-iot-zephyr source checkout not found at {mm_root}")
     env.Exit(1)
 
+pio_env = env.get("PIOENV", "")
 edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
+if not edgez_source_option and pio_env.endswith("-bulk-test"):
+    sibling_source = PROJECT_DIR.parent.parent / "edgez-halow-mesh"
+    if sibling_source.is_dir():
+        edgez_source_option = str(sibling_source)
 edgez_source_root = None
 if edgez_source_option:
     edgez_source_root = Path(edgez_source_option).expanduser().resolve()
@@ -131,7 +136,6 @@ else:
     # graph, so mirror the release-archive definition into its SCons flags.
     env.AppendUnique(CPPDEFINES=[("EDGEZ_PLATFORM_ARCHIVE_BUILD", 1)])
 
-pio_env = env.get("PIOENV", "")
 if MORSE_CHIP == "mm8108":
     bcf_filename = "bcf_mf15457.mbin"
 elif "hc01" in pio_env:
@@ -142,12 +146,24 @@ else:
 # matching BCF blob staged by this script.
 extra_conf = env.GetProjectOption("custom_zephyr_extra_conf", "")
 if extra_conf:
-    extra_conf_path = (PROJECT_DIR / extra_conf).resolve()
+    extra_conf_paths = []
+    for fragment in extra_conf.split(","):
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        path = (PROJECT_DIR / fragment).resolve()
+        if not path.is_file():
+            print(f"ERROR: Zephyr config fragment not found: {path}")
+            env.Exit(1)
+        extra_conf_paths.append(str(path))
+    if not extra_conf_paths:
+        print("ERROR: custom_zephyr_extra_conf did not name a config fragment")
+        env.Exit(1)
     board = env.BoardConfig()
     cmake_args = board.get("build.zephyr.cmake_extra_args", "")
     board.update(
         "build.zephyr.cmake_extra_args",
-        cmake_args + " " + shlex.quote("-DEXTRA_CONF_FILE=" + str(extra_conf_path)),
+        cmake_args + " " + shlex.quote("-DEXTRA_CONF_FILE=" + ";".join(extra_conf_paths)),
     )
 
 if Path(bcf_filename).name != bcf_filename:
