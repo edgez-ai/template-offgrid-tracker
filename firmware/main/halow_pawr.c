@@ -42,7 +42,8 @@ struct pawr_bulk_receive_state {
     uint32_t received;
     uint16_t unique_chunks;
     uint16_t frames_received;
-    uint32_t received_map[8];
+    uint32_t received_map[16];
+    struct edgez_pawr_bulk_regulatory regulatory;
     bool saw_last;
     int64_t started_us;
 };
@@ -70,6 +71,7 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
         bulk_state.session_id = chunk.session_id;
         bulk_state.total_length = chunk.total_length;
         bulk_state.expected_digest = chunk.expected_digest;
+        bulk_state.regulatory = chunk.regulatory;
         bulk_state.digest = edgez_pawr_bulk_expected_digest(
             chunk.test_index, chunk.total_length);
         bulk_state.started_us = esp_timer_get_time();
@@ -84,8 +86,13 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
         return true;
     }
 
+    if (memcmp(&bulk_state.regulatory, &chunk.regulatory,
+               sizeof(bulk_state.regulatory)) != 0) {
+        bulk_state.invalid = true;
+    }
+
     bulk_state.frames_received++;
-    if (chunk.chunk_index >= 256U) {
+    if (chunk.chunk_index >= 512U) {
         bulk_state.invalid = true;
         return true;
     }
@@ -123,6 +130,46 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
                  (unsigned)bulk_state.frames_received, elapsed_ms,
                  bulk_state.digest, source_mac[0], source_mac[1],
                  source_mac[2], source_mac[3], source_mac[4], source_mac[5]);
+
+        const struct edgez_pawr_bulk_regulatory *reg =
+            &bulk_state.regulatory;
+        const bool country_ok = strcmp(reg->country_code, "EU") == 0;
+        const bool channel_ok = reg->frequency_khz >= 863500U &&
+            reg->frequency_khz <= 867500U;
+        const bool bandwidth_ok = reg->bandwidth_mhz == 1U;
+        const bool duty_ok =
+            (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID) != 0U &&
+            reg->duty_cycle_centi_percent <= 280U;
+        const bool eirp_config_ok =
+            (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID) != 0U &&
+            reg->max_eirp_dbm <= 16;
+        const bool terminal_ok =
+            (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE) != 0U;
+        const bool config_pass = country_ok && channel_ok && bandwidth_ok &&
+            duty_ok && eirp_config_ok && terminal_ok;
+        const uint32_t goodput_kbps = elapsed_ms == 0U ? 0U :
+            (bulk_state.received * 8U) / elapsed_ms;
+
+        ESP_LOGI(TAG,
+                 "EU_COMPLIANCE_PRECHECK %s standard=EN304220-2 role=terminal "
+                 "country=%s frequency_khz=%" PRIu32 " bandwidth_mhz=%u "
+                 "sender_duty=%u.%02u%% duty_mode=%s eirp_cap_dbm=%d "
+                 "receiver_profile=%s/%u/%uMHz eirp_measurement=UNKNOWN",
+                 config_pass ? "CONFIG_PASS" : "CONFIG_FAIL",
+                 reg->country_code, reg->frequency_khz,
+                 (unsigned)reg->bandwidth_mhz,
+                 (unsigned)(reg->duty_cycle_centi_percent / 100U),
+                 (unsigned)(reg->duty_cycle_centi_percent % 100U),
+                 reg->duty_cycle_mode == 0U ? "spread" : "burst",
+                 (int)reg->max_eirp_dbm,
+                 CONFIG_HALOW_COUNTRY_CODE,
+                 (unsigned)CONFIG_HALOW_MESH_FREQUENCY_KHZ,
+                 (unsigned)CONFIG_HALOW_MESH_BANDWIDTH_MHZ);
+        ESP_LOGI(TAG,
+                 "PAWR_ENERGY_PRECHECK bytes=%" PRIu32
+                 " active_ms=%" PRIu32 " goodput_kbps=%" PRIu32
+                 " energy_mj=UNKNOWN current_measurement=REQUIRED",
+                 bulk_state.received, elapsed_ms, goodput_kbps);
         bulk_state.active = false;
     }
     return true;

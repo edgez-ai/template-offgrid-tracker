@@ -51,13 +51,25 @@
 #endif
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST) || \
-	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE) || \
+	defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 #include "mmwlan.h"
 
 extern enum mmwlan_status mmdrv_set_wake_enabled(bool enabled);
 extern enum mmwlan_status mmdrv_set_chip_power_save_enabled(uint16_t vif_id,
 							     bool enabled);
 extern enum mmwlan_status mmdrv_set_dynamic_ps_timeout(uint32_t timeout_ms);
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+extern enum mmwlan_status mmdrv_set_duty_cycle(
+	uint32_t duty_cycle, bool duty_cycle_omit_ctrl_resp,
+	enum mmwlan_duty_cycle_mode mode);
+extern enum mmwlan_status mmdrv_get_duty_cycle(
+	struct mmwlan_duty_cycle_stats *stats);
+#endif
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#include "mmregdb.h"
 #endif
 
 LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
@@ -1002,6 +1014,101 @@ struct sensor_bulk_ring {
 
 static struct sensor_bulk_ring bulk_ring;
 
+static int sensor_pawr_enable_bulk_burst_mode(void)
+{
+	static const char country_code[] = "EU";
+	const struct mmwlan_s1g_channel_list *domain =
+		mmwlan_lookup_regulatory_domain(get_regulatory_db(), country_code);
+	const struct mmwlan_s1g_channel *selected = NULL;
+
+	if (domain != NULL) {
+		for (unsigned i = 0U; i < domain->num_channels; ++i) {
+			const struct mmwlan_s1g_channel *channel = &domain->channels[i];
+
+			if (channel->centre_freq_hz == 863500000U &&
+			    channel->bw_mhz == 1U) {
+				selected = channel;
+				break;
+			}
+		}
+	}
+	if (selected == NULL) {
+		LOG_ERR("PAWR_EU_REG burst setup failed: channel missing");
+		return -ENOENT;
+	}
+
+	enum mmwlan_status status = mmdrv_set_duty_cycle(
+		selected->duty_cycle_sta,
+		selected->duty_cycle_omit_ctrl_resp,
+		MMWLAN_DUTY_CYCLE_MODE_BURST);
+	if (status != MMWLAN_SUCCESS) {
+		LOG_ERR("PAWR_EU_REG burst setup failed status=%d", status);
+		return -EIO;
+	}
+
+	struct mmwlan_duty_cycle_stats stats = {0};
+	status = mmdrv_get_duty_cycle(&stats);
+	if (status != MMWLAN_SUCCESS ||
+	    stats.duty_cycle != selected->duty_cycle_sta ||
+	    stats.mode != MMWLAN_DUTY_CYCLE_MODE_BURST) {
+		LOG_ERR("PAWR_EU_REG burst verification failed status=%d duty=%u mode=%u",
+			status, (unsigned)stats.duty_cycle, (unsigned)stats.mode);
+		return -EIO;
+	}
+
+	LOG_INF("PAWR_EU_REG burst enabled duty=%u.%02u%% airtime_remaining_us=%u window_us=%u",
+		(unsigned)(stats.duty_cycle / 100U),
+		(unsigned)(stats.duty_cycle % 100U),
+		(unsigned)stats.burst_airtime_remaining_us,
+		(unsigned)stats.burst_window_duration_us);
+	return 0;
+}
+
+static struct edgez_pawr_bulk_regulatory sensor_pawr_bulk_regulatory(void)
+{
+	struct edgez_pawr_bulk_regulatory result = {
+		.country_code = {'E', 'U', '\0'},
+		.frequency_khz = 863500U,
+		.bandwidth_mhz = 1U,
+		.flags = EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE,
+	};
+	const struct mmwlan_s1g_channel_list *domain =
+		mmwlan_lookup_regulatory_domain(get_regulatory_db(),
+			result.country_code);
+
+	if (domain != NULL) {
+		for (unsigned i = 0U; i < domain->num_channels; ++i) {
+			const struct mmwlan_s1g_channel *channel =
+				&domain->channels[i];
+
+			if (channel->centre_freq_hz / 1000U == result.frequency_khz &&
+			    channel->bw_mhz == result.bandwidth_mhz) {
+				result.duty_cycle_centi_percent =
+					channel->duty_cycle_sta;
+				result.max_eirp_dbm = channel->max_tx_eirp_dbm;
+				result.flags |= EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID;
+				break;
+			}
+		}
+	}
+
+	struct mmwlan_duty_cycle_stats stats = {0};
+	if (mmdrv_get_duty_cycle(&stats) == MMWLAN_SUCCESS) {
+		result.duty_cycle_centi_percent = (uint16_t)stats.duty_cycle;
+		result.duty_cycle_mode = (uint8_t)stats.mode;
+		result.flags |= EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID;
+	}
+
+	LOG_INF("PAWR_EU_REG sender country=%s frequency=%u kHz bandwidth=%u MHz duty=%u.%02u%% mode=%u max_eirp=%d dBm flags=0x%02x",
+		result.country_code, (unsigned)result.frequency_khz,
+		(unsigned)result.bandwidth_mhz,
+		(unsigned)(result.duty_cycle_centi_percent / 100U),
+		(unsigned)(result.duty_cycle_centi_percent % 100U),
+		(unsigned)result.duty_cycle_mode, (int)result.max_eirp_dbm,
+		(unsigned)result.flags);
+	return result;
+}
+
 static struct sensor_bulk_ring_slot *sensor_bulk_ring_at(uint8_t index)
 {
 	if (index >= bulk_ring.count) {
@@ -1100,7 +1207,8 @@ static int sensor_pawr_queue_bulk_chunk(const uint8_t *payload,
 
 static bool sensor_pawr_probe_bulk_chunk(uint16_t chunk_size,
 					 uint8_t probe_index,
-					 uint32_t wake_interval_ms)
+					 uint32_t wake_interval_ms,
+					 const struct edgez_pawr_bulk_regulatory *regulatory)
 {
 	uint8_t data[EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE];
 	const uint32_t session_id = sys_rand32_get();
@@ -1128,6 +1236,7 @@ static bool sensor_pawr_probe_bulk_chunk(uint16_t chunk_size,
 		.data_length = chunk_size,
 		.test_index = probe_index,
 		.flags = EDGEZ_PAWR_BULK_FLAG_FIRST | EDGEZ_PAWR_BULK_FLAG_LAST,
+		.regulatory = *regulatory,
 		.data = data,
 	};
 	slot->payload_length = edgez_pawr_bulk_encode(
@@ -1187,13 +1296,19 @@ static int sensor_pawr_run_bulk_test(uint32_t wake_interval_ms)
 	static bool size_probe_done;
 	uint8_t data[EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE];
 	const uint32_t session_id = sys_rand32_get();
+	int rc = sensor_pawr_enable_bulk_burst_mode();
+	if (rc != 0) {
+		return rc;
+	}
+	const struct edgez_pawr_bulk_regulatory regulatory =
+		sensor_pawr_bulk_regulatory();
 
 	if (!size_probe_done) {
 		uint8_t highest_passing_tier = tier;
 		for (size_t probe = 0U; probe < ARRAY_SIZE(probe_sizes); ++probe) {
 			const bool passed = sensor_pawr_probe_bulk_chunk(
 				probe_sizes[probe], (uint8_t)(0x80U + probe),
-				wake_interval_ms);
+				wake_interval_ms, &regulatory);
 			if (passed) {
 				highest_passing_tier = (uint8_t)(3U + probe);
 			}
@@ -1252,6 +1367,7 @@ static int sensor_pawr_run_bulk_test(uint32_t wake_interval_ms)
 						 EDGEZ_PAWR_BULK_FLAG_FIRST : 0U) |
 						(window_offset + data_length == total_length ?
 						 EDGEZ_PAWR_BULK_FLAG_LAST : 0U),
+					.regulatory = regulatory,
 					.data = data,
 				};
 				slot->payload_length = edgez_pawr_bulk_encode(

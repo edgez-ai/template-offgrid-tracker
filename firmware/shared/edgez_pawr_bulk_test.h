@@ -6,12 +6,26 @@
 #include <string.h>
 
 #define EDGEZ_PAWR_BULK_MAGIC 0x455a4254U
-#define EDGEZ_PAWR_BULK_VERSION 1U
-#define EDGEZ_PAWR_BULK_HEADER_SIZE 32U
+#define EDGEZ_PAWR_BULK_VERSION 2U
+#define EDGEZ_PAWR_BULK_HEADER_SIZE 48U
 #define EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE 1400U
 
 #define EDGEZ_PAWR_BULK_FLAG_FIRST 0x01U
 #define EDGEZ_PAWR_BULK_FLAG_LAST 0x02U
+
+#define EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID 0x01U
+#define EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID 0x02U
+#define EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE 0x04U
+
+struct edgez_pawr_bulk_regulatory {
+	char country_code[3];
+	uint32_t frequency_khz;
+	uint16_t duty_cycle_centi_percent;
+	int8_t max_eirp_dbm;
+	uint8_t bandwidth_mhz;
+	uint8_t duty_cycle_mode;
+	uint8_t flags;
+};
 
 struct edgez_pawr_bulk_chunk {
 	uint32_t session_id;
@@ -23,6 +37,7 @@ struct edgez_pawr_bulk_chunk {
 	uint16_t data_length;
 	uint8_t test_index;
 	uint8_t flags;
+	struct edgez_pawr_bulk_regulatory regulatory;
 	const uint8_t *data;
 };
 
@@ -103,7 +118,17 @@ static inline size_t edgez_pawr_bulk_encode(
 	edgez_pawr_bulk_put_u16(output + 24, chunk->chunk_index);
 	edgez_pawr_bulk_put_u16(output + 26, chunk->chunk_count);
 	edgez_pawr_bulk_put_u16(output + 28, chunk->data_length);
-	edgez_pawr_bulk_put_u16(output + 30, 0U);
+	edgez_pawr_bulk_put_u16(output + 30,
+		chunk->regulatory.duty_cycle_centi_percent);
+	edgez_pawr_bulk_put_u32(output + 32,
+		chunk->regulatory.frequency_khz);
+	output[36] = (uint8_t)chunk->regulatory.country_code[0];
+	output[37] = (uint8_t)chunk->regulatory.country_code[1];
+	output[38] = chunk->regulatory.bandwidth_mhz;
+	output[39] = (uint8_t)chunk->regulatory.max_eirp_dbm;
+	output[40] = chunk->regulatory.duty_cycle_mode;
+	output[41] = chunk->regulatory.flags;
+	memset(output + 42, 0, 6U);
 	memcpy(output + EDGEZ_PAWR_BULK_HEADER_SIZE, chunk->data,
 	       chunk->data_length);
 	return EDGEZ_PAWR_BULK_HEADER_SIZE + chunk->data_length;
@@ -128,6 +153,16 @@ static inline bool edgez_pawr_bulk_decode(const uint8_t *input, size_t length,
 	chunk->chunk_index = edgez_pawr_bulk_get_u16(input + 24);
 	chunk->chunk_count = edgez_pawr_bulk_get_u16(input + 26);
 	chunk->data_length = edgez_pawr_bulk_get_u16(input + 28);
+	chunk->regulatory.duty_cycle_centi_percent =
+		edgez_pawr_bulk_get_u16(input + 30);
+	chunk->regulatory.frequency_khz = edgez_pawr_bulk_get_u32(input + 32);
+	chunk->regulatory.country_code[0] = (char)input[36];
+	chunk->regulatory.country_code[1] = (char)input[37];
+	chunk->regulatory.country_code[2] = '\0';
+	chunk->regulatory.bandwidth_mhz = input[38];
+	chunk->regulatory.max_eirp_dbm = (int8_t)input[39];
+	chunk->regulatory.duty_cycle_mode = input[40];
+	chunk->regulatory.flags = input[41];
 	chunk->data = input + EDGEZ_PAWR_BULK_HEADER_SIZE;
 
 	return chunk->data_length <= EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE &&
