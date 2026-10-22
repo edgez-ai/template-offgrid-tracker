@@ -345,7 +345,7 @@ static esp_err_t start_mesh(void)
     if (err != ESP_OK) return err;
 #endif
 #if CONFIG_HALOW_PAWR_ENABLE
-    err = halow_pawr_start(pawr_beacon_callback, NULL);
+    err = halow_pawr_start(pawr_beacon_callback, NULL, mesh_id);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not start HaLow PAwR bridge: %s", esp_err_to_name(err));
         return err;

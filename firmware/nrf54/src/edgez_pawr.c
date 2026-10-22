@@ -28,6 +28,7 @@ static const uint8_t broadcast_mac[MMWLAN_MAC_ADDR_LEN] = {
 static struct k_spinlock state_lock;
 static uint32_t next_request_id;
 static uint32_t pending_beacon_hash;
+static uint32_t pending_compressed_ssid;
 static bool pending_response;
 static bool initialized;
 K_SEM_DEFINE(response_sem, 0, 1);
@@ -37,23 +38,31 @@ static void action_rx(const uint8_t source_mac[MMWLAN_MAC_ADDR_LEN],
 		      int16_t rssi_dbm, void *arg)
 {
 	uint32_t expected_hash;
+	uint32_t expected_ssid;
 	uint32_t response_hash;
+	uint32_t response_ssid;
 	bool waiting;
 	k_spinlock_key_t key;
 
 	ARG_UNUSED(arg);
 	if (!source_mac ||
-	    !edgez_pawr_decode_response(payload, payload_len, &response_hash)) {
+	    !edgez_pawr_decode_response(payload, payload_len, &response_hash,
+					&response_ssid)) {
 		return;
 	}
 
 	key = k_spin_lock(&state_lock);
 	expected_hash = pending_beacon_hash;
+	expected_ssid = pending_compressed_ssid;
 	waiting = pending_response;
-	if (waiting && response_hash == expected_hash) {
+	if (waiting && response_ssid == expected_ssid &&
+	    response_hash == expected_hash) {
 		pending_response = false;
 	}
 	k_spin_unlock(&state_lock, key);
+	if (response_ssid != expected_ssid) {
+		return;
+	}
 
 	if (!waiting || response_hash != expected_hash) {
 		LOG_WRN("stale Beacon response hash=%08x expected=%08x",
@@ -90,7 +99,9 @@ int edgez_pawr_send_beacon_request(uint32_t wake_interval_ms)
 	enum mmwlan_status status;
 	k_spinlock_key_t key;
 	uint32_t hash;
+	uint32_t compressed_ssid;
 	uint32_t request_id;
+	struct edgez_halow_profile profile = {0};
 	size_t beacon_len = 0;
 	size_t frame_len;
 
@@ -110,9 +121,12 @@ int edgez_pawr_send_beacon_request(uint32_t wake_interval_ms)
 	}
 
 	request_id = ++next_request_id;
+	edgez_config_get_profile(&profile);
+	compressed_ssid = edgez_pawr_compress_ssid(
+		(const uint8_t *)profile.mesh_id, strlen(profile.mesh_id));
 	hash = edgez_pawr_payload_hash(frame + EDGEZ_PAWR_HEADER_LENGTH, beacon_len);
 	if (!edgez_pawr_encode_request(frame, sizeof(frame), request_id,
-				       wake_interval_ms,
+				       wake_interval_ms, compressed_ssid,
 				       frame + EDGEZ_PAWR_HEADER_LENGTH, beacon_len,
 				       &frame_len)) {
 		return -EMSGSIZE;
@@ -121,6 +135,7 @@ int edgez_pawr_send_beacon_request(uint32_t wake_interval_ms)
 	k_sem_reset(&response_sem);
 	key = k_spin_lock(&state_lock);
 	pending_beacon_hash = hash;
+	pending_compressed_ssid = compressed_ssid;
 	pending_response = true;
 	k_spin_unlock(&state_lock, key);
 

@@ -73,10 +73,6 @@ if not is_complete_morse_module(mm_root):
 
 pio_env = env.get("PIOENV", "")
 edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
-if not edgez_source_option and pio_env.endswith("-bulk-test"):
-    sibling_source = PROJECT_DIR.parent.parent / "edgez-halow-mesh"
-    if sibling_source.is_dir():
-        edgez_source_option = str(sibling_source)
 edgez_source_root = None
 if edgez_source_option:
     edgez_source_root = Path(edgez_source_option).expanduser().resolve()

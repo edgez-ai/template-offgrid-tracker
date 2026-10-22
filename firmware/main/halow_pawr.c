@@ -206,14 +206,19 @@ static void pawr_beacon_rx(const uint8_t source_mac[6],
     }
 }
 
-esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg)
+esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
+                           const char *mesh_id)
 {
-    if (callback == NULL) {
+    if (callback == NULL || mesh_id == NULL || mesh_id[0] == '\0') {
         return ESP_ERR_INVALID_ARG;
     }
     if (action_queue != NULL) {
         beacon_callback = callback;
         beacon_callback_arg = arg;
+#if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+        bulk_state.receiver.config.compressed_ssid = edgez_pawr_compress_ssid(
+            (const uint8_t *)mesh_id, strlen(mesh_id));
+#endif
         return ESP_OK;
     }
 
@@ -225,6 +230,8 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg)
     beacon_callback_arg = arg;
 #if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
     const struct edgez_pawr_bulk_receiver_config bulk_config = {
+        .compressed_ssid = edgez_pawr_compress_ssid(
+            (const uint8_t *)mesh_id, strlen(mesh_id)),
         .send = pawr_bulk_send,
         .data = pawr_bulk_data,
         .done = pawr_bulk_done,

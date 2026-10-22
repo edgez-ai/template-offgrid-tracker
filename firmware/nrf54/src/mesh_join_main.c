@@ -162,7 +162,8 @@ static int acknowledge_pawr_beacon(const struct edgez_pawr_action_view *action,
 	size_t frame_len = 0U;
 
 	if (!edgez_pawr_encode_response(response, sizeof(response),
-			edgez_pawr_payload_hash(beacon, beacon_len), &response_len) ||
+			edgez_pawr_payload_hash(beacon, beacon_len),
+			mesh_runtime.config.compressed_ssid, &response_len) ||
 	    !edgez_pawr_encode_action_frame(frame, sizeof(frame),
 			pawr_sequence_number++, mesh_runtime.radio_info.mac_addr,
 			action->source, response, response_len, &frame_len)) {
@@ -454,6 +455,8 @@ static int join_ignore_unsupported(void *ctx,
 	struct edgez_pawr_action_view action;
 	struct edgez_pawr_request_view request;
 	uint32_t response_hash;
+	uint32_t response_ssid;
+	bool decoded_request;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 	struct edgez_pawr_bulk_control bulk_control;
 #endif
@@ -462,16 +465,19 @@ static int join_ignore_unsupported(void *ctx,
 			radio->data, radio->length, &action)) {
 		return EDGEZ_UMAC_OK;
 	}
-	if (edgez_pawr_decode_request(action.payload, action.payload_length,
-				      &request) &&
-	    request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
-		(void)edgez_nrf_mesh_receive_pawr(
-			request.payload, request.payload_length, action.source);
-		return EDGEZ_UMAC_OK;
+	decoded_request = edgez_pawr_decode_request(
+		action.payload, action.payload_length, &request);
+	if (decoded_request) {
+		if (request.compressed_ssid != mesh_runtime.config.compressed_ssid) {
+			return EDGEZ_UMAC_OK;
+		}
+		if (request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
+			(void)edgez_nrf_mesh_receive_pawr(
+				request.payload, request.payload_length, action.source);
+			return EDGEZ_UMAC_OK;
+		}
 	}
-	if (edgez_pawr_decode_request(action.payload, action.payload_length,
-				      &request) &&
-	    request.type == EDGEZ_PAWR_REQUEST_BEACON) {
+	if (decoded_request && request.type == EDGEZ_PAWR_REQUEST_BEACON) {
 		LOG_INF("PAwR beacon request=%u from=%02x:%02x:%02x:%02x:%02x:%02x RSSI=%d dBm bytes=%u",
 			request.request_id, action.source[0], action.source[1],
 			action.source[2], action.source[3], action.source[4],
@@ -494,6 +500,7 @@ static int join_ignore_unsupported(void *ctx,
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 	if (edgez_pawr_bulk_control_decode(action.payload, action.payload_length,
 					    &bulk_control) &&
+	    bulk_control.compressed_ssid == mesh_runtime.config.compressed_ssid &&
 	    bulk_control.kind == EDGEZ_PAWR_BULK_KIND_BLOCK_ACK) {
 		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
 		memcpy(sensor_bulk_ack_payload, action.payload,
@@ -505,7 +512,8 @@ static int join_ignore_unsupported(void *ctx,
 	}
 #endif
 	if (edgez_pawr_decode_response(action.payload, action.payload_length,
-				       &response_hash)) {
+				       &response_hash, &response_ssid) &&
+	    response_ssid == mesh_runtime.config.compressed_ssid) {
 		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
 		bool matched = sensor_pawr_waiting &&
 			response_hash == sensor_pawr_expected_hash;
@@ -673,6 +681,7 @@ static int batman_transmit_pawr(void *ctx, const uint8_t destination[6],
 	uint32_t request_id = ++pawr_request_id;
 
 	if (!edgez_pawr_encode_mesh_packet(packet, sizeof(packet), request_id,
+					   mesh_runtime.config.compressed_ssid,
 					   frame, frame_len, &packet_len) ||
 	    !edgez_pawr_encode_action_frame(
 			action, sizeof(action), pawr_sequence_number++,
@@ -740,19 +749,6 @@ static const struct edgez_nrf_mesh_transport batman_transport = {
 	.unlock = batman_unlock,
 	.ctx = &mesh_runtime,
 };
-
-static uint32_t compressed_ssid(const uint8_t *data, size_t length)
-{
-	uint32_t crc = UINT32_C(0xffffffff);
-	for (size_t i = 0; i < length; ++i) {
-		crc ^= data[i];
-		for (unsigned bit = 0; bit < 8; ++bit) {
-			uint32_t mask = (uint32_t)-(int32_t)(crc & 1U);
-			crc = (crc >> 1U) ^ (UINT32_C(0xedb88320) & mask);
-		}
-	}
-	return ~crc;
-}
 
 static bool same_radio_profile(const struct edgez_halow_profile *a,
 			       const struct edgez_halow_profile *b)
@@ -910,7 +906,8 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	hash = edgez_pawr_payload_hash(beacon, beacon_len);
 	if (!edgez_pawr_encode_typed_request(
 			packet, sizeof(packet), EDGEZ_PAWR_REQUEST_BEACON,
-			request_id, wake_interval_ms, beacon, beacon_len,
+			request_id, wake_interval_ms,
+			mesh_runtime.config.compressed_ssid, beacon, beacon_len,
 			&packet_len) ||
 	    !edgez_pawr_encode_action_frame(
 			action, sizeof(action), pawr_sequence_number++,
@@ -1077,7 +1074,8 @@ static int sensor_pawr_queue_bulk_chunk(const uint8_t *payload,
 
 	if (!edgez_pawr_encode_typed_request(
 			packet, sizeof(packet), EDGEZ_PAWR_REQUEST_BULK_STREAM,
-			request_id, wake_interval_ms, payload, payload_len,
+			request_id, wake_interval_ms,
+			mesh_runtime.config.compressed_ssid, payload, payload_len,
 			&packet_len) ||
 	    packet_len > EDGEZ_PAWR_MAX_ACTION_PAYLOAD ||
 	    !edgez_pawr_encode_action_frame(
@@ -1228,6 +1226,7 @@ static int sensor_pawr_run_bulk_test(uint32_t wake_interval_ms)
 		source.test_index = (uint8_t)test;
 		source.produced = 0U;
 		const struct edgez_pawr_bulk_transfer transfer = {
+			.compressed_ssid = mesh_runtime.config.compressed_ssid,
 			.session_id = sys_rand32_get(),
 			.total_length = test_lengths[test],
 			.expected_digest = sensor_bulk_test_digest(
@@ -1633,7 +1632,7 @@ static int start_mesh_profile(const struct edgez_halow_profile *profile,
 		.mesh_id_length = mesh_id_length,
 		.beacon_interval_tu = edgez_mesh_country_beacon_interval_tu(
 			profile->country_code, EDGEZ_MESH_BEACON_INTERVAL_TU),
-		.compressed_ssid = compressed_ssid((const uint8_t *)profile->mesh_id,
+		.compressed_ssid = edgez_pawr_compress_ssid((const uint8_t *)profile->mesh_id,
 						  mesh_id_length),
 		.mcs = 0U,
 		.attempts = 2U,
@@ -1770,7 +1769,7 @@ static int start_sensor_radio(const struct edgez_halow_profile *profile)
 		.mesh_id_length = mesh_id_length,
 		.beacon_interval_tu = edgez_mesh_country_beacon_interval_tu(
 			profile->country_code, EDGEZ_MESH_BEACON_INTERVAL_TU),
-		.compressed_ssid = compressed_ssid((const uint8_t *)profile->mesh_id,
+		.compressed_ssid = edgez_pawr_compress_ssid((const uint8_t *)profile->mesh_id,
 						  mesh_id_length),
 		.mcs = 0U,
 		.attempts = 2U,
