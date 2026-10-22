@@ -972,26 +972,47 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 #define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 8U
 
+static int sensor_pawr_bulk_profile(struct edgez_halow_profile *profile)
+{
+	uint32_t frequency_khz = 0U;
+	uint8_t bandwidth_mhz = 0U;
+
+	if (profile == NULL ||
+	    strlen(CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY) != 2U ||
+	    !edgez_rf_resolve_s1g_channel(
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
+		&frequency_khz, &bandwidth_mhz)) {
+		LOG_ERR("PAWR_REG invalid bulk profile country=%s channel=%u",
+			CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+			(unsigned)CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL);
+		return -EINVAL;
+	}
+
+	memcpy(profile->country_code,
+	       CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY, 2U);
+	profile->country_code[2] = '\0';
+	profile->mesh_frequency_khz = frequency_khz;
+	profile->mesh_bandwidth_mhz = bandwidth_mhz;
+	LOG_INF("PAWR_REG bulk profile country=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
+		profile->country_code,
+		(unsigned)CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
+		(unsigned)frequency_khz, (unsigned)bandwidth_mhz);
+	return 0;
+}
+
 static int sensor_pawr_enable_bulk_burst_mode(void)
 {
-	static const char country_code[] = "EU";
-	const struct mmwlan_s1g_channel_list *domain =
-		mmwlan_lookup_regulatory_domain(get_regulatory_db(), country_code);
-	const struct mmwlan_s1g_channel *selected = NULL;
+	const struct edgez_umac_mesh_runtime_config *config = &mesh_runtime.config;
+	const struct mmwlan_s1g_channel *selected = mmregdb_lookup_channel(
+		config->country_code, config->channel.operating_frequency_hz,
+		config->channel.operating_bw_mhz);
 
-	if (domain != NULL) {
-		for (unsigned i = 0U; i < domain->num_channels; ++i) {
-			const struct mmwlan_s1g_channel *channel = &domain->channels[i];
-
-			if (channel->centre_freq_hz == 863500000U &&
-			    channel->bw_mhz == 1U) {
-				selected = channel;
-				break;
-			}
-		}
-	}
 	if (selected == NULL) {
-		LOG_ERR("PAWR_EU_REG burst setup failed: channel missing");
+		LOG_ERR("PAWR_REG burst setup failed: channel missing country=%s frequency=%u Hz bandwidth=%u MHz",
+			config->country_code,
+			(unsigned)config->channel.operating_frequency_hz,
+			(unsigned)config->channel.operating_bw_mhz);
 		return -ENOENT;
 	}
 
@@ -1000,7 +1021,7 @@ static int sensor_pawr_enable_bulk_burst_mode(void)
 		selected->duty_cycle_omit_ctrl_resp,
 		MMWLAN_DUTY_CYCLE_MODE_BURST);
 	if (status != MMWLAN_SUCCESS) {
-		LOG_ERR("PAWR_EU_REG burst setup failed status=%d", status);
+		LOG_ERR("PAWR_REG burst setup failed status=%d", status);
 		return -EIO;
 	}
 
@@ -1009,12 +1030,15 @@ static int sensor_pawr_enable_bulk_burst_mode(void)
 	if (status != MMWLAN_SUCCESS ||
 	    stats.duty_cycle != selected->duty_cycle_sta ||
 	    stats.mode != MMWLAN_DUTY_CYCLE_MODE_BURST) {
-		LOG_ERR("PAWR_EU_REG burst verification failed status=%d duty=%u mode=%u",
+		LOG_ERR("PAWR_REG burst verification failed status=%d duty=%u mode=%u",
 			status, (unsigned)stats.duty_cycle, (unsigned)stats.mode);
 		return -EIO;
 	}
 
-	LOG_INF("PAWR_EU_REG burst enabled source=mm-iot-regdb regdb_duty=%u.%02u%% duty=%u.%02u%% airtime_remaining_us=%u window_us=%u",
+	LOG_INF("PAWR_REG burst enabled source=mm-iot-regdb country=%s frequency=%u Hz bandwidth=%u MHz regdb_duty=%u.%02u%% duty=%u.%02u%% airtime_remaining_us=%u window_us=%u",
+		config->country_code,
+		(unsigned)config->channel.operating_frequency_hz,
+		(unsigned)config->channel.operating_bw_mhz,
 		(unsigned)(selected->duty_cycle_sta / 100U),
 		(unsigned)(selected->duty_cycle_sta % 100U),
 		(unsigned)(stats.duty_cycle / 100U),
@@ -1026,10 +1050,13 @@ static int sensor_pawr_enable_bulk_burst_mode(void)
 
 static struct edgez_pawr_bulk_regulatory sensor_pawr_bulk_regulatory(void)
 {
+	const struct edgez_umac_mesh_runtime_config *config = &mesh_runtime.config;
 	struct edgez_pawr_bulk_regulatory result = {
-		.country_code = {'E', 'U', '\0'},
-		.frequency_khz = 863500U,
-		.bandwidth_mhz = 1U,
+		.country_code = {
+			config->country_code[0], config->country_code[1], '\0'
+		},
+		.frequency_khz = config->channel.operating_frequency_hz / 1000U,
+		.bandwidth_mhz = config->channel.operating_bw_mhz,
 		.flags = EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE,
 	};
 	struct edgez_rf_regulatory_channel policy = {0};
@@ -1049,7 +1076,7 @@ static struct edgez_pawr_bulk_regulatory sensor_pawr_bulk_regulatory(void)
 		result.flags |= EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID;
 	}
 
-	LOG_INF("PAWR_EU_REG sender country=%s frequency=%u kHz bandwidth=%u MHz duty=%u.%02u%% mode=%u max_eirp=%d dBm flags=0x%02x",
+	LOG_INF("PAWR_REG sender country=%s frequency=%u kHz bandwidth=%u MHz duty=%u.%02u%% mode=%u max_eirp=%d dBm flags=0x%02x",
 		result.country_code, (unsigned)result.frequency_khz,
 		(unsigned)result.bandwidth_mhz,
 		(unsigned)(result.duty_cycle_centi_percent / 100U),
@@ -2094,15 +2121,15 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	}
 	if (rc == 0 && !mesh_started) {
 		struct edgez_halow_profile start_profile = *profile;
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
-		memcpy(start_profile.country_code, "EU", 3U);
-		start_profile.mesh_frequency_khz = 863500U;
-		start_profile.mesh_bandwidth_mhz = 1U;
-#endif
 		const uint8_t first_start_channel = sensor_bootstrap_channel;
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+		rc = sensor_pawr_bulk_profile(&start_profile);
+#endif
 		do {
-			rc = start_sensor_radio(&start_profile);
+			if (rc == 0) {
+				rc = start_sensor_radio(&start_profile);
+			}
 			if (rc == EDGEZ_UMAC_OK) {
 				radio_cold_started = true;
 				break;

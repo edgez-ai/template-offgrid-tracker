@@ -12,6 +12,7 @@
 #include "edgez_halow_mesh_service.h"
 #include "edgez_pawr_bulk.h"
 #include "edgez_pawr_protocol.h"
+#include "edgez_rf_api.h"
 
 #define PAWR_QUEUE_DEPTH 4U
 
@@ -34,6 +35,9 @@ struct pawr_bulk_receive_state {
     struct edgez_pawr_bulk_receiver receiver;
     bool invalid;
     int64_t started_us;
+    char country_code[3];
+    uint32_t frequency_khz;
+    uint8_t bandwidth_mhz;
 };
 
 static struct pawr_bulk_receive_state bulk_state;
@@ -110,16 +114,22 @@ static void pawr_bulk_done(void *ctx,
                  state->receiver.peer[4], state->receiver.peer[5]);
 
         const struct edgez_pawr_bulk_regulatory *reg = &transfer->regulatory;
-        const bool country_ok = strcmp(reg->country_code, "EU") == 0;
-        const bool channel_ok = reg->frequency_khz >= 863500U &&
-            reg->frequency_khz <= 867500U;
-        const bool bandwidth_ok = reg->bandwidth_mhz == 1U;
+        struct edgez_rf_regulatory_channel policy = {0};
+        const bool profile_valid = edgez_rf_resolve_regulatory_channel(
+            state->country_code, state->frequency_khz * 1000U,
+            state->bandwidth_mhz, &policy);
+        const bool country_ok = strcmp(reg->country_code,
+                                       state->country_code) == 0;
+        const bool channel_ok = reg->frequency_khz == state->frequency_khz;
+        const bool bandwidth_ok =
+            reg->bandwidth_mhz == state->bandwidth_mhz;
         const bool duty_ok =
             (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID) != 0U &&
-            reg->duty_cycle_centi_percent <= 280U;
+            profile_valid && reg->duty_cycle_centi_percent ==
+                policy.duty_cycle_centi_percent;
         const bool eirp_config_ok =
             (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID) != 0U &&
-            reg->max_eirp_dbm <= 16;
+            profile_valid && reg->max_eirp_dbm == policy.max_eirp_dbm;
         const bool terminal_ok =
             (reg->flags & EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE) != 0U;
         const bool config_pass = country_ok && channel_ok && bandwidth_ok &&
@@ -128,7 +138,7 @@ static void pawr_bulk_done(void *ctx,
             (stats->bytes_received * 8U) / elapsed_ms;
 
         ESP_LOGI(TAG,
-                 "EU_COMPLIANCE_PRECHECK %s standard=EN304220-2 role=terminal "
+                 "REGULATORY_PRECHECK %s source=mm-iot-regdb role=terminal "
                  "country=%s frequency_khz=%" PRIu32 " bandwidth_mhz=%u "
                  "sender_duty=%u.%02u%% duty_mode=%s eirp_cap_dbm=%d "
                  "receiver_profile=%s/%u/%uMHz eirp_measurement=UNKNOWN",
@@ -139,9 +149,9 @@ static void pawr_bulk_done(void *ctx,
                  (unsigned)(reg->duty_cycle_centi_percent % 100U),
                  reg->duty_cycle_mode == 0U ? "spread" : "burst",
                  (int)reg->max_eirp_dbm,
-                 CONFIG_HALOW_COUNTRY_CODE,
-                 (unsigned)CONFIG_HALOW_MESH_FREQUENCY_KHZ,
-                 (unsigned)CONFIG_HALOW_MESH_BANDWIDTH_MHZ);
+                 state->country_code,
+                 (unsigned)state->frequency_khz,
+                 (unsigned)state->bandwidth_mhz);
         ESP_LOGI(TAG,
                  "PAWR_ENERGY_PRECHECK bytes=%" PRIu32
                  " active_ms=%" PRIu32 " goodput_kbps=%" PRIu32
@@ -207,11 +217,25 @@ static void pawr_beacon_rx(const uint8_t source_mac[6],
 }
 
 esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
-                           const char *mesh_id)
+                           const char *mesh_id, const char country_code[3],
+                           uint32_t frequency_khz, uint8_t bandwidth_mhz)
 {
-    if (callback == NULL || mesh_id == NULL || mesh_id[0] == '\0') {
+    if (callback == NULL || mesh_id == NULL || mesh_id[0] == '\0' ||
+        country_code == NULL || strlen(country_code) != 2U ||
+        frequency_khz == 0U || bandwidth_mhz == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
+#if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+    struct edgez_rf_regulatory_channel policy;
+    if (!edgez_rf_resolve_regulatory_channel(
+            country_code, frequency_khz * 1000U, bandwidth_mhz, &policy)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memcpy(bulk_state.country_code, country_code,
+           sizeof(bulk_state.country_code));
+    bulk_state.frequency_khz = frequency_khz;
+    bulk_state.bandwidth_mhz = bandwidth_mhz;
+#endif
     if (action_queue != NULL) {
         beacon_callback = callback;
         beacon_callback_arg = arg;

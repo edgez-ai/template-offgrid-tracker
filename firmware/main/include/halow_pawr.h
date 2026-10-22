@@ -17,7 +17,8 @@ typedef void (*halow_pawr_beacon_callback_t)(const uint8_t source_mac[6],
 
 /** Start the EdgeZ Wi-Fi HaLow PAwR vendor-action receiver. */
 esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
-                           const char *mesh_id);
+                           const char *mesh_id, const char country_code[3],
+                           uint32_t frequency_khz, uint8_t bandwidth_mhz);
 
 #ifdef __cplusplus
 }
