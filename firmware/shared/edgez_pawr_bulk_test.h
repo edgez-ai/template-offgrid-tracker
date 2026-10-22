@@ -6,12 +6,21 @@
 #include <string.h>
 
 #define EDGEZ_PAWR_BULK_MAGIC 0x455a4254U
-#define EDGEZ_PAWR_BULK_VERSION 2U
+#define EDGEZ_PAWR_BULK_VERSION 3U
 #define EDGEZ_PAWR_BULK_HEADER_SIZE 48U
 #define EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE 1400U
+#define EDGEZ_PAWR_BULK_CONTROL_SIZE 24U
+#define EDGEZ_PAWR_BULK_MAX_WINDOW 32U
 
 #define EDGEZ_PAWR_BULK_FLAG_FIRST 0x01U
 #define EDGEZ_PAWR_BULK_FLAG_LAST 0x02U
+#define EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST 0x04U
+
+enum edgez_pawr_bulk_kind {
+	EDGEZ_PAWR_BULK_KIND_DATA = 1U,
+	EDGEZ_PAWR_BULK_KIND_ACK_QUERY = 2U,
+	EDGEZ_PAWR_BULK_KIND_BLOCK_ACK = 3U,
+};
 
 #define EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID 0x01U
 #define EDGEZ_PAWR_BULK_REG_FLAG_CHIP_DUTY_VALID 0x02U
@@ -35,10 +44,23 @@ struct edgez_pawr_bulk_chunk {
 	uint16_t chunk_index;
 	uint16_t chunk_count;
 	uint16_t data_length;
+	uint16_t window_id;
+	uint16_t window_base_chunk;
+	uint8_t window_count;
 	uint8_t test_index;
 	uint8_t flags;
 	struct edgez_pawr_bulk_regulatory regulatory;
 	const uint8_t *data;
+};
+
+struct edgez_pawr_bulk_control {
+	enum edgez_pawr_bulk_kind kind;
+	uint32_t session_id;
+	uint32_t bitmap;
+	uint16_t window_id;
+	uint16_t base_chunk;
+	uint8_t chunk_count;
+	uint8_t test_index;
 };
 
 static inline void edgez_pawr_bulk_put_u16(uint8_t *out, uint16_t value)
@@ -102,6 +124,10 @@ static inline size_t edgez_pawr_bulk_encode(
 {
 	if (!output || !chunk || !chunk->data ||
 	    chunk->data_length > EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE ||
+	    chunk->window_count == 0U ||
+	    chunk->window_count > EDGEZ_PAWR_BULK_MAX_WINDOW ||
+	    chunk->chunk_index < chunk->window_base_chunk ||
+	    chunk->chunk_index - chunk->window_base_chunk >= chunk->window_count ||
 	    capacity < EDGEZ_PAWR_BULK_HEADER_SIZE + chunk->data_length) {
 		return 0U;
 	}
@@ -110,7 +136,7 @@ static inline size_t edgez_pawr_bulk_encode(
 	output[4] = EDGEZ_PAWR_BULK_VERSION;
 	output[5] = chunk->flags;
 	output[6] = chunk->test_index;
-	output[7] = 0U;
+	output[7] = EDGEZ_PAWR_BULK_KIND_DATA;
 	edgez_pawr_bulk_put_u32(output + 8, chunk->session_id);
 	edgez_pawr_bulk_put_u32(output + 12, chunk->total_length);
 	edgez_pawr_bulk_put_u32(output + 16, chunk->offset);
@@ -128,7 +154,10 @@ static inline size_t edgez_pawr_bulk_encode(
 	output[39] = (uint8_t)chunk->regulatory.max_eirp_dbm;
 	output[40] = chunk->regulatory.duty_cycle_mode;
 	output[41] = chunk->regulatory.flags;
-	memset(output + 42, 0, 6U);
+	edgez_pawr_bulk_put_u16(output + 42, chunk->window_id);
+	edgez_pawr_bulk_put_u16(output + 44, chunk->window_base_chunk);
+	output[46] = chunk->window_count;
+	output[47] = 0U;
 	memcpy(output + EDGEZ_PAWR_BULK_HEADER_SIZE, chunk->data,
 	       chunk->data_length);
 	return EDGEZ_PAWR_BULK_HEADER_SIZE + chunk->data_length;
@@ -139,7 +168,8 @@ static inline bool edgez_pawr_bulk_decode(const uint8_t *input, size_t length,
 {
 	if (!input || !chunk || length < EDGEZ_PAWR_BULK_HEADER_SIZE ||
 	    edgez_pawr_bulk_get_u32(input) != EDGEZ_PAWR_BULK_MAGIC ||
-	    input[4] != EDGEZ_PAWR_BULK_VERSION) {
+	    input[4] != EDGEZ_PAWR_BULK_VERSION ||
+	    input[7] != EDGEZ_PAWR_BULK_KIND_DATA) {
 		return false;
 	}
 
@@ -153,6 +183,9 @@ static inline bool edgez_pawr_bulk_decode(const uint8_t *input, size_t length,
 	chunk->chunk_index = edgez_pawr_bulk_get_u16(input + 24);
 	chunk->chunk_count = edgez_pawr_bulk_get_u16(input + 26);
 	chunk->data_length = edgez_pawr_bulk_get_u16(input + 28);
+	chunk->window_id = edgez_pawr_bulk_get_u16(input + 42);
+	chunk->window_base_chunk = edgez_pawr_bulk_get_u16(input + 44);
+	chunk->window_count = input[46];
 	chunk->regulatory.duty_cycle_centi_percent =
 		edgez_pawr_bulk_get_u16(input + 30);
 	chunk->regulatory.frequency_khz = edgez_pawr_bulk_get_u32(input + 32);
@@ -168,5 +201,75 @@ static inline bool edgez_pawr_bulk_decode(const uint8_t *input, size_t length,
 	return chunk->data_length <= EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE &&
 	       EDGEZ_PAWR_BULK_HEADER_SIZE + chunk->data_length == length &&
 	       chunk->chunk_count > 0U && chunk->chunk_index < chunk->chunk_count &&
+	       chunk->window_count > 0U &&
+	       chunk->window_count <= EDGEZ_PAWR_BULK_MAX_WINDOW &&
+	       chunk->chunk_index >= chunk->window_base_chunk &&
+	       chunk->chunk_index - chunk->window_base_chunk < chunk->window_count &&
 	       chunk->offset + chunk->data_length <= chunk->total_length;
+}
+
+static inline size_t edgez_pawr_bulk_control_encode(
+	uint8_t *output, size_t capacity,
+	const struct edgez_pawr_bulk_control *control)
+{
+	if (!output || !control || capacity < EDGEZ_PAWR_BULK_CONTROL_SIZE ||
+	    (control->kind != EDGEZ_PAWR_BULK_KIND_ACK_QUERY &&
+	     control->kind != EDGEZ_PAWR_BULK_KIND_BLOCK_ACK) ||
+	    control->chunk_count == 0U ||
+	    control->chunk_count > EDGEZ_PAWR_BULK_MAX_WINDOW ||
+	    (control->bitmap & ~((control->chunk_count == 32U) ? UINT32_MAX :
+		((UINT32_C(1) << control->chunk_count) - 1U))) != 0U) {
+		return 0U;
+	}
+	memset(output, 0, EDGEZ_PAWR_BULK_CONTROL_SIZE);
+	edgez_pawr_bulk_put_u32(output, EDGEZ_PAWR_BULK_MAGIC);
+	output[4] = EDGEZ_PAWR_BULK_VERSION;
+	output[6] = control->test_index;
+	output[7] = (uint8_t)control->kind;
+	edgez_pawr_bulk_put_u32(output + 8, control->session_id);
+	edgez_pawr_bulk_put_u16(output + 12, control->window_id);
+	edgez_pawr_bulk_put_u16(output + 14, control->base_chunk);
+	output[16] = control->chunk_count;
+	edgez_pawr_bulk_put_u32(output + 18, control->bitmap);
+	return EDGEZ_PAWR_BULK_CONTROL_SIZE;
+}
+
+static inline bool edgez_pawr_bulk_control_decode(
+	const uint8_t *input, size_t length,
+	struct edgez_pawr_bulk_control *control)
+{
+	if (!input || !control || length != EDGEZ_PAWR_BULK_CONTROL_SIZE ||
+	    edgez_pawr_bulk_get_u32(input) != EDGEZ_PAWR_BULK_MAGIC ||
+	    input[4] != EDGEZ_PAWR_BULK_VERSION || input[5] != 0U ||
+	    (input[7] != EDGEZ_PAWR_BULK_KIND_ACK_QUERY &&
+	     input[7] != EDGEZ_PAWR_BULK_KIND_BLOCK_ACK) || input[16] == 0U ||
+	    input[16] > EDGEZ_PAWR_BULK_MAX_WINDOW) {
+		return false;
+	}
+	memset(control, 0, sizeof(*control));
+	control->kind = (enum edgez_pawr_bulk_kind)input[7];
+	control->test_index = input[6];
+	control->session_id = edgez_pawr_bulk_get_u32(input + 8);
+	control->window_id = edgez_pawr_bulk_get_u16(input + 12);
+	control->base_chunk = edgez_pawr_bulk_get_u16(input + 14);
+	control->chunk_count = input[16];
+	control->bitmap = edgez_pawr_bulk_get_u32(input + 18);
+	const uint32_t valid = control->chunk_count == 32U ? UINT32_MAX :
+		((UINT32_C(1) << control->chunk_count) - 1U);
+	return input[17] == 0U && input[22] == 0U && input[23] == 0U &&
+	       (control->bitmap & ~valid) == 0U &&
+	       (control->kind == EDGEZ_PAWR_BULK_KIND_BLOCK_ACK ||
+		control->bitmap == 0U);
+}
+
+static inline bool edgez_pawr_bulk_control_matches(
+	const struct edgez_pawr_bulk_control *control, uint32_t session_id,
+	uint8_t test_index, uint16_t window_id, uint16_t base_chunk,
+	uint8_t chunk_count)
+{
+	return control && control->session_id == session_id &&
+	       control->test_index == test_index &&
+	       control->window_id == window_id &&
+	       control->base_chunk == base_chunk &&
+	       control->chunk_count == chunk_count;
 }

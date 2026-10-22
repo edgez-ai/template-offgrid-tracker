@@ -33,6 +33,8 @@ static void *beacon_callback_arg;
 struct pawr_bulk_receive_state {
     bool active;
     bool invalid;
+    bool reported;
+    bool window_active;
     uint8_t source_mac[6];
     uint8_t test_index;
     uint32_t session_id;
@@ -42,6 +44,14 @@ struct pawr_bulk_receive_state {
     uint32_t received;
     uint16_t unique_chunks;
     uint16_t frames_received;
+    uint16_t window_id;
+    uint16_t window_base_chunk;
+    uint8_t window_count;
+    uint32_t window_bitmap;
+    uint16_t block_acks;
+    uint16_t ack_queries;
+    uint16_t duplicate_chunks;
+    uint16_t stale_frames;
     uint32_t received_map[16];
     struct edgez_pawr_bulk_regulatory regulatory;
     bool saw_last;
@@ -50,11 +60,55 @@ struct pawr_bulk_receive_state {
 
 static struct pawr_bulk_receive_state bulk_state;
 
+static bool pawr_bulk_send_block_ack(const uint8_t destination[6])
+{
+    uint8_t payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
+    const struct edgez_pawr_bulk_control ack = {
+        .kind = EDGEZ_PAWR_BULK_KIND_BLOCK_ACK,
+        .session_id = bulk_state.session_id,
+        .bitmap = bulk_state.window_bitmap,
+        .window_id = bulk_state.window_id,
+        .base_chunk = bulk_state.window_base_chunk,
+        .chunk_count = bulk_state.window_count,
+        .test_index = bulk_state.test_index,
+    };
+    const size_t length = edgez_pawr_bulk_control_encode(
+        payload, sizeof(payload), &ack);
+    if (length == 0U || edgez_halow_mesh_transmit_pawr_control(
+            destination, payload, length) != ESP_OK) {
+        ESP_LOGW(TAG, "PAWR_BULK_ACK send failed window=%u bitmap=%08" PRIx32,
+                 (unsigned)bulk_state.window_id, bulk_state.window_bitmap);
+        return false;
+    }
+    bulk_state.block_acks++;
+    return true;
+}
+
 static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
                                    const uint8_t *payload,
                                    size_t payload_len)
 {
     struct edgez_pawr_bulk_chunk chunk;
+    struct edgez_pawr_bulk_control control;
+
+    if (edgez_pawr_bulk_control_decode(payload, payload_len, &control)) {
+        if (control.kind != EDGEZ_PAWR_BULK_KIND_ACK_QUERY) {
+            return true;
+        }
+        if (bulk_state.active &&
+            memcmp(bulk_state.source_mac, source_mac,
+                   sizeof(bulk_state.source_mac)) == 0 &&
+            edgez_pawr_bulk_control_matches(
+                &control, bulk_state.session_id, bulk_state.test_index,
+                bulk_state.window_id, bulk_state.window_base_chunk,
+                bulk_state.window_count)) {
+            bulk_state.ack_queries++;
+            (void)pawr_bulk_send_block_ack(source_mac);
+        } else if (bulk_state.active) {
+            bulk_state.stale_frames++;
+        }
+        return true;
+    }
 
     if (!edgez_pawr_bulk_decode(payload, payload_len, &chunk)) {
         return false;
@@ -86,6 +140,26 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
         return true;
     }
 
+    if (!bulk_state.window_active || chunk.window_id > bulk_state.window_id) {
+        if (bulk_state.window_active &&
+            chunk.window_id != (uint16_t)(bulk_state.window_id + 1U)) {
+            bulk_state.stale_frames++;
+            return true;
+        }
+        bulk_state.window_active = true;
+        bulk_state.window_id = chunk.window_id;
+        bulk_state.window_base_chunk = chunk.window_base_chunk;
+        bulk_state.window_count = chunk.window_count;
+        bulk_state.window_bitmap = 0U;
+    } else if (chunk.window_id < bulk_state.window_id) {
+        bulk_state.stale_frames++;
+        return true;
+    } else if (chunk.window_base_chunk != bulk_state.window_base_chunk ||
+               chunk.window_count != bulk_state.window_count) {
+        bulk_state.invalid = true;
+        return true;
+    }
+
     if (memcmp(&bulk_state.regulatory, &chunk.regulatory,
                sizeof(bulk_state.regulatory)) != 0) {
         bulk_state.invalid = true;
@@ -109,11 +183,20 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
         *word |= bit;
         bulk_state.received += chunk.data_length;
         bulk_state.unique_chunks++;
+    } else {
+        bulk_state.duplicate_chunks++;
+    }
+    bulk_state.window_bitmap |= UINT32_C(1) <<
+        (chunk.chunk_index - bulk_state.window_base_chunk);
+
+    if ((chunk.flags & EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST) != 0U) {
+        (void)pawr_bulk_send_block_ack(source_mac);
     }
 
     bulk_state.saw_last |=
         (chunk.flags & EDGEZ_PAWR_BULK_FLAG_LAST) != 0U;
-    if (bulk_state.saw_last && bulk_state.received >= bulk_state.total_length) {
+    if (!bulk_state.reported && bulk_state.saw_last &&
+        bulk_state.received >= bulk_state.total_length) {
         const bool passed = !bulk_state.invalid &&
             bulk_state.received == bulk_state.total_length &&
             bulk_state.digest == bulk_state.expected_digest;
@@ -122,12 +205,17 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
 
         ESP_LOGI(TAG,
                  "PAWR_BULK_TEST %s test=%u bytes=%" PRIu32
-                 " chunks=%u frames=%u elapsed_ms=%" PRIu32
+                 " chunks=%u frames=%u duplicates=%u stale=%u "
+                 "block_acks=%u ack_queries=%u elapsed_ms=%" PRIu32
                  " digest=%08" PRIx32
                  " source=%02x:%02x:%02x:%02x:%02x:%02x",
                  passed ? "PASS" : "FAIL", (unsigned)bulk_state.test_index,
                  bulk_state.received, (unsigned)bulk_state.unique_chunks,
-                 (unsigned)bulk_state.frames_received, elapsed_ms,
+                 (unsigned)bulk_state.frames_received,
+                 (unsigned)bulk_state.duplicate_chunks,
+                 (unsigned)bulk_state.stale_frames,
+                 (unsigned)bulk_state.block_acks,
+                 (unsigned)bulk_state.ack_queries, elapsed_ms,
                  bulk_state.digest, source_mac[0], source_mac[1],
                  source_mac[2], source_mac[3], source_mac[4], source_mac[5]);
 
@@ -170,7 +258,7 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
                  " active_ms=%" PRIu32 " goodput_kbps=%" PRIu32
                  " energy_mj=UNKNOWN current_measurement=REQUIRED",
                  bulk_state.received, elapsed_ms, goodput_kbps);
-        bulk_state.active = false;
+        bulk_state.reported = true;
     }
     return true;
 }
