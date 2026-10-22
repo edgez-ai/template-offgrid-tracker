@@ -37,7 +37,6 @@
 #include "edgez_mesh_msdu.h"
 #include "edgez_mesh_relay.h"
 #include "edgez_mesh_zephyr.h"
-#include "edgez_pawr_bulk_test.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_mesh_sae_provider.h"
 #include "edgez_rf_api.h"
@@ -69,6 +68,7 @@ extern enum mmwlan_status mmdrv_get_duty_cycle(
 #endif
 
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#include "edgez_pawr_bulk.h"
 #include "mmregdb.h"
 #endif
 
@@ -123,15 +123,9 @@ static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
-#define EDGEZ_SENSOR_BULK_MAX_WINDOW 6U
-static uint32_t sensor_bulk_session_id;
-static uint16_t sensor_bulk_window_id;
-static uint16_t sensor_bulk_base_chunk;
-static uint8_t sensor_bulk_test_index;
-static uint8_t sensor_bulk_ack_count;
-static uint32_t sensor_bulk_ack_mask;
-static uint32_t sensor_bulk_block_ack_count;
-static bool sensor_bulk_ack_waiting;
+static struct edgez_pawr_bulk_sender sensor_bulk_sender;
+static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
+static size_t sensor_bulk_ack_length;
 K_SEM_DEFINE(sensor_bulk_ack_sem, 0, 1);
 #endif
 static uint8_t sensor_bootstrap_channel =
@@ -502,21 +496,11 @@ static int join_ignore_unsupported(void *ctx,
 					    &bulk_control) &&
 	    bulk_control.kind == EDGEZ_PAWR_BULK_KIND_BLOCK_ACK) {
 		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-		const bool matched = sensor_bulk_ack_waiting &&
-			edgez_pawr_bulk_control_matches(
-				&bulk_control, sensor_bulk_session_id,
-				sensor_bulk_test_index, sensor_bulk_window_id,
-				sensor_bulk_base_chunk, sensor_bulk_ack_count);
-		if (matched) {
-			/* Responses for the same window can be reordered.  A later-arriving
-			 * older bitmap must not erase bits already acknowledged. */
-			sensor_bulk_ack_mask |= bulk_control.bitmap;
-			sensor_bulk_block_ack_count++;
-		}
+		memcpy(sensor_bulk_ack_payload, action.payload,
+		       EDGEZ_PAWR_BULK_CONTROL_SIZE);
+		sensor_bulk_ack_length = EDGEZ_PAWR_BULK_CONTROL_SIZE;
 		k_spin_unlock(&sensor_pawr_lock, key);
-		if (matched) {
-			k_sem_give(&sensor_bulk_ack_sem);
-		}
+		k_sem_give(&sensor_bulk_ack_sem);
 		return EDGEZ_UMAC_OK;
 	}
 #endif
@@ -991,45 +975,6 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 #define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 8U
 
-struct sensor_bulk_tier {
-	uint16_t chunk_size;
-	uint8_t window_size;
-};
-
-static const struct sensor_bulk_tier sensor_bulk_tiers[] = {
-	{220U, 2U}, {440U, 3U}, {880U, 4U},
-	{1000U, 2U}, {1100U, 2U},
-};
-
-static uint32_t sensor_bulk_ack_timeout_ms(uint16_t chunk_size,
-					    uint8_t window_count)
-{
-	const uint32_t window_bytes = (uint32_t)chunk_size * window_count;
-	const uint32_t kib_units = (window_bytes + 1023U) / 1024U;
-	const uint32_t timeout_ms = 200U + kib_units * 75U;
-
-	return MIN(MAX(timeout_ms, 250U), 500U);
-}
-
-struct sensor_bulk_ring_slot {
-	size_t payload_length;
-};
-
-#define EDGEZ_SENSOR_BULK_RING_BYTES (16U * 1024U)
-#define EDGEZ_SENSOR_BULK_RING_SLOT_BYTES \
-	(EDGEZ_PAWR_BULK_HEADER_SIZE + EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE)
-#define EDGEZ_SENSOR_BULK_RING_SLOTS \
-	(EDGEZ_SENSOR_BULK_RING_BYTES / EDGEZ_SENSOR_BULK_RING_SLOT_BYTES)
-
-struct sensor_bulk_ring {
-	uint8_t storage[EDGEZ_SENSOR_BULK_RING_BYTES];
-	struct sensor_bulk_ring_slot slots[EDGEZ_SENSOR_BULK_RING_SLOTS];
-	uint8_t head;
-	uint8_t count;
-};
-
-static struct sensor_bulk_ring bulk_ring;
-
 static int sensor_pawr_enable_bulk_burst_mode(void)
 {
 	static const char country_code[] = "EU";
@@ -1072,7 +1017,9 @@ static int sensor_pawr_enable_bulk_burst_mode(void)
 		return -EIO;
 	}
 
-	LOG_INF("PAWR_EU_REG burst enabled duty=%u.%02u%% airtime_remaining_us=%u window_us=%u",
+	LOG_INF("PAWR_EU_REG burst enabled source=mm-iot-regdb regdb_duty=%u.%02u%% duty=%u.%02u%% airtime_remaining_us=%u window_us=%u",
+		(unsigned)(selected->duty_cycle_sta / 100U),
+		(unsigned)(selected->duty_cycle_sta % 100U),
 		(unsigned)(stats.duty_cycle / 100U),
 		(unsigned)(stats.duty_cycle % 100U),
 		(unsigned)stats.burst_airtime_remaining_us,
@@ -1088,24 +1035,14 @@ static struct edgez_pawr_bulk_regulatory sensor_pawr_bulk_regulatory(void)
 		.bandwidth_mhz = 1U,
 		.flags = EDGEZ_PAWR_BULK_REG_FLAG_TERMINAL_NODE,
 	};
-	const struct mmwlan_s1g_channel_list *domain =
-		mmwlan_lookup_regulatory_domain(get_regulatory_db(),
-			result.country_code);
-
-	if (domain != NULL) {
-		for (unsigned i = 0U; i < domain->num_channels; ++i) {
-			const struct mmwlan_s1g_channel *channel =
-				&domain->channels[i];
-
-			if (channel->centre_freq_hz / 1000U == result.frequency_khz &&
-			    channel->bw_mhz == result.bandwidth_mhz) {
-				result.duty_cycle_centi_percent =
-					channel->duty_cycle_sta;
-				result.max_eirp_dbm = channel->max_tx_eirp_dbm;
-				result.flags |= EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID;
-				break;
-			}
-		}
+	struct edgez_rf_regulatory_channel policy = {0};
+	if (edgez_rf_resolve_regulatory_channel(
+		    result.country_code, result.frequency_khz * 1000U,
+		    result.bandwidth_mhz, &policy)) {
+		result.duty_cycle_centi_percent =
+			policy.duty_cycle_centi_percent;
+		result.max_eirp_dbm = policy.max_eirp_dbm;
+		result.flags |= EDGEZ_PAWR_BULK_REG_FLAG_REGDB_VALID;
 	}
 
 	struct mmwlan_duty_cycle_stats stats = {0};
@@ -1123,45 +1060,6 @@ static struct edgez_pawr_bulk_regulatory sensor_pawr_bulk_regulatory(void)
 		(unsigned)result.duty_cycle_mode, (int)result.max_eirp_dbm,
 		(unsigned)result.flags);
 	return result;
-}
-
-static struct sensor_bulk_ring_slot *sensor_bulk_ring_at(uint8_t index)
-{
-	if (index >= bulk_ring.count) {
-		return NULL;
-	}
-	return &bulk_ring.slots[(bulk_ring.head + index) %
-				EDGEZ_SENSOR_BULK_RING_SLOTS];
-}
-
-static struct sensor_bulk_ring_slot *sensor_bulk_ring_reserve(void)
-{
-	if (bulk_ring.count >= EDGEZ_SENSOR_BULK_RING_SLOTS) {
-		return NULL;
-	}
-	struct sensor_bulk_ring_slot *slot =
-		&bulk_ring.slots[(bulk_ring.head + bulk_ring.count) %
-				 EDGEZ_SENSOR_BULK_RING_SLOTS];
-	bulk_ring.count++;
-	return slot;
-}
-
-static uint8_t *sensor_bulk_ring_payload(uint8_t index)
-{
-	if (index >= bulk_ring.count) {
-		return NULL;
-	}
-	const uint8_t slot_index = (bulk_ring.head + index) %
-				   EDGEZ_SENSOR_BULK_RING_SLOTS;
-	return &bulk_ring.storage[(size_t)slot_index *
-				 EDGEZ_SENSOR_BULK_RING_SLOT_BYTES];
-}
-
-static void sensor_bulk_ring_release_window(void)
-{
-	bulk_ring.head = (bulk_ring.head + bulk_ring.count) %
-			 EDGEZ_SENSOR_BULK_RING_SLOTS;
-	bulk_ring.count = 0U;
 }
 
 static int sensor_pawr_queue_bulk_chunk(const uint8_t *payload,
@@ -1222,337 +1120,183 @@ static int sensor_pawr_queue_bulk_chunk(const uint8_t *payload,
 	return 0;
 }
 
-static int sensor_pawr_send_bulk_query(uint32_t session_id,
-				       uint8_t test_index,
-				       uint16_t window_id,
-				       uint16_t base_chunk,
-				       uint8_t chunk_count,
-				       uint32_t wake_interval_ms)
+struct sensor_bulk_test_source {
+	uint8_t test_index;
+	uint32_t wake_interval_ms;
+	uint32_t produced;
+};
+
+static uint8_t sensor_bulk_test_byte(uint8_t test_index, uint32_t offset)
 {
-	uint8_t payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
-	const struct edgez_pawr_bulk_control query = {
-		.kind = EDGEZ_PAWR_BULK_KIND_ACK_QUERY,
-		.session_id = session_id,
-		.window_id = window_id,
-		.base_chunk = base_chunk,
-		.chunk_count = chunk_count,
-		.test_index = test_index,
-	};
-	const size_t length = edgez_pawr_bulk_control_encode(
-		payload, sizeof(payload), &query);
-	return length == 0U ? -EINVAL : sensor_pawr_queue_bulk_chunk(
-		payload, length, wake_interval_ms);
+	return (uint8_t)((offset * 29U + (uint32_t)test_index * 71U + 0x5aU) &
+			 0xffU);
 }
 
-static bool sensor_pawr_probe_bulk_chunk(uint16_t chunk_size,
-					 uint8_t probe_index,
-					 uint32_t wake_interval_ms,
-					 const struct edgez_pawr_bulk_regulatory *regulatory)
+static uint32_t sensor_bulk_test_digest(uint8_t test_index, uint32_t length)
 {
-	uint8_t data[EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE];
-	const uint32_t session_id = sys_rand32_get();
-	const uint32_t expected_digest = edgez_pawr_bulk_expected_digest(
-		probe_index, chunk_size);
+	uint32_t digest = UINT32_C(2166136261);
 
-	sensor_bulk_ring_release_window();
-	struct sensor_bulk_ring_slot *slot = sensor_bulk_ring_reserve();
-	uint8_t *payload = sensor_bulk_ring_payload(0U);
-	if (!slot || !payload) {
-		LOG_ERR("PAWR_BULK_PROBE allocation failed chunk=%u",
-			(unsigned)chunk_size);
-		return false;
+	for (uint32_t offset = 0U; offset < length; ++offset) {
+		digest ^= sensor_bulk_test_byte(test_index, offset);
+		digest *= UINT32_C(16777619);
 	}
-	for (uint16_t i = 0U; i < chunk_size; ++i) {
-		data[i] = edgez_pawr_bulk_test_byte(probe_index, i);
-	}
-	const struct edgez_pawr_bulk_chunk chunk = {
-		.session_id = session_id,
-		.total_length = chunk_size,
-		.offset = 0U,
-		.expected_digest = expected_digest,
-		.chunk_index = 0U,
-		.chunk_count = 1U,
-		.data_length = chunk_size,
-		.window_id = 0U,
-		.window_base_chunk = 0U,
-		.window_count = 1U,
-		.test_index = probe_index,
-		.flags = EDGEZ_PAWR_BULK_FLAG_FIRST | EDGEZ_PAWR_BULK_FLAG_LAST,
-		.regulatory = *regulatory,
-		.data = data,
-	};
-	slot->payload_length = edgez_pawr_bulk_encode(
-		payload, EDGEZ_SENSOR_BULK_RING_SLOT_BYTES, &chunk);
-	if (slot->payload_length == 0U) {
-		LOG_ERR("PAWR_BULK_PROBE encode failed chunk=%u",
-			(unsigned)chunk_size);
-		return false;
-	}
+	return digest;
+}
 
-	k_sem_reset(&sensor_bulk_ack_sem);
-	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-	sensor_bulk_session_id = session_id;
-	sensor_bulk_test_index = probe_index;
-	sensor_bulk_window_id = 0U;
-	sensor_bulk_base_chunk = 0U;
-	sensor_bulk_ack_count = 1U;
-	sensor_bulk_ack_mask = 0U;
-	sensor_bulk_ack_waiting = true;
-	k_spin_unlock(&sensor_pawr_lock, key);
+static bool sensor_bulk_fill_sender(struct edgez_pawr_bulk_sender *sender,
+				    struct sensor_bulk_test_source *source)
+{
+	uint8_t block[256];
 
-	const uint32_t ack_timeout_ms = sensor_bulk_ack_timeout_ms(chunk_size, 1U);
-	LOG_INF("PAWR_BULK_PROBE start chunk=%u payload=%u ack_timeout_ms=%u",
-		(unsigned)chunk_size, (unsigned)slot->payload_length,
-		(unsigned)ack_timeout_ms);
-	uint32_t queued = 0U;
-	for (unsigned attempt = 0U;
-	     attempt < EDGEZ_SENSOR_BULK_ACK_ATTEMPTS; ++attempt) {
-		payload[5] |= EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST;
-		if (sensor_pawr_queue_bulk_chunk(payload, slot->payload_length,
-						wake_interval_ms) == 0) {
-			queued++;
-		}
-		if (k_sem_take(&sensor_bulk_ack_sem,
-			K_MSEC(ack_timeout_ms)) != 0) {
-			(void)sensor_pawr_send_bulk_query(
-				session_id, probe_index, 0U, 0U, 1U,
-				wake_interval_ms);
-			(void)k_sem_take(&sensor_bulk_ack_sem,
-				K_MSEC(ack_timeout_ms));
-		}
-		key = k_spin_lock(&sensor_pawr_lock);
-		const bool complete = sensor_bulk_ack_mask == 1U;
-		k_spin_unlock(&sensor_pawr_lock, key);
-		if (complete) {
-			LOG_INF("PAWR_BULK_PROBE PASS chunk=%u attempts=%u",
-				(unsigned)chunk_size, attempt + 1U);
+	for (;;) {
+		size_t length = edgez_pawr_bulk_sender_space(sender);
+		if (length == 0U) {
 			return true;
 		}
+		if (length > sizeof(block)) {
+			length = sizeof(block);
+		}
+		for (size_t i = 0U; i < length; ++i) {
+			block[i] = sensor_bulk_test_byte(
+				source->test_index, source->produced + (uint32_t)i);
+		}
+		if (edgez_pawr_bulk_sender_write(sender, block, length) != length) {
+			return false;
+		}
+		source->produced += (uint32_t)length;
 	}
-	key = k_spin_lock(&sensor_pawr_lock);
-	sensor_bulk_ack_waiting = false;
+}
+
+static bool sensor_bulk_send(void *ctx, const uint8_t *payload, size_t length)
+{
+	const struct sensor_bulk_test_source *source = ctx;
+	return sensor_pawr_queue_bulk_chunk(payload, length,
+					    source->wake_interval_ms) == 0;
+}
+
+static void sensor_bulk_done(void *ctx, bool success)
+{
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(success);
+}
+
+static bool sensor_bulk_feed_pending_ack(void)
+{
+	uint8_t payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
+	size_t length;
+	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+
+	length = sensor_bulk_ack_length;
+	if (length != 0U) {
+		memcpy(payload, sensor_bulk_ack_payload, length);
+		sensor_bulk_ack_length = 0U;
+	}
 	k_spin_unlock(&sensor_pawr_lock, key);
-	LOG_WRN("PAWR_BULK_PROBE FAIL chunk=%u queued=%u",
-		(unsigned)chunk_size, (unsigned)queued);
-	return false;
+	return length != 0U &&
+		edgez_pawr_bulk_sender_feed(&sensor_bulk_sender, payload, length);
 }
 
 static int sensor_pawr_run_bulk_test(uint32_t wake_interval_ms)
 {
 	static const uint32_t test_lengths[] = {32768U, 65536U};
-	static const uint16_t probe_sizes[] = {1000U, 1100U};
-	/* Start in the middle at 880 bytes, then adapt up or down and retain the
-	 * learned tier across sensor wake cycles. */
-	static uint8_t tier = 2U;
-	static uint8_t max_tier = 2U;
-	static uint8_t clean_windows;
-	static bool size_probe_done;
-	uint8_t data[EDGEZ_PAWR_BULK_CHUNK_DATA_SIZE];
-	const uint32_t session_id = sys_rand32_get();
+	struct sensor_bulk_test_source source = {
+		.wake_interval_ms = wake_interval_ms,
+	};
+
 	int rc = sensor_pawr_enable_bulk_burst_mode();
 	if (rc != 0) {
 		return rc;
 	}
 	const struct edgez_pawr_bulk_regulatory regulatory =
 		sensor_pawr_bulk_regulatory();
+	const struct edgez_pawr_bulk_sender_config config = {
+		.tiers = edgez_pawr_bulk_default_tiers,
+		.tier_count = ARRAY_SIZE(edgez_pawr_bulk_default_tiers),
+		.initial_tier = 2U,
+		.maximum_tier = 4U,
+		.max_attempts = EDGEZ_SENSOR_BULK_ACK_ATTEMPTS,
+		.send = sensor_bulk_send,
+		.done = sensor_bulk_done,
+		.ctx = &source,
+	};
 
-	if (!size_probe_done) {
-		uint8_t highest_passing_tier = tier;
-		for (size_t probe = 0U; probe < ARRAY_SIZE(probe_sizes); ++probe) {
-			const bool passed = sensor_pawr_probe_bulk_chunk(
-				probe_sizes[probe], (uint8_t)(0x80U + probe),
-				wake_interval_ms, &regulatory);
-			if (passed) {
-				highest_passing_tier = (uint8_t)(3U + probe);
-			}
-		}
-		tier = highest_passing_tier;
-		max_tier = highest_passing_tier;
-		clean_windows = 0U;
-		size_probe_done = true;
-		LOG_INF("PAWR_BULK_PROBE selected chunk=%u window=%u",
-			(unsigned)sensor_bulk_tiers[tier].chunk_size,
-			(unsigned)sensor_bulk_tiers[tier].window_size);
+	if (!edgez_pawr_bulk_sender_init(&sensor_bulk_sender, &config)) {
+		return -EINVAL;
 	}
 
-	for (size_t test = 0; test < ARRAY_SIZE(test_lengths); ++test) {
-		const uint32_t total_length = test_lengths[test];
-		const uint32_t expected_digest = edgez_pawr_bulk_expected_digest(
-			(uint8_t)test, total_length);
-		uint32_t offset = 0U;
-		uint16_t chunk_index = 0U;
-		uint16_t window_id = 0U;
-		uint32_t transmissions = 0U;
-		uint32_t retries = 0U;
-		uint32_t ack_queries = 0U;
-		const uint32_t initial_block_acks = sensor_bulk_block_ack_count;
+	for (size_t test = 0U; test < ARRAY_SIZE(test_lengths); ++test) {
+		source.test_index = (uint8_t)test;
+		source.produced = 0U;
+		const struct edgez_pawr_bulk_transfer transfer = {
+			.session_id = sys_rand32_get(),
+			.total_length = test_lengths[test],
+			.expected_digest = sensor_bulk_test_digest(
+				(uint8_t)test, test_lengths[test]),
+			.test_index = (uint8_t)test,
+			.regulatory = regulatory,
+		};
 		const int64_t started_ms = k_uptime_get();
+		k_sem_reset(&sensor_bulk_ack_sem);
+		sensor_bulk_ack_length = 0U;
+		if (!edgez_pawr_bulk_sender_start(&sensor_bulk_sender, &transfer)) {
+			return -EINVAL;
+		}
 
-		while (offset < total_length) {
-			const struct sensor_bulk_tier selected = sensor_bulk_tiers[tier];
-			uint32_t window_offset = offset;
-			uint16_t window_chunk = chunk_index;
-			const uint8_t window_count = (uint8_t)MIN(
-				(uint32_t)selected.window_size,
-				(total_length - offset + selected.chunk_size - 1U) /
-				 selected.chunk_size);
-			const uint32_t ack_timeout_ms = sensor_bulk_ack_timeout_ms(
-				selected.chunk_size, window_count);
-			sensor_bulk_ring_release_window();
-
-			while (bulk_ring.count < selected.window_size &&
-			       window_offset < total_length) {
-				struct sensor_bulk_ring_slot *slot =
-					sensor_bulk_ring_reserve();
-				uint8_t *payload = sensor_bulk_ring_payload(
-					bulk_ring.count - 1U);
-				if (!slot || !payload) {
-					return -ENOMEM;
-				}
-				const uint16_t data_length = (uint16_t)MIN(
-					total_length - window_offset,
-					(uint32_t)selected.chunk_size);
-				for (uint16_t i = 0; i < data_length; ++i) {
-					data[i] = edgez_pawr_bulk_test_byte(
-						(uint8_t)test, window_offset + i);
-				}
-				const struct edgez_pawr_bulk_chunk chunk = {
-					.session_id = session_id,
-					.total_length = total_length,
-					.offset = window_offset,
-					.expected_digest = expected_digest,
-					.chunk_index = window_chunk,
-					.chunk_count = UINT16_MAX,
-					.data_length = data_length,
-					.window_id = window_id,
-					.window_base_chunk = chunk_index,
-					.window_count = window_count,
-					.test_index = (uint8_t)test,
-					.flags = (window_offset == 0U ?
-						 EDGEZ_PAWR_BULK_FLAG_FIRST : 0U) |
-						(window_offset + data_length == total_length ?
-						 EDGEZ_PAWR_BULK_FLAG_LAST : 0U),
-					.regulatory = regulatory,
-					.data = data,
-				};
-				slot->payload_length = edgez_pawr_bulk_encode(
-					payload, EDGEZ_SENSOR_BULK_RING_SLOT_BYTES, &chunk);
-				window_offset += data_length;
-				window_chunk++;
-			}
-			if (bulk_ring.count != window_count) {
+		for (;;) {
+			if (!sensor_bulk_fill_sender(&sensor_bulk_sender, &source)) {
+				LOG_ERR("PAWR_BULK_TX producer write failed test=%u produced=%u",
+					(unsigned)test, (unsigned)source.produced);
 				return -EIO;
 			}
-
-			k_sem_reset(&sensor_bulk_ack_sem);
-			k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
-			sensor_bulk_session_id = session_id;
-			sensor_bulk_test_index = (uint8_t)test;
-			sensor_bulk_window_id = window_id;
-			sensor_bulk_base_chunk = chunk_index;
-			sensor_bulk_ack_count = window_count;
-			sensor_bulk_ack_mask = 0U;
-			sensor_bulk_ack_waiting = true;
-			k_spin_unlock(&sensor_pawr_lock, key);
-
-			uint32_t full_mask = BIT(window_count) - 1U;
-			uint32_t queued_transmissions = 0U;
-			unsigned round;
-			for (round = 0U; round < EDGEZ_SENSOR_BULK_ACK_ATTEMPTS;
-			     ++round) {
-				key = k_spin_lock(&sensor_pawr_lock);
-				uint32_t missing = full_mask &
-					~sensor_bulk_ack_mask;
-				sensor_bulk_ack_waiting = true;
-				k_spin_unlock(&sensor_pawr_lock, key);
-				uint8_t last_missing = 0U;
-				for (uint8_t i = 0U; i < window_count; ++i) {
-					if ((missing & BIT(i)) != 0U) last_missing = i;
-				}
-				k_sem_reset(&sensor_bulk_ack_sem);
-				for (uint8_t i = 0U; i < window_count; ++i) {
-					if ((missing & BIT(i)) == 0U) continue;
-					struct sensor_bulk_ring_slot *slot =
-						sensor_bulk_ring_at(i);
-					uint8_t *payload = sensor_bulk_ring_payload(i);
-					if (!slot || !payload) continue;
-					payload[5] &= (uint8_t)~EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST;
-					if (i == last_missing) {
-						payload[5] |= EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST;
-					}
-					if (sensor_pawr_queue_bulk_chunk(
-						payload, slot->payload_length,
-						wake_interval_ms) == 0) {
-						transmissions++;
-						queued_transmissions++;
-						if (round > 0U) retries++;
-					}
-				}
-				if (k_sem_take(&sensor_bulk_ack_sem,
-					K_MSEC(ack_timeout_ms)) != 0) {
-					if (sensor_pawr_send_bulk_query(
-							session_id, (uint8_t)test,
-							window_id, chunk_index,
-							window_count,
-							wake_interval_ms) == 0) {
-						ack_queries++;
-					}
-					(void)k_sem_take(&sensor_bulk_ack_sem,
-						K_MSEC(ack_timeout_ms));
-				}
-				key = k_spin_lock(&sensor_pawr_lock);
-				bool complete = sensor_bulk_ack_mask == full_mask;
-				k_spin_unlock(&sensor_pawr_lock, key);
-				if (complete) break;
+			const uint32_t now_ms = (uint32_t)k_uptime_get();
+			enum edgez_pawr_bulk_result result =
+				edgez_pawr_bulk_sender_poll(&sensor_bulk_sender, now_ms);
+			if (result == EDGEZ_PAWR_BULK_COMPLETE) {
+				break;
 			}
-			key = k_spin_lock(&sensor_pawr_lock);
-			bool complete = sensor_bulk_ack_mask == full_mask;
-			sensor_bulk_ack_waiting = false;
-			k_spin_unlock(&sensor_pawr_lock, key);
-			if (!complete) {
-				/* If the backend rejected every frame in this window, the
-				 * current tier is larger than this transport can queue. No
-				 * receiver state was created, so it is safe to rebuild the
-				 * same offset with the next smaller chunk/window tier. */
-				if (queued_transmissions == 0U && tier > 0U) {
-					tier--;
-					clean_windows = 0U;
-					LOG_WRN("PAWR_BULK_TX backend rejected tier; retrying test=%u offset=%u chunk=%u window=%u",
-						(unsigned)test, (unsigned)offset,
-						(unsigned)sensor_bulk_tiers[tier].chunk_size,
-						(unsigned)sensor_bulk_tiers[tier].window_size);
-					continue;
-				}
-				LOG_ERR("PAWR_BULK_TX FAIL test=%u offset=%u tier=%u mask=%02x/%02x",
-					(unsigned)test, (unsigned)offset, (unsigned)tier,
-					sensor_bulk_ack_mask, full_mask);
+			if (result == EDGEZ_PAWR_BULK_BACKPRESSURE) {
+				k_yield();
+				continue;
+			}
+			if (result < 0) {
+				LOG_ERR("PAWR_BULK_TX FAIL test=%u offset=%u result=%d",
+					(unsigned)test,
+					(unsigned)sensor_bulk_sender.offset, result);
 				return -ETIMEDOUT;
 			}
-
-			offset = window_offset;
-			chunk_index = window_chunk;
-			window_id++;
-			if (round > 0U) {
-				tier = tier > 0U ? tier - 1U : 0U;
-				clean_windows = 0U;
-			} else if (++clean_windows >= 2U && tier < max_tier) {
-				tier++;
-				clean_windows = 0U;
+			if (sensor_bulk_feed_pending_ack()) {
+				continue;
+			}
+			if (result == EDGEZ_PAWR_BULK_WAITING) {
+				uint32_t deadline =
+					edgez_pawr_bulk_sender_next_deadline(
+						&sensor_bulk_sender);
+				uint32_t wait_ms = (int32_t)(deadline - now_ms) > 0 ?
+					deadline - now_ms : 1U;
+				if (k_sem_take(&sensor_bulk_ack_sem,
+					       K_MSEC(wait_ms)) == 0) {
+					(void)sensor_bulk_feed_pending_ack();
+				}
 			}
 		}
 
+		const struct edgez_pawr_bulk_sender_stats *stats =
+			&sensor_bulk_sender.stats;
+		const struct edgez_pawr_bulk_tier final_tier =
+			sensor_bulk_sender.tiers[sensor_bulk_sender.tier];
 		LOG_INF("PAWR_BULK_TX PASS test=%u bytes=%u chunks=%u tx=%u selective_retx=%u ack_queries=%u block_acks=%u elapsed_ms=%u final_chunk=%u final_window=%u final_ack_timeout_ms=%u digest=%08x",
-			(unsigned)test, (unsigned)total_length, (unsigned)chunk_index,
-			(unsigned)transmissions, (unsigned)retries,
-			(unsigned)ack_queries,
-			(unsigned)(sensor_bulk_block_ack_count - initial_block_acks),
+			(unsigned)test, (unsigned)test_lengths[test],
+			(unsigned)stats->chunks_acked,
+			(unsigned)stats->transmissions,
+			(unsigned)stats->selective_retries,
+			(unsigned)stats->ack_queries,
+			(unsigned)stats->block_acks,
 			(unsigned)(k_uptime_get() - started_ms),
-			(unsigned)sensor_bulk_tiers[tier].chunk_size,
-			(unsigned)sensor_bulk_tiers[tier].window_size,
-			(unsigned)sensor_bulk_ack_timeout_ms(
-				sensor_bulk_tiers[tier].chunk_size,
-				sensor_bulk_tiers[tier].window_size),
-			expected_digest);
+			(unsigned)final_tier.chunk_size,
+			(unsigned)final_tier.window_size,
+			(unsigned)edgez_pawr_bulk_ack_timeout_ms(
+				final_tier.chunk_size, final_tier.window_size),
+			transfer.expected_digest);
 	}
 	return 0;
 }

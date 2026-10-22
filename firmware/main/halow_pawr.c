@@ -10,7 +10,7 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "edgez_halow_mesh_service.h"
-#include "edgez_pawr_bulk_test.h"
+#include "edgez_pawr_bulk.h"
 #include "edgez_pawr_protocol.h"
 
 #define PAWR_QUEUE_DEPTH 4U
@@ -31,196 +31,85 @@ static void *beacon_callback_arg;
 
 #if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
 struct pawr_bulk_receive_state {
-    bool active;
+    struct edgez_pawr_bulk_receiver receiver;
     bool invalid;
-    bool reported;
-    bool window_active;
-    uint8_t source_mac[6];
-    uint8_t test_index;
-    uint32_t session_id;
-    uint32_t total_length;
-    uint32_t expected_digest;
-    uint32_t digest;
-    uint32_t received;
-    uint16_t unique_chunks;
-    uint16_t frames_received;
-    uint16_t window_id;
-    uint16_t window_base_chunk;
-    uint8_t window_count;
-    uint32_t window_bitmap;
-    uint16_t block_acks;
-    uint16_t ack_queries;
-    uint16_t duplicate_chunks;
-    uint16_t stale_frames;
-    uint32_t received_map[16];
-    struct edgez_pawr_bulk_regulatory regulatory;
-    bool saw_last;
     int64_t started_us;
 };
 
 static struct pawr_bulk_receive_state bulk_state;
 
-static bool pawr_bulk_send_block_ack(const uint8_t destination[6])
+static uint8_t pawr_bulk_test_byte(uint8_t test_index, uint32_t offset)
 {
-    uint8_t payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
-    const struct edgez_pawr_bulk_control ack = {
-        .kind = EDGEZ_PAWR_BULK_KIND_BLOCK_ACK,
-        .session_id = bulk_state.session_id,
-        .bitmap = bulk_state.window_bitmap,
-        .window_id = bulk_state.window_id,
-        .base_chunk = bulk_state.window_base_chunk,
-        .chunk_count = bulk_state.window_count,
-        .test_index = bulk_state.test_index,
-    };
-    const size_t length = edgez_pawr_bulk_control_encode(
-        payload, sizeof(payload), &ack);
-    if (length == 0U || edgez_halow_mesh_transmit_pawr_control(
-            destination, payload, length) != ESP_OK) {
-        ESP_LOGW(TAG, "PAWR_BULK_ACK send failed window=%u bitmap=%08" PRIx32,
-                 (unsigned)bulk_state.window_id, bulk_state.window_bitmap);
-        return false;
+    return (uint8_t)((offset * 29U + (uint32_t)test_index * 71U + 0x5aU) &
+                     0xffU);
+}
+
+static uint32_t pawr_bulk_test_digest(uint8_t test_index, uint32_t length)
+{
+    uint32_t digest = UINT32_C(2166136261);
+    for (uint32_t offset = 0U; offset < length; ++offset) {
+        digest ^= pawr_bulk_test_byte(test_index, offset);
+        digest *= UINT32_C(16777619);
     }
-    bulk_state.block_acks++;
+    return digest;
+}
+
+static bool pawr_bulk_send(void *ctx, const uint8_t destination[6],
+                           const uint8_t *payload, size_t length)
+{
+    (void)ctx;
+    return edgez_halow_mesh_transmit_pawr_control(destination, payload,
+                                                   length) == ESP_OK;
+}
+
+static bool pawr_bulk_data(void *ctx,
+                           const struct edgez_pawr_bulk_chunk *chunk)
+{
+    struct pawr_bulk_receive_state *state = ctx;
+    if ((chunk->flags & EDGEZ_PAWR_BULK_FLAG_FIRST) != 0U) {
+        state->invalid = false;
+        bulk_state.started_us = esp_timer_get_time();
+    }
+    for (uint16_t i = 0U; i < chunk->data_length; ++i) {
+        if (chunk->data[i] != pawr_bulk_test_byte(
+                                  chunk->test_index, chunk->offset + i)) {
+            state->invalid = true;
+            break;
+        }
+    }
     return true;
 }
 
-static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
-                                   const uint8_t *payload,
-                                   size_t payload_len)
+static void pawr_bulk_done(void *ctx,
+                           const struct edgez_pawr_bulk_transfer *transfer,
+                           bool success)
 {
-    struct edgez_pawr_bulk_chunk chunk;
-    struct edgez_pawr_bulk_control control;
+    struct pawr_bulk_receive_state *state = ctx;
+    const struct edgez_pawr_bulk_receiver_stats *stats =
+        &state->receiver.stats;
+    const uint32_t digest = pawr_bulk_test_digest(
+        transfer->test_index, transfer->total_length);
+    const bool passed = success && !state->invalid &&
+        digest == transfer->expected_digest;
+    const uint32_t elapsed_ms = (uint32_t)(
+        (esp_timer_get_time() - state->started_us) / 1000);
 
-    if (edgez_pawr_bulk_control_decode(payload, payload_len, &control)) {
-        if (control.kind != EDGEZ_PAWR_BULK_KIND_ACK_QUERY) {
-            return true;
-        }
-        if (bulk_state.active &&
-            memcmp(bulk_state.source_mac, source_mac,
-                   sizeof(bulk_state.source_mac)) == 0 &&
-            edgez_pawr_bulk_control_matches(
-                &control, bulk_state.session_id, bulk_state.test_index,
-                bulk_state.window_id, bulk_state.window_base_chunk,
-                bulk_state.window_count)) {
-            bulk_state.ack_queries++;
-            (void)pawr_bulk_send_block_ack(source_mac);
-        } else if (bulk_state.active) {
-            bulk_state.stale_frames++;
-        }
-        return true;
-    }
-
-    if (!edgez_pawr_bulk_decode(payload, payload_len, &chunk)) {
-        return false;
-    }
-
-    const bool first = (chunk.flags & EDGEZ_PAWR_BULK_FLAG_FIRST) != 0U;
-    if (first && (!bulk_state.active ||
-                  bulk_state.session_id != chunk.session_id ||
-                  bulk_state.test_index != chunk.test_index)) {
-        memset(&bulk_state, 0, sizeof(bulk_state));
-        bulk_state.active = true;
-        memcpy(bulk_state.source_mac, source_mac, sizeof(bulk_state.source_mac));
-        bulk_state.test_index = chunk.test_index;
-        bulk_state.session_id = chunk.session_id;
-        bulk_state.total_length = chunk.total_length;
-        bulk_state.expected_digest = chunk.expected_digest;
-        bulk_state.regulatory = chunk.regulatory;
-        bulk_state.digest = edgez_pawr_bulk_expected_digest(
-            chunk.test_index, chunk.total_length);
-        bulk_state.started_us = esp_timer_get_time();
-    }
-
-    if (!bulk_state.active ||
-        memcmp(bulk_state.source_mac, source_mac, sizeof(bulk_state.source_mac)) != 0 ||
-        bulk_state.session_id != chunk.session_id ||
-        bulk_state.test_index != chunk.test_index ||
-        bulk_state.total_length != chunk.total_length ||
-        bulk_state.expected_digest != chunk.expected_digest) {
-        return true;
-    }
-
-    if (!bulk_state.window_active || chunk.window_id > bulk_state.window_id) {
-        if (bulk_state.window_active &&
-            chunk.window_id != (uint16_t)(bulk_state.window_id + 1U)) {
-            bulk_state.stale_frames++;
-            return true;
-        }
-        bulk_state.window_active = true;
-        bulk_state.window_id = chunk.window_id;
-        bulk_state.window_base_chunk = chunk.window_base_chunk;
-        bulk_state.window_count = chunk.window_count;
-        bulk_state.window_bitmap = 0U;
-    } else if (chunk.window_id < bulk_state.window_id) {
-        bulk_state.stale_frames++;
-        return true;
-    } else if (chunk.window_base_chunk != bulk_state.window_base_chunk ||
-               chunk.window_count != bulk_state.window_count) {
-        bulk_state.invalid = true;
-        return true;
-    }
-
-    if (memcmp(&bulk_state.regulatory, &chunk.regulatory,
-               sizeof(bulk_state.regulatory)) != 0) {
-        bulk_state.invalid = true;
-    }
-
-    bulk_state.frames_received++;
-    if (chunk.chunk_index >= 512U) {
-        bulk_state.invalid = true;
-        return true;
-    }
-    const uint32_t bit = UINT32_C(1) << (chunk.chunk_index % 32U);
-    uint32_t *word = &bulk_state.received_map[chunk.chunk_index / 32U];
-    if ((*word & bit) == 0U) {
-        for (uint16_t i = 0; i < chunk.data_length; ++i) {
-            if (chunk.data[i] != edgez_pawr_bulk_test_byte(
-                                     chunk.test_index, chunk.offset + i)) {
-                bulk_state.invalid = true;
-                break;
-            }
-        }
-        *word |= bit;
-        bulk_state.received += chunk.data_length;
-        bulk_state.unique_chunks++;
-    } else {
-        bulk_state.duplicate_chunks++;
-    }
-    bulk_state.window_bitmap |= UINT32_C(1) <<
-        (chunk.chunk_index - bulk_state.window_base_chunk);
-
-    if ((chunk.flags & EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST) != 0U) {
-        (void)pawr_bulk_send_block_ack(source_mac);
-    }
-
-    bulk_state.saw_last |=
-        (chunk.flags & EDGEZ_PAWR_BULK_FLAG_LAST) != 0U;
-    if (!bulk_state.reported && bulk_state.saw_last &&
-        bulk_state.received >= bulk_state.total_length) {
-        const bool passed = !bulk_state.invalid &&
-            bulk_state.received == bulk_state.total_length &&
-            bulk_state.digest == bulk_state.expected_digest;
-        const uint32_t elapsed_ms = (uint32_t)(
-            (esp_timer_get_time() - bulk_state.started_us) / 1000);
-
-        ESP_LOGI(TAG,
+    ESP_LOGI(TAG,
                  "PAWR_BULK_TEST %s test=%u bytes=%" PRIu32
                  " chunks=%u frames=%u duplicates=%u stale=%u "
                  "block_acks=%u ack_queries=%u elapsed_ms=%" PRIu32
                  " digest=%08" PRIx32
                  " source=%02x:%02x:%02x:%02x:%02x:%02x",
-                 passed ? "PASS" : "FAIL", (unsigned)bulk_state.test_index,
-                 bulk_state.received, (unsigned)bulk_state.unique_chunks,
-                 (unsigned)bulk_state.frames_received,
-                 (unsigned)bulk_state.duplicate_chunks,
-                 (unsigned)bulk_state.stale_frames,
-                 (unsigned)bulk_state.block_acks,
-                 (unsigned)bulk_state.ack_queries, elapsed_ms,
-                 bulk_state.digest, source_mac[0], source_mac[1],
-                 source_mac[2], source_mac[3], source_mac[4], source_mac[5]);
+                 passed ? "PASS" : "FAIL", (unsigned)transfer->test_index,
+                 stats->bytes_received, (unsigned)stats->chunks_received,
+                 (unsigned)stats->frames, (unsigned)stats->duplicates,
+                 (unsigned)stats->stale, (unsigned)stats->block_acks,
+                 (unsigned)stats->ack_queries, elapsed_ms, digest,
+                 state->receiver.peer[0], state->receiver.peer[1],
+                 state->receiver.peer[2], state->receiver.peer[3],
+                 state->receiver.peer[4], state->receiver.peer[5]);
 
-        const struct edgez_pawr_bulk_regulatory *reg =
-            &bulk_state.regulatory;
+        const struct edgez_pawr_bulk_regulatory *reg = &transfer->regulatory;
         const bool country_ok = strcmp(reg->country_code, "EU") == 0;
         const bool channel_ok = reg->frequency_khz >= 863500U &&
             reg->frequency_khz <= 867500U;
@@ -236,7 +125,7 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
         const bool config_pass = country_ok && channel_ok && bandwidth_ok &&
             duty_ok && eirp_config_ok && terminal_ok;
         const uint32_t goodput_kbps = elapsed_ms == 0U ? 0U :
-            (bulk_state.received * 8U) / elapsed_ms;
+            (stats->bytes_received * 8U) / elapsed_ms;
 
         ESP_LOGI(TAG,
                  "EU_COMPLIANCE_PRECHECK %s standard=EN304220-2 role=terminal "
@@ -257,10 +146,15 @@ static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
                  "PAWR_ENERGY_PRECHECK bytes=%" PRIu32
                  " active_ms=%" PRIu32 " goodput_kbps=%" PRIu32
                  " energy_mj=UNKNOWN current_measurement=REQUIRED",
-                 bulk_state.received, elapsed_ms, goodput_kbps);
-        bulk_state.reported = true;
-    }
-    return true;
+                 stats->bytes_received, elapsed_ms, goodput_kbps);
+}
+
+static bool pawr_bulk_test_receive(const uint8_t source_mac[6],
+                                   const uint8_t *payload,
+                                   size_t payload_len)
+{
+    return edgez_pawr_bulk_receiver_feed(&bulk_state.receiver, source_mac,
+                                          payload, payload_len);
 }
 #endif
 
@@ -329,6 +223,19 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg)
     }
     beacon_callback = callback;
     beacon_callback_arg = arg;
+#if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+    const struct edgez_pawr_bulk_receiver_config bulk_config = {
+        .send = pawr_bulk_send,
+        .data = pawr_bulk_data,
+        .done = pawr_bulk_done,
+        .ctx = &bulk_state,
+    };
+    if (!edgez_pawr_bulk_receiver_init(&bulk_state.receiver, &bulk_config)) {
+        vQueueDelete(action_queue);
+        action_queue = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
+#endif
     /* The worker decodes a maximum-size NetworkPacket and can forward it to
      * both the BLE notification queue and the mesh TX queue.  The previous
      * 4 KiB stack was exhausted by that nested protobuf/BLE call chain. */

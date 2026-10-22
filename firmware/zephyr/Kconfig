@@ -115,7 +115,8 @@ config OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST
     depends on WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY
     default n
     help
-      Once after boot, transmit deterministic 4 KiB, 8 KiB and 32 KiB test
-      objects as 440-byte connectionless PAwR chunks. Every chunk uses the
-      existing payload-hash acknowledgement. This is a diagnostic image, not
-      the normal low-power telemetry path.
+      Continuously transmit deterministic 32 KiB and 64 KiB test streams
+      through the bounded producer ring. Large transfers use bitmap block
+      acknowledgements and selective retransmission; ordinary sensor reports
+      continue to use the existing per-request payload-hash acknowledgement.
+      This is a diagnostic image, not the normal low-power telemetry path.
