@@ -4,6 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: provision_nrf54_factory.sh --serial SERIAL --jlink-serial JLINK_SN \
+         --country CC --mesh-id ID --channel N --passphrase PASSPHRASE \
          --output-dir DIR [--private-key X25519_PEM] [--build-only] [--force]
 
 Creates/imports an X25519 identity, builds the CRC-protected 4 KiB factory
@@ -13,6 +14,10 @@ EOF
 }
 
 serial=""
+country=""
+mesh_id=""
+channel=""
+passphrase=""
 jlink_serial=""
 output_dir=""
 source_private_key=""
@@ -21,6 +26,10 @@ force=0
 while (($#)); do
   case "$1" in
     --serial) serial="${2:?missing serial}"; shift 2 ;;
+    --country) country="${2:?missing country}"; shift 2 ;;
+    --mesh-id) mesh_id="${2:?missing mesh ID}"; shift 2 ;;
+    --channel) channel="${2:?missing channel}"; shift 2 ;;
+    --passphrase) passphrase="${2-}"; shift 2 ;;
     --jlink-serial) jlink_serial="${2:?missing J-Link serial}"; shift 2 ;;
     --output-dir) output_dir="${2:?missing output directory}"; shift 2 ;;
     --private-key) source_private_key="${2:?missing private key}"; shift 2 ;;
@@ -31,7 +40,8 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$serial" || -z "$output_dir" || ($build_only -eq 0 && -z "$jlink_serial") ]]; then
+if [[ -z "$serial" || -z "$country" || -z "$mesh_id" || -z "$channel" ||
+      -z "$output_dir" || ($build_only -eq 0 && -z "$jlink_serial") ]]; then
   usage >&2
   exit 2
 fi
@@ -69,6 +79,8 @@ chmod 600 "$private_key"
 openssl pkey -in "$private_key" -pubout -out "$public_key"
 python3 "$script_dir/build_nrf54_factory_record.py" create \
   --serial "$serial" --private-key "$private_key" \
+  --country "$country" --mesh-id "$mesh_id" --channel "$channel" \
+  --passphrase "$passphrase" --target nrf54 \
   --output "$factory_image" --manifest "$manifest"
 python3 "$script_dir/build_nrf54_factory_record.py" inspect "$factory_image"
 

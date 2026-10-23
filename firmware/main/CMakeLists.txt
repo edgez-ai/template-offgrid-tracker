@@ -24,9 +24,17 @@ if(CONFIG_DAB_RAW_RF_TEST)
         endif()
     endif()
 else()
-    set(component_sources
-        "app_main.c"
-    )
+    if(CONFIG_OFFGRID_HT_HC33_SENSOR)
+        set(component_sources
+            "ht_hc33_sensor_main.c"
+            "edgez_esp_factory_data.c"
+            "../nrf54/src/usb_control.pb.c"
+        )
+    else()
+        set(component_sources
+            "app_main.c"
+        )
+    endif()
 
     if(CONFIG_OFFGRID_MESH_PS_TEST)
         list(APPEND component_sources "mesh_ps_test.c")
@@ -50,6 +58,13 @@ else()
         esp_timer
     )
 
+    if(CONFIG_OFFGRID_HT_HC33_SENSOR)
+        list(APPEND component_private_dependencies
+            mbedtls
+            nvs_flash
+            spi_flash)
+    endif()
+
     if(CONFIG_DAB_WIFI_EXTENDER)
         list(APPEND component_sources
             "wifi_extender.c"
@@ -63,7 +78,7 @@ else()
 
 # ESP32-S3 uses its local BLE controller. ESP32-P4 uses the ESP32-C6
 # controller on the Waveshare board through ESP-Hosted.
-    if(CONFIG_HALOW_BLE_PROVISIONING AND
+    if(NOT CONFIG_OFFGRID_HT_HC33_SENSOR AND CONFIG_HALOW_BLE_PROVISIONING AND
        (IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4"))
         list(APPEND component_sources "halow_provisioning.c")
         list(APPEND component_private_dependencies
@@ -75,7 +90,7 @@ else()
         )
     endif()
 
-    if(CONFIG_HALOW_BLE_PROVISIONING AND
+    if(NOT CONFIG_OFFGRID_HT_HC33_SENSOR AND CONFIG_HALOW_BLE_PROVISIONING AND
        (IDF_TARGET STREQUAL "esp32s3" OR IDF_TARGET STREQUAL "esp32p4"))
         list(APPEND component_sources
             "edgez_ble_control.c"

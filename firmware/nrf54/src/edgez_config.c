@@ -17,6 +17,7 @@
 #include "edgez_imu.h"
 #include "edgez_mesh_relay.h"
 #include "edgez_reboot.h"
+#include "edgez_rf_api.h"
 #include "usb_control.pb.h"
 
 LOG_MODULE_REGISTER(edgez_config, LOG_LEVEL_INF);
@@ -577,11 +578,24 @@ static int load_persisted_profile_locked(void)
 
 void edgez_config_init(const char *mesh_id, const char *passphrase)
 {
-	struct edgez_factory_identity factory_identity;
+	struct edgez_factory_identity factory_identity = {0};
 	bool have_factory_identity =
 		edgez_factory_data_get(&factory_identity) == 0;
+	uint32_t factory_frequency_khz = 0;
+	uint8_t factory_bandwidth_mhz = 0;
+	bool have_factory_profile = have_factory_identity &&
+		factory_identity.has_halow_profile &&
+		edgez_rf_resolve_s1g_channel(factory_identity.country,
+			factory_identity.channel, &factory_frequency_khz,
+			&factory_bandwidth_mhz);
 	int settings_rc;
 	int load_rc;
+
+	if (have_factory_identity && factory_identity.has_halow_profile &&
+	    !have_factory_profile) {
+		LOG_ERR("Factory HaLow profile rejected country=%s channel=%u",
+			factory_identity.country, factory_identity.channel);
+	}
 
 	settings_rc = settings_subsys_init();
 	LOG_INF("Persistent HaLow settings subsystem init rc=%d", settings_rc);
@@ -609,7 +623,6 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 	settings.user_private_key.size = have_factory_identity ? 32 : 0;
 	if (have_factory_identity) {
 		memcpy(settings.user_private_key.bytes, factory_identity.private_key, 32);
-		memset(&factory_identity, 0, sizeof(factory_identity));
 	}
 	settings.device_type = IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR) ?
 		ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR :
@@ -618,6 +631,9 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 	settings.beacon_interval_seconds = EDGEZ_DEFAULT_INTERVAL_SECONDS;
 	settings.max_hop = 2;
 	copy_string(country_code, sizeof(country_code), CONFIG_WIFI_MORSEMICRO_REGION);
+	if (have_factory_identity) {
+		copy_string(country_code, sizeof(country_code), factory_identity.country);
+	}
 	mesh_frequency_khz = 0;
 	mesh_bandwidth_mhz = 0;
 	halow_initialized = false;
@@ -631,7 +647,7 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		load_rc = load_persisted_profile_locked();
 		if (load_rc != 0 && load_rc != -ENOENT) {
 			LOG_WRN("Persistent HaLow profile ignored: %d", load_rc);
-		} else if (load_rc == -ENOENT) {
+		} else if (load_rc == -ENOENT && !have_factory_profile) {
 		#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 			LOG_INF("Persistent HaLow profile absent; zero-touch HaLow provisioning is required");
 		#else
@@ -639,6 +655,23 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		#endif
 		}
 	}
+	if (have_factory_profile) {
+		copy_string(country_code, sizeof(country_code), factory_identity.country);
+		copy_string(settings.mesh_id, sizeof(settings.mesh_id),
+			factory_identity.mesh_id);
+		copy_string(settings.passphrase, sizeof(settings.passphrase),
+			factory_identity.passphrase);
+		settings.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+		settings.sleep_mode_enabled = true;
+		mesh_frequency_khz = factory_frequency_khz;
+		mesh_bandwidth_mhz = factory_bandwidth_mhz;
+		settings.mesh_frequency_khz = factory_frequency_khz;
+		settings.mesh_bandwidth_mhz = factory_bandwidth_mhz;
+		LOG_INF("Using factory HaLow profile country=%s mesh_id=%s channel=%u frequency=%u kHz bandwidth=%u MHz; discovery skipped",
+			country_code, settings.mesh_id, factory_identity.channel,
+			mesh_frequency_khz, mesh_bandwidth_mhz);
+	}
+	memset(&factory_identity, 0, sizeof(factory_identity));
 	log_profile_readiness_locked("boot");
 	k_mutex_unlock(&config_lock);
 }

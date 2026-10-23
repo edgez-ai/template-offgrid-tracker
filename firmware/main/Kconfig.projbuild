@@ -1,5 +1,22 @@
 menu "HaLow initialization"
 
+    config OFFGRID_HT_HC33_SENSOR
+        bool "Build the HT-HC33 connectionless sensor image"
+        depends on IDF_TARGET_ESP32S3
+        default n
+        help
+            Build a PAwR-only sensor that loads its immutable X25519 factory
+            identity, discovers a provisioning gateway without mesh peering,
+            persists an encrypted accepted profile, and sends periodic Beacon
+            requests. BLE, BATMAN, MQTT, and the full mesh application are not
+            started in this image.
+
+    config OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS
+        int "HT-HC33 discovery/report interval"
+        depends on OFFGRID_HT_HC33_SENSOR
+        range 5 3600
+        default 15
+
     config DAB_RAW_RF_TEST
         bool "Build the isolated EdgeZ raw-RF test image"
         default n

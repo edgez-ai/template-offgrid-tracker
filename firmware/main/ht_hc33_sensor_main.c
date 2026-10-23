@@ -1,0 +1,767 @@
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "edgez_esp_factory_data.h"
+#include "edgez_pawr_protocol.h"
+#include "edgez_rf_api.h"
+#include "edgez_umac.h"
+#include "esp_err.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "pb_decode.h"
+#include "pb_encode.h"
+#include "psa/crypto.h"
+#include "usb_control.pb.h"
+
+#define SENSOR_PROFILE_MAGIC UINT32_C(0x455a5331)
+#define SENSOR_PROFILE_VERSION 1U
+#define SENSOR_PACKET_MAX 512U
+#define SENSOR_ACCEPT_QUEUE_DEPTH 2U
+#define SENSOR_RESPONSE_TIMEOUT_MS 2000U
+#define SENSOR_ACCEPT_WINDOW_MS 2500U
+#define SENSOR_DISCOVERY_CHANNEL_DWELL_MS 250U
+#define SENSOR_MCS 0U
+#define SENSOR_ATTEMPTS 1U
+#define SENSOR_NVS_NAMESPACE "edgez_sensor"
+#define SENSOR_NVS_PROFILE_KEY "profile_v1"
+#define PROVISIONING_ENVELOPE_HEADER_LEN 48U
+#define PROVISIONING_NONCE_LEN 12U
+#define PROVISIONING_TAG_LEN 16U
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t length;
+    char country[3];
+    char mesh_id[33];
+    char passphrase[65];
+    char user_name[65];
+    uint8_t user_public_key[32];
+    uint64_t user_id_high;
+    uint64_t user_id_low;
+    uint32_t frequency_khz;
+    uint32_t beacon_interval_seconds;
+    uint8_t bandwidth_mhz;
+    uint8_t marker;
+    bool share_location;
+    float latitude;
+    float longitude;
+    char icon_style[17];
+    uint32_t crc32;
+} sensor_profile_t;
+
+typedef struct {
+    size_t length;
+    uint8_t payload[SENSOR_PACKET_MAX];
+} acceptance_item_t;
+
+static const char *TAG = "hc33_sensor";
+static const uint8_t envelope_magic[] = {'E', 'Z', 'P', 1};
+static const uint8_t conversation_label[] = "EdgeZ conversation v1";
+static const uint8_t broadcast_mac[6] = {
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+};
+static struct edgez_umac sensor_umac;
+static struct edgez_umac_radio_info radio_info;
+static sensor_profile_t profile;
+static edgez_esp_factory_identity_t factory_identity;
+static SemaphoreHandle_t response_sem;
+static QueueHandle_t acceptance_queue;
+static uint32_t expected_hash;
+static uint32_t active_compressed_ssid;
+static uint16_t sequence_number;
+static uintptr_t tx_token;
+static uint32_t request_id;
+static bool waiting_for_response;
+static bool radio_running;
+static uint8_t active_bandwidth_mhz = 1U;
+
+static uint32_t ieee_crc32(const void *data, size_t length)
+{
+    const uint8_t *bytes = data;
+    uint32_t crc = UINT32_C(0xffffffff);
+    while (length-- != 0U) {
+        crc ^= *bytes++;
+        for (unsigned bit = 0; bit < 8U; ++bit) {
+            crc = (crc >> 1U) ^ ((crc & 1U) != 0U ?
+                UINT32_C(0xedb88320) : 0U);
+        }
+    }
+    return crc ^ UINT32_C(0xffffffff);
+}
+
+static uint64_t mac_to_node(const uint8_t mac[6])
+{
+    uint64_t node = 0;
+    for (size_t i = 0; i < 6U; ++i) node = (node << 8U) | mac[i];
+    return node;
+}
+
+static void put_le64(uint8_t output[8], uint64_t value)
+{
+    for (size_t i = 0; i < 8U; ++i) output[i] = (uint8_t)(value >> (8U * i));
+}
+
+static int compare_identity(uint64_t left_node, const uint8_t left_key[32],
+                            uint64_t right_node, const uint8_t right_key[32])
+{
+    if (left_node < right_node) return -1;
+    if (left_node > right_node) return 1;
+    return memcmp(left_key, right_key, 32U);
+}
+
+static bool profile_valid(const sensor_profile_t *candidate)
+{
+    return candidate != NULL && candidate->magic == SENSOR_PROFILE_MAGIC &&
+        candidate->version == SENSOR_PROFILE_VERSION &&
+        candidate->length == sizeof(*candidate) &&
+        strlen(candidate->country) == 2U && candidate->mesh_id[0] != '\0' &&
+        candidate->frequency_khz != 0U && candidate->bandwidth_mhz != 0U &&
+        candidate->crc32 == ieee_crc32(candidate,
+            offsetof(sensor_profile_t, crc32));
+}
+
+static esp_err_t load_profile(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) return err;
+    size_t length = sizeof(profile);
+    err = nvs_get_blob(handle, SENSOR_NVS_PROFILE_KEY, &profile, &length);
+    nvs_close(handle);
+    if (err != ESP_OK || length != sizeof(profile) || !profile_valid(&profile)) {
+        memset(&profile, 0, sizeof(profile));
+        return err == ESP_OK ? ESP_ERR_INVALID_CRC : err;
+    }
+    return ESP_OK;
+}
+
+static esp_err_t save_profile(sensor_profile_t *candidate)
+{
+    candidate->magic = SENSOR_PROFILE_MAGIC;
+    candidate->version = SENSOR_PROFILE_VERSION;
+    candidate->length = sizeof(*candidate);
+    candidate->crc32 = ieee_crc32(candidate, offsetof(sensor_profile_t, crc32));
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) err = nvs_set_blob(handle, SENSOR_NVS_PROFILE_KEY,
+                                           candidate, sizeof(*candidate));
+    if (err == ESP_OK) err = nvs_commit(handle);
+    if (handle != 0) nvs_close(handle);
+    if (err == ESP_OK) profile = *candidate;
+    return err;
+}
+
+static esp_err_t load_factory_profile(void)
+{
+    uint32_t frequency_khz = 0U;
+    uint8_t bandwidth_mhz = 0U;
+    if (!factory_identity.has_halow_profile ||
+        !edgez_rf_resolve_s1g_channel(factory_identity.country,
+            factory_identity.channel, &frequency_khz, &bandwidth_mhz)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(&profile, 0, sizeof(profile));
+    strlcpy(profile.country, factory_identity.country,
+            sizeof(profile.country));
+    strlcpy(profile.mesh_id, factory_identity.mesh_id,
+            sizeof(profile.mesh_id));
+    strlcpy(profile.passphrase, factory_identity.passphrase,
+            sizeof(profile.passphrase));
+    strlcpy(profile.user_name, factory_identity.serial,
+            sizeof(profile.user_name));
+    memcpy(profile.user_public_key, factory_identity.public_key,
+           sizeof(profile.user_public_key));
+    memcpy(&profile.user_id_high, factory_identity.public_key,
+           sizeof(profile.user_id_high));
+    memcpy(&profile.user_id_low,
+           factory_identity.public_key + sizeof(profile.user_id_high),
+           sizeof(profile.user_id_low));
+    profile.frequency_khz = frequency_khz;
+    profile.bandwidth_mhz = bandwidth_mhz;
+    profile.beacon_interval_seconds =
+        CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
+    strlcpy(profile.icon_style, "sensor", sizeof(profile.icon_style));
+    profile.magic = SENSOR_PROFILE_MAGIC;
+    profile.version = SENSOR_PROFILE_VERSION;
+    profile.length = sizeof(profile);
+    profile.crc32 = ieee_crc32(&profile, offsetof(sensor_profile_t, crc32));
+    ESP_LOGI(TAG,
+             "using factory HaLow profile country=%s mesh=%s channel=%u frequency=%lu kHz bandwidth=%u MHz; discovery skipped",
+             profile.country, profile.mesh_id,
+             (unsigned)factory_identity.channel,
+             (unsigned long)profile.frequency_khz,
+             (unsigned)profile.bandwidth_mhz);
+    return ESP_OK;
+}
+
+static esp_err_t build_discovery(uint8_t *output, size_t capacity,
+                                 size_t *length)
+{
+    ai_edgez_halow_NetworkPacket packet =
+        ai_edgez_halow_NetworkPacket_init_zero;
+    packet.from = mac_to_node(radio_info.mac_addr);
+    packet.operation = ai_edgez_halow_Operation_REQUEST;
+    packet.interface = ai_edgez_halow_Interface_HALOW;
+    packet.which_body = ai_edgez_halow_NetworkPacket_device_settings_tag;
+    packet.body.device_settings.action =
+        ai_edgez_halow_DeviceSettingsAction_DEVICE_SETTINGS_REPORT;
+    strlcpy(packet.body.device_settings.user_name, factory_identity.serial,
+            sizeof(packet.body.device_settings.user_name));
+    memcpy(&packet.body.device_settings.user_id_high,
+           factory_identity.public_key, sizeof(uint64_t));
+    memcpy(&packet.body.device_settings.user_id_low,
+           factory_identity.public_key + sizeof(uint64_t), sizeof(uint64_t));
+    packet.body.device_settings.user_public_key.size = 32U;
+    memcpy(packet.body.device_settings.user_public_key.bytes,
+           factory_identity.public_key, 32U);
+    packet.body.device_settings.device_type =
+        ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+    packet.body.device_settings.sleep_mode_enabled = true;
+    pb_ostream_t stream = pb_ostream_from_buffer(output, capacity);
+    if (!pb_encode(&stream, ai_edgez_halow_NetworkPacket_fields, &packet)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *length = stream.bytes_written;
+    return ESP_OK;
+}
+
+static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length)
+{
+    ai_edgez_halow_Beacon beacon = ai_edgez_halow_Beacon_init_zero;
+    beacon.user_id_high = profile.user_id_high;
+    beacon.user_id_low = profile.user_id_low;
+    strlcpy(beacon.user_name, profile.user_name, sizeof(beacon.user_name));
+    beacon.user_public_key.size = sizeof(profile.user_public_key);
+    memcpy(beacon.user_public_key.bytes, profile.user_public_key,
+           sizeof(profile.user_public_key));
+    beacon.marker = (ai_edgez_halow_MarkerColor)profile.marker;
+    beacon.device_type = ai_edgez_halow_DeviceType_DEVICE_TYPE_SENSOR;
+    strlcpy(beacon.icon_style, profile.icon_style, sizeof(beacon.icon_style));
+    if (profile.share_location) {
+        beacon.latitude = profile.latitude;
+        beacon.longitude = profile.longitude;
+    }
+    pb_ostream_t stream = pb_ostream_from_buffer(output, capacity);
+    if (!pb_encode(&stream, ai_edgez_halow_Beacon_fields, &beacon)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *length = stream.bytes_written;
+    return ESP_OK;
+}
+
+static esp_err_t decrypt_envelope(const ai_edgez_halow_NetworkPacket *outer,
+                                  uint8_t *plaintext, size_t capacity,
+                                  size_t *plaintext_length)
+{
+    if (outer == NULL || plaintext == NULL || plaintext_length == NULL ||
+        outer->which_body != ai_edgez_halow_NetworkPacket_msg_tag ||
+        outer->body.msg.mime != ai_edgez_halow_Mime_MIME_BINARY ||
+        outer->body.msg.payload.size <
+            PROVISIONING_ENVELOPE_HEADER_LEN + PROVISIONING_TAG_LEN ||
+        memcmp(outer->body.msg.payload.bytes, envelope_magic,
+               sizeof(envelope_magic)) != 0 ||
+        outer->to != mac_to_node(radio_info.mac_addr)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    const uint8_t *envelope = outer->body.msg.payload.bytes;
+    const size_t envelope_length = outer->body.msg.payload.size;
+    const uint8_t *sender_key = envelope + sizeof(envelope_magic);
+    const uint8_t *nonce = sender_key + 32U;
+    const uint8_t *ciphertext = nonce + PROVISIONING_NONCE_LEN;
+    const size_t ciphertext_length = envelope_length -
+        PROVISIONING_ENVELOPE_HEADER_LEN;
+    uint8_t shared[32] = {0};
+    uint8_t sender_identity[40];
+    uint8_t recipient_identity[40];
+    uint8_t material[sizeof(conversation_label) - 1U + 32U + 40U + 40U];
+    uint8_t aes_key[32] = {0};
+    uint8_t aad[18U + PROVISIONING_NONCE_LEN];
+    size_t shared_length = 0U;
+    size_t offset = 0U;
+    psa_key_id_t key_id = 0;
+    psa_key_attributes_t attributes = PSA_KEY_ATTRIBUTES_INIT;
+    psa_status_t status = psa_crypto_init();
+    if (status != PSA_SUCCESS) return ESP_FAIL;
+
+    psa_set_key_type(&attributes,
+        PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_MONTGOMERY));
+    psa_set_key_bits(&attributes, 255);
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DERIVE);
+    psa_set_key_algorithm(&attributes, PSA_ALG_ECDH);
+    status = psa_import_key(&attributes, factory_identity.private_key, 32U,
+                            &key_id);
+    psa_reset_key_attributes(&attributes);
+    if (status == PSA_SUCCESS) {
+        status = psa_raw_key_agreement(PSA_ALG_ECDH, key_id, sender_key, 32U,
+                                       shared, sizeof(shared), &shared_length);
+    }
+    if (key_id != 0) (void)psa_destroy_key(key_id);
+    key_id = 0;
+    if (status != PSA_SUCCESS || shared_length != sizeof(shared)) goto fail;
+
+    put_le64(sender_identity, outer->from);
+    memcpy(sender_identity + 8U, sender_key, 32U);
+    put_le64(recipient_identity, outer->to);
+    memcpy(recipient_identity + 8U, factory_identity.public_key, 32U);
+    memcpy(material + offset, conversation_label,
+           sizeof(conversation_label) - 1U);
+    offset += sizeof(conversation_label) - 1U;
+    memcpy(material + offset, shared, sizeof(shared));
+    offset += sizeof(shared);
+    if (compare_identity(outer->from, sender_key, outer->to,
+                         factory_identity.public_key) <= 0) {
+        memcpy(material + offset, sender_identity, sizeof(sender_identity));
+        offset += sizeof(sender_identity);
+        memcpy(material + offset, recipient_identity,
+               sizeof(recipient_identity));
+    } else {
+        memcpy(material + offset, recipient_identity,
+               sizeof(recipient_identity));
+        offset += sizeof(recipient_identity);
+        memcpy(material + offset, sender_identity, sizeof(sender_identity));
+    }
+    status = psa_hash_compute(PSA_ALG_SHA_256, material, sizeof(material),
+                              aes_key, sizeof(aes_key), &offset);
+    if (status != PSA_SUCCESS || offset != sizeof(aes_key)) goto fail;
+    put_le64(aad, outer->from);
+    put_le64(aad + 8U, outer->to);
+    aad[16] = PROVISIONING_NONCE_LEN;
+    aad[17] = 0U;
+    memcpy(aad + 18U, nonce, PROVISIONING_NONCE_LEN);
+
+    psa_set_key_type(&attributes, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attributes, 256);
+    psa_set_key_usage_flags(&attributes, PSA_KEY_USAGE_DECRYPT);
+    psa_set_key_algorithm(&attributes, PSA_ALG_GCM);
+    status = psa_import_key(&attributes, aes_key, sizeof(aes_key), &key_id);
+    psa_reset_key_attributes(&attributes);
+    if (status == PSA_SUCCESS) {
+        status = psa_aead_decrypt(key_id, PSA_ALG_GCM, nonce,
+            PROVISIONING_NONCE_LEN, aad, sizeof(aad), ciphertext,
+            ciphertext_length, plaintext, capacity, plaintext_length);
+    }
+    if (key_id != 0) (void)psa_destroy_key(key_id);
+    memset(shared, 0, sizeof(shared));
+    memset(material, 0, sizeof(material));
+    memset(aes_key, 0, sizeof(aes_key));
+    return status == PSA_SUCCESS ? ESP_OK : ESP_ERR_INVALID_CRC;
+
+fail:
+    if (key_id != 0) (void)psa_destroy_key(key_id);
+    memset(shared, 0, sizeof(shared));
+    memset(material, 0, sizeof(material));
+    memset(aes_key, 0, sizeof(aes_key));
+    return ESP_ERR_INVALID_CRC;
+}
+
+static esp_err_t apply_acceptance(const uint8_t *payload, size_t length)
+{
+    ai_edgez_halow_NetworkPacket outer =
+        ai_edgez_halow_NetworkPacket_init_zero;
+    pb_istream_t stream = pb_istream_from_buffer(payload, length);
+    if (!pb_decode(&stream, ai_edgez_halow_NetworkPacket_fields, &outer)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t plaintext[SENSOR_PACKET_MAX];
+    size_t plaintext_length = 0U;
+    esp_err_t err = decrypt_envelope(&outer, plaintext, sizeof(plaintext),
+                                     &plaintext_length);
+    if (err != ESP_OK) return err;
+
+    ai_edgez_halow_NetworkPacket inner =
+        ai_edgez_halow_NetworkPacket_init_zero;
+    stream = pb_istream_from_buffer(plaintext, plaintext_length);
+    if (!pb_decode(&stream, ai_edgez_halow_NetworkPacket_fields, &inner)) {
+        memset(plaintext, 0, sizeof(plaintext));
+        return ESP_ERR_INVALID_ARG;
+    }
+    sensor_profile_t accepted = {0};
+    if (inner.which_body == ai_edgez_halow_NetworkPacket_init_tag) {
+        const ai_edgez_halow_HaLowInitConfig *init = &inner.body.init;
+        if (strlen(init->country_code) == 2U) {
+            strlcpy(accepted.country, init->country_code,
+                    sizeof(accepted.country));
+        }
+        strlcpy(accepted.mesh_id, init->mesh_id, sizeof(accepted.mesh_id));
+        strlcpy(accepted.passphrase, init->passphrase,
+                sizeof(accepted.passphrase));
+        strlcpy(accepted.user_name, init->user_name,
+                sizeof(accepted.user_name));
+        accepted.user_id_high = init->user_id_high;
+        accepted.user_id_low = init->user_id_low;
+        if (init->user_public_key.size == 32U) {
+            memcpy(accepted.user_public_key, init->user_public_key.bytes, 32U);
+        }
+        accepted.frequency_khz = init->mesh_frequency_khz;
+        accepted.bandwidth_mhz = (uint8_t)init->mesh_bandwidth_mhz;
+        accepted.share_location = init->has_location;
+        accepted.latitude = init->latitude;
+        accepted.longitude = init->longitude;
+        strlcpy(accepted.icon_style, init->icon_style,
+                sizeof(accepted.icon_style));
+    } else if (inner.which_body ==
+               ai_edgez_halow_NetworkPacket_device_settings_tag) {
+        const ai_edgez_halow_DeviceSettings *settings =
+            &inner.body.device_settings;
+        strlcpy(accepted.country, factory_identity.country,
+                sizeof(accepted.country));
+        strlcpy(accepted.mesh_id, settings->mesh_id,
+                sizeof(accepted.mesh_id));
+        strlcpy(accepted.passphrase, settings->passphrase,
+                sizeof(accepted.passphrase));
+        strlcpy(accepted.user_name, settings->user_name,
+                sizeof(accepted.user_name));
+        accepted.user_id_high = settings->user_id_high;
+        accepted.user_id_low = settings->user_id_low;
+        if (settings->user_public_key.size == 32U) {
+            memcpy(accepted.user_public_key,
+                   settings->user_public_key.bytes, 32U);
+        }
+        accepted.frequency_khz = settings->mesh_frequency_khz;
+        accepted.bandwidth_mhz = (uint8_t)settings->mesh_bandwidth_mhz;
+        accepted.beacon_interval_seconds =
+            settings->beacon_interval_seconds;
+        accepted.marker = (uint8_t)settings->marker;
+        accepted.share_location = settings->share_location;
+        accepted.latitude = settings->latitude;
+        accepted.longitude = settings->longitude;
+        strlcpy(accepted.icon_style, settings->icon_style,
+                sizeof(accepted.icon_style));
+    } else {
+        memset(plaintext, 0, sizeof(plaintext));
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (accepted.country[0] == '\0') {
+        strlcpy(accepted.country, factory_identity.country,
+                sizeof(accepted.country));
+    }
+    if (accepted.user_name[0] == '\0') {
+        strlcpy(accepted.user_name, factory_identity.serial,
+                sizeof(accepted.user_name));
+    }
+    uint8_t key_or = 0U;
+    for (size_t i = 0; i < 32U; ++i) key_or |= accepted.user_public_key[i];
+    if (key_or == 0U) {
+        memcpy(accepted.user_public_key, factory_identity.public_key, 32U);
+    }
+    if (accepted.beacon_interval_seconds == 0U) {
+        accepted.beacon_interval_seconds =
+            CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
+    }
+    if (accepted.icon_style[0] == '\0') {
+        strlcpy(accepted.icon_style, "sensor", sizeof(accepted.icon_style));
+    }
+    memset(plaintext, 0, sizeof(plaintext));
+    if (strlen(accepted.country) != 2U || accepted.mesh_id[0] == '\0' ||
+        accepted.frequency_khz == 0U || accepted.bandwidth_mhz == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    err = save_profile(&accepted);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG,
+                 "encrypted sensor profile accepted country=%s mesh=%s frequency=%lu kHz bandwidth=%u MHz",
+                 profile.country, profile.mesh_id,
+                 (unsigned long)profile.frequency_khz,
+                 (unsigned)profile.bandwidth_mhz);
+    }
+    return err;
+}
+
+static void receive_frame(void *ctx, const struct edgez_umac_rx_frame *radio)
+{
+    (void)ctx;
+    struct edgez_pawr_action_view action;
+    if (radio == NULL || !edgez_pawr_decode_action_frame(
+            radio->data, radio->length, &action)) return;
+
+    uint32_t hash;
+    uint32_t compressed_ssid;
+    if (edgez_pawr_decode_response(action.payload, action.payload_length,
+                                   &hash, &compressed_ssid) &&
+        waiting_for_response && hash == expected_hash &&
+        compressed_ssid == active_compressed_ssid) {
+        waiting_for_response = false;
+        xSemaphoreGive(response_sem);
+        return;
+    }
+
+    struct edgez_pawr_request_view request;
+    if (edgez_pawr_decode_request(action.payload, action.payload_length,
+                                  &request) &&
+        request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET &&
+        request.compressed_ssid == active_compressed_ssid &&
+        request.payload_length <= SENSOR_PACKET_MAX) {
+        acceptance_item_t item = {.length = request.payload_length};
+        memcpy(item.payload, request.payload, request.payload_length);
+        (void)xQueueSend(acceptance_queue, &item, 0);
+    }
+}
+
+static void hardware_restart(void *ctx)
+{
+    (void)ctx;
+    ESP_LOGE(TAG, "Morse radio requested restart");
+}
+
+static const struct edgez_umac_event_ops radio_events = {
+    .rx_frame = receive_frame,
+    .hardware_restart_required = hardware_restart,
+};
+
+static esp_err_t start_radio(const char country[3], uint32_t frequency_khz,
+                             uint8_t bandwidth_mhz, const char *mesh_id)
+{
+    if (radio_running) {
+        (void)edgez_umac_stop(&sensor_umac);
+        edgez_rf_unbind_umac();
+        memset(&sensor_umac, 0, sizeof(sensor_umac));
+        radio_running = false;
+    }
+    const struct edgez_rf_backend_ops *driver = edgez_rf_driver_ops();
+    int rc = edgez_umac_bind(&sensor_umac, driver, NULL);
+    if (rc == EDGEZ_UMAC_OK) {
+        rc = edgez_umac_set_event_ops(&sensor_umac, &radio_events, NULL);
+    }
+    if (rc == EDGEZ_UMAC_OK) rc = edgez_rf_bind_umac(&sensor_umac);
+    active_compressed_ssid = edgez_pawr_compress_ssid(
+        (const uint8_t *)mesh_id, strlen(mesh_id));
+    const struct edgez_umac_config config = {
+        .country_code = {country[0], country[1], '\0'},
+        .channel = {
+            .operating_frequency_hz = frequency_khz * 1000U,
+            .operating_bw_mhz = bandwidth_mhz,
+            .primary_bw_mhz = 1U,
+            .primary_1mhz_channel_index = 0U,
+        },
+        .beacon_interval_tu = 1000U,
+        .dtim_period = 1U,
+        .compressed_ssid = active_compressed_ssid,
+        .rate_control = {
+            .enabled = true,
+            .initial_mcs = SENSOR_MCS,
+            .maximum_mcs = 2U,
+            .successes_to_increase = 4U,
+        },
+        .enable_beaconing = false,
+    };
+    if (rc == EDGEZ_UMAC_OK) {
+        rc = edgez_umac_start(&sensor_umac, &config, &radio_info);
+    }
+    if (rc != EDGEZ_UMAC_OK) {
+        edgez_rf_unbind_umac();
+        memset(&sensor_umac, 0, sizeof(sensor_umac));
+        return ESP_FAIL;
+    }
+    radio_running = true;
+    active_bandwidth_mhz = bandwidth_mhz;
+    ESP_LOGI(TAG,
+             "PAwR-only radio active country=%s frequency=%lu kHz bandwidth=%u MHz beaconing=0 peering=0",
+             country, (unsigned long)frequency_khz, (unsigned)bandwidth_mhz);
+    return ESP_OK;
+}
+
+static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
+                              uint32_t interval_ms)
+{
+    uint8_t packet[EDGEZ_PAWR_HEADER_LENGTH + SENSOR_PACKET_MAX];
+    uint8_t action[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
+    size_t packet_length = 0U;
+    size_t action_length = 0U;
+    const uint32_t hash = edgez_pawr_payload_hash(payload, payload_length);
+    if (!edgez_pawr_encode_typed_request(packet, sizeof(packet),
+            EDGEZ_PAWR_REQUEST_BEACON, ++request_id, interval_ms,
+            active_compressed_ssid, payload, payload_length, &packet_length) ||
+        !edgez_pawr_encode_action_frame(action, sizeof(action),
+            sequence_number++, radio_info.mac_addr, broadcast_mac,
+            packet, packet_length, &action_length)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    const struct edgez_umac_tx_request request = {
+        .token = ++tx_token,
+        .frame = action,
+        .frame_length = action_length,
+        .frame_type = EDGEZ_UMAC_TX_MANAGEMENT,
+        .tid = 8U,
+        .mcs = SENSOR_MCS,
+        .attempts = SENSOR_ATTEMPTS,
+        .bandwidth_mhz = active_bandwidth_mhz,
+        .no_ack = true,
+        .immediate_status = true,
+    };
+    xSemaphoreTake(response_sem, 0);
+    expected_hash = hash;
+    waiting_for_response = true;
+    if (edgez_umac_transmit(&sensor_umac, &request) != EDGEZ_UMAC_OK) {
+        waiting_for_response = false;
+        return ESP_FAIL;
+    }
+    if (xSemaphoreTake(response_sem, pdMS_TO_TICKS(SENSOR_RESPONSE_TIMEOUT_MS)) !=
+        pdTRUE) {
+        waiting_for_response = false;
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+static bool try_acceptance(void)
+{
+    acceptance_item_t item;
+    const TickType_t deadline = xTaskGetTickCount() +
+        pdMS_TO_TICKS(SENSOR_ACCEPT_WINDOW_MS);
+    do {
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t remaining = deadline > now ? deadline - now : 0;
+        if (xQueueReceive(acceptance_queue, &item, remaining) != pdTRUE) break;
+        if (apply_acceptance(item.payload, item.length) == ESP_OK) return true;
+    } while (xTaskGetTickCount() < deadline);
+    return false;
+}
+
+static bool select_first_bootstrap_channel(const char *country,
+                                           uint8_t *channel)
+{
+    uint32_t frequency_khz;
+    uint8_t bandwidth_mhz;
+    for (unsigned candidate = 1U; candidate <= UINT8_MAX; ++candidate) {
+        if (edgez_rf_resolve_s1g_channel(country, (uint8_t)candidate,
+                &frequency_khz, &bandwidth_mhz) && bandwidth_mhz == 1U) {
+            *channel = (uint8_t)candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool advance_bootstrap_channel(const char *country, uint8_t *channel)
+{
+    uint32_t frequency_khz;
+    uint8_t bandwidth_mhz;
+    const uint8_t first = *channel;
+    do {
+        (*channel)++;
+        if (*channel == 0U) *channel = 1U;
+        if (edgez_rf_resolve_s1g_channel(country, *channel,
+                &frequency_khz, &bandwidth_mhz) && bandwidth_mhz == 1U) {
+            return true;
+        }
+    } while (*channel != first);
+    return false;
+}
+
+static void sensor_task(void *arg)
+{
+    (void)arg;
+    bool provisioned = profile_valid(&profile);
+    uint8_t bootstrap_channel = factory_identity.channel;
+    uint8_t discovery_attempts = 0U;
+    const uint32_t interval_ms =
+        CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS * 1000U;
+
+    if (!provisioned && bootstrap_channel == 0U &&
+        !select_first_bootstrap_channel(
+            factory_identity.country, &bootstrap_channel)) {
+        ESP_LOGE(TAG, "no 1 MHz discovery channel for country=%s",
+                 factory_identity.country);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    for (;;) {
+        const char *country = provisioned ? profile.country :
+            factory_identity.country;
+        const char *mesh_id = provisioned ? profile.mesh_id :
+            "edgez-zero-touch";
+        uint32_t frequency_khz = provisioned ? profile.frequency_khz : 0U;
+        uint8_t bandwidth_mhz = provisioned ? profile.bandwidth_mhz : 0U;
+        if (!provisioned && !edgez_rf_resolve_s1g_channel(
+                country, bootstrap_channel, &frequency_khz,
+                &bandwidth_mhz)) {
+            ESP_LOGE(TAG, "invalid bootstrap country=%s channel=%u", country,
+                     (unsigned)bootstrap_channel);
+            vTaskDelay(pdMS_TO_TICKS(interval_ms));
+            continue;
+        }
+        if (!radio_running && start_radio(country, frequency_khz,
+                                          bandwidth_mhz, mesh_id) != ESP_OK) {
+            (void)advance_bootstrap_channel(country, &bootstrap_channel);
+            discovery_attempts = 0U;
+            vTaskDelay(pdMS_TO_TICKS(SENSOR_DISCOVERY_CHANNEL_DWELL_MS));
+            continue;
+        }
+
+        uint8_t payload[SENSOR_PACKET_MAX];
+        size_t payload_length = 0U;
+        esp_err_t err = provisioned ?
+            build_beacon(payload, sizeof(payload), &payload_length) :
+            build_discovery(payload, sizeof(payload), &payload_length);
+        if (err == ESP_OK) err = send_request(payload, payload_length,
+                                               interval_ms);
+        ESP_LOGI(TAG, "%s PAwR request %s channel=%u bytes=%u",
+                 provisioned ? "Beacon" : "discover",
+                 err == ESP_OK ? "acknowledged" : "unacknowledged",
+                 (unsigned)bootstrap_channel, (unsigned)payload_length);
+        if (!provisioned && err == ESP_OK && try_acceptance()) {
+            provisioned = true;
+            (void)edgez_umac_stop(&sensor_umac);
+            edgez_rf_unbind_umac();
+            memset(&sensor_umac, 0, sizeof(sensor_umac));
+            radio_running = false;
+            continue;
+        }
+
+        if (!provisioned) {
+            if (++discovery_attempts >= 3U) {
+                discovery_attempts = 0U;
+                (void)advance_bootstrap_channel(country, &bootstrap_channel);
+                (void)edgez_umac_stop(&sensor_umac);
+                edgez_rf_unbind_umac();
+                memset(&sensor_umac, 0, sizeof(sensor_umac));
+                radio_running = false;
+            }
+        }
+        const uint32_t report_seconds = provisioned &&
+            profile.beacon_interval_seconds != 0U ?
+            profile.beacon_interval_seconds :
+            CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
+        vTaskDelay(pdMS_TO_TICKS(provisioned ? report_seconds * 1000U :
+                                 SENSOR_DISCOVERY_CHANNEL_DWELL_MS));
+    }
+}
+
+void app_main(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(edgez_esp_factory_data_init());
+    ESP_ERROR_CHECK(edgez_esp_factory_data_get(&factory_identity));
+    ESP_ERROR_CHECK(edgez_rf_platform_init() == 0 ? ESP_OK : ESP_FAIL);
+    esp_err_t profile_err = load_factory_profile();
+    if (profile_err != ESP_OK) profile_err = load_profile();
+    ESP_LOGI(TAG, "HT-HC33 sensor boot factory=%s profile=%s",
+             factory_identity.serial,
+             profile_err == ESP_OK ? "provisioned" : "discover");
+    response_sem = xSemaphoreCreateBinary();
+    acceptance_queue = xQueueCreate(SENSOR_ACCEPT_QUEUE_DEPTH,
+                                    sizeof(acceptance_item_t));
+    if (response_sem == NULL || acceptance_queue == NULL ||
+        xTaskCreate(sensor_task, "hc33_sensor", 12288, NULL, 6, NULL) !=
+            pdPASS) {
+        ESP_LOGE(TAG, "could not start sensor task");
+        abort();
+    }
+}
