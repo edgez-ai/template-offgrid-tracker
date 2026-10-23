@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import Constants from "expo-constants";
 import { File, Paths } from "expo-file-system";
-import { Account, Client, ExecutionMethod, Functions, ID, Permission, Role, Storage, TablesDB, Teams } from "react-native-appwrite";
+import { Account, Client, ExecutionMethod, Functions, ID, Permission, Query, Role, Storage, TablesDB, Teams } from "react-native-appwrite";
 import type { EdgezSensorSample } from "@edgez/react-native-sdk";
 import type { StoredProfile } from "./profile-store";
 import type { ProvisioningRequestDetails, StoredDevice, StoredMessage, StoredProvisioningRequest } from "./profile-store";
@@ -233,13 +233,12 @@ export async function logoutCloudSession() {
 
 async function devicesRequest<T>(path = "", init?: RequestInit): Promise<T> {
   if (!account) throw new Error("Cloud access is not configured in this app build.");
-  const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices${path}`, {
     ...init,
+    credentials: "include",
     headers: {
       "content-type": "application/json",
       "x-appwrite-project": projectId,
-      "x-appwrite-jwt": jwt.jwt,
       ...init?.headers,
     },
   });
@@ -252,7 +251,12 @@ async function devicesRequest<T>(path = "", init?: RequestInit): Promise<T> {
 export async function listCloudDiscoveredDevices(
   profileId: string,
 ): Promise<StoredProvisioningRequest[]> {
-  const result = await devicesRequest<{ devices: NativeDevice[] }>();
+  const query = [
+    Query.equal("status", ["discovered"]),
+    Query.equal("enabled", [false]),
+    Query.limit(100),
+  ].map((value) => `queries[]=${encodeURIComponent(value)}`).join("&");
+  const result = await devicesRequest<{ devices: NativeDevice[]; total?: number }>(`?${query}`);
   const devices = result.devices ?? [];
   const byId = new Map(devices.map((device) => [device.$id, device]));
   const requests: StoredProvisioningRequest[] = [];
