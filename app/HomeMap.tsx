@@ -60,6 +60,7 @@ export function HomeMap({
   onProvisioningRequestsChanged,
   onResendMessage,
   onCloudPress,
+  onAddDevice,
   onOpenSettings,
 }: {
   profile: StoredProfile;
@@ -75,6 +76,7 @@ export function HomeMap({
   onProvisioningRequestsChanged: () => Promise<void>;
   onResendMessage: (message: StoredMessage) => Promise<void>;
   onCloudPress: () => void;
+  onAddDevice: () => void;
   onOpenSettings: () => void;
 }) {
   const map = useRef<EdgezOrganicMapRef>(null);
@@ -372,6 +374,15 @@ export function HomeMap({
           </Text>
         </Pressable>
         <View style={styles.headerActions}>
+          <Pressable
+            style={styles.addButton}
+            onPress={onAddDevice}
+            accessibilityRole="button"
+            accessibilityLabel="Add device"
+          >
+            <Ionicons name="add" size={18} color="white" />
+            <Text style={styles.addButtonText}>ADD</Text>
+          </Pressable>
           <Pressable
             style={styles.headerIconButton}
             onPress={onOpenSettings}

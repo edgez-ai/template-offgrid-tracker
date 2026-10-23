@@ -576,6 +576,7 @@ export default function App() {
             onProvisioningRequestsChanged={refreshProvisioningRequests}
             onResendMessage={resendMessage}
             onCloudPress={() => { if (cloudStatus === "login") setCloudLoginOpen(true); }}
+            onAddDevice={() => setProvisioningOpen(true)}
             onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
