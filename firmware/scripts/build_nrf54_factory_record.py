@@ -69,6 +69,8 @@ def build(serial: str, private_key: pathlib.Path, output: pathlib.Path,
         raise ValueError("serial must contain 1-32 non-NUL UTF-8 bytes")
     if len(country) != 2 or not country.isascii() or not country.isalpha():
         raise ValueError("country must be a two-letter ASCII country code")
+    if target == "nrf54" and not 1 <= channel <= 255:
+        raise ValueError("nRF54 factory data requires a discovery channel from 1 to 255")
     profile_present = bool(mesh_id) or bool(passphrase)
     if profile_present and (not mesh_id or not 1 <= channel <= 255):
         raise ValueError(

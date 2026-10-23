@@ -67,6 +67,7 @@ static bool record_valid(const struct edgez_factory_record *record)
 		memcmp(record->private_key, zero_key, sizeof(zero_key)) != 0 &&
 		record->country[0] != '\0' && record->country[1] != '\0' &&
 		record->country[2] == '\0' &&
+		record->channel != 0U &&
 		memchr(record->mesh_id, '\0', sizeof(record->mesh_id)) != NULL &&
 		profile_valid &&
 		record->crc32 == record_crc(record);

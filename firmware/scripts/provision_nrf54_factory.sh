@@ -4,11 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: provision_nrf54_factory.sh --serial SERIAL --jlink-serial JLINK_SN \
-         --country CC --mesh-id ID --channel N --passphrase PASSPHRASE \
+	 --country CC --channel N [--mesh-id ID --passphrase PASSPHRASE] \
          --output-dir DIR [--private-key X25519_PEM] [--build-only] [--force]
 
 Creates/imports an X25519 identity, builds the CRC-protected 4 KiB factory
 partition image, and writes only the FGH200M factory partition at 0x165000.
+Country and channel are always required and exclusively select zero-touch
+discovery. Omit mesh/passphrase to require discovery instead of joining a
+factory HaLow profile directly.
 The private key is saved as identity-private.pem with mode 0600.
 EOF
 }
@@ -40,7 +43,7 @@ while (($#)); do
   esac
 done
 
-if [[ -z "$serial" || -z "$country" || -z "$mesh_id" || -z "$channel" ||
+if [[ -z "$serial" || -z "$country" || -z "$channel" ||
       -z "$output_dir" || ($build_only -eq 0 && -z "$jlink_serial") ]]; then
   usage >&2
   exit 2

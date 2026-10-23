@@ -249,6 +249,7 @@ program it independently of the application image:
 firmware/scripts/provision_nrf54_factory.sh \
   --serial FGH200M-000001 \
   --jlink-serial <JLINK_SN> \
+  --country US --channel 27 \
   --output-dir .factory/FGH200M-000001
 ```
 
@@ -258,6 +259,9 @@ image without touching hardware. The script writes and verifies only the 4 KiB
 factory partition at `0x165000`; normal profile reset and application flashing
 do not modify it. Keep `identity-private.pem` secret and backed up. Avoid a
 whole-chip erase after manufacturing because that also removes factory data.
+Country and channel always come from this factory record for discovery. Omit
+mesh ID/passphrase, as above, to require discovery; provide both only when the
+sensor should join that factory mesh immediately and skip discovery.
 The factory write/verify sequence is committed as
 `firmware/scripts/jlink/factory_partition.jlink.in`; the shell script fills in
 the generated image path in a temporary copy.

@@ -217,6 +217,7 @@ Before using zero-touch provisioning, manufacture the sensor identity separately
 ./scripts/provision_nrf54_factory.sh \
   --serial FGH200M-000001 \
   --jlink-serial <JLINK_SN> \
+  --country US --channel 27 \
   --output-dir ../.factory/FGH200M-000001
 ```
 
@@ -225,6 +226,9 @@ factory partition at `0x165000`. The firmware loads that record once at boot;
 the provisioning serial and public key then come exclusively from its RAM
 cache. A sensor with no valid factory keypair keeps HaLow powered down and
 sleeps. Preserve the generated private key and never commit `.factory/`.
+The discovery regulatory domain and initial channel also come exclusively from
+this factory record. Omit mesh ID/passphrase to exercise discovery; supplying a
+complete mesh profile skips discovery.
 Reusable J-Link Commander files live under `scripts/jlink/`. Run
 `flash_fgh200m_sensor.jlink` or `flash_fgh200m_companion.jlink` from this
 `firmware/` directory. The factory script expands

@@ -41,20 +41,6 @@ config OFFGRID_NRF54_ROLE_SENSOR
 
 endchoice
 
-config OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY
-    string "Zero-touch sensor bootstrap country"
-    default "US"
-    help
-      Regulatory domain used before a sensor has a provisioned profile.
-
-config OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL
-    int "Zero-touch sensor bootstrap S1G channel"
-    range 1 255
-    default 27
-    help
-      Country-specific 802.11ah channel used for zero-touch requests before
-      the accepted profile has been saved to normal settings storage.
-
 config OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS
     int "Zero-touch request interval"
     range 5 3600

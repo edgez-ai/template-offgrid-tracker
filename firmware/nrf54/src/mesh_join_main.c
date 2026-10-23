@@ -128,8 +128,8 @@ static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
 static size_t sensor_bulk_ack_length;
 K_SEM_DEFINE(sensor_bulk_ack_sem, 0, 1);
 #endif
-static uint8_t sensor_bootstrap_channel =
-	CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL;
+static char sensor_bootstrap_country[3];
+static uint8_t sensor_bootstrap_channel;
 K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 static const struct gpio_dt_spec user_button =
@@ -766,21 +766,43 @@ static uint32_t sensor_update_interval_ms(void)
 		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS * 1000U;
 }
 
+static int sensor_load_factory_bootstrap(void)
+{
+	struct edgez_factory_identity factory = {0};
+	uint32_t frequency_khz = 0;
+	uint8_t bandwidth_mhz = 0;
+
+	if (edgez_factory_data_get(&factory) != 0 ||
+	    strlen(factory.country) != 2U || factory.channel == 0U ||
+	    !edgez_rf_resolve_s1g_channel(factory.country, factory.channel,
+		&frequency_khz, &bandwidth_mhz) || bandwidth_mhz != 1U) {
+		memset(&factory, 0, sizeof(factory));
+		return -EINVAL;
+	}
+	memcpy(sensor_bootstrap_country, factory.country, 2U);
+	sensor_bootstrap_country[2] = '\0';
+	sensor_bootstrap_channel = factory.channel;
+	LOG_INF("factory discovery profile country=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
+		sensor_bootstrap_country, sensor_bootstrap_channel,
+		frequency_khz, bandwidth_mhz);
+	memset(&factory, 0, sizeof(factory));
+	return 0;
+}
+
 static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
 {
 	uint32_t frequency_khz = 0;
 	uint8_t bandwidth_mhz = 0;
 
-	if (!profile || strlen(CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY) != 2U ||
+	if (!profile || strlen(sensor_bootstrap_country) != 2U ||
 	    !edgez_rf_resolve_s1g_channel(
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+		sensor_bootstrap_country,
 		sensor_bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
 	    bandwidth_mhz != 1U) {
 		return -EINVAL;
 	}
 	memset(profile, 0, sizeof(*profile));
-	memcpy(profile->country_code,
-	       CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY, 2U);
+	memcpy(profile->country_code, sensor_bootstrap_country, 2U);
 	profile->country_code[2] = '\0';
 	strcpy(profile->mesh_id, "edgez-zero-touch");
 	profile->mesh_frequency_khz = frequency_khz;
@@ -810,7 +832,7 @@ static bool sensor_advance_bootstrap_channel(void)
 			continue;
 		}
 		if (edgez_rf_resolve_s1g_channel(
-			    CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+			    sensor_bootstrap_country,
 			    candidate, &frequency_khz, &bandwidth_mhz) &&
 		    bandwidth_mhz == 1U) {
 			sensor_bootstrap_channel = candidate;
@@ -820,7 +842,7 @@ static bool sensor_advance_bootstrap_channel(void)
 		}
 	}
 	LOG_WRN("no alternate valid zero-touch channel for country=%s",
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY);
+		sensor_bootstrap_country);
 	return false;
 }
 
@@ -832,7 +854,7 @@ static int sensor_retune_bootstrap_channel(void)
 	if (!mesh_started || !mesh_runtime.umac.driver ||
 	    !mesh_runtime.umac.driver->set_channel ||
 	    !edgez_rf_resolve_s1g_channel(
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
+		sensor_bootstrap_country,
 		sensor_bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
 	    bandwidth_mhz != 1U) {
 		return -EINVAL;
@@ -978,25 +1000,23 @@ static int sensor_pawr_bulk_profile(struct edgez_halow_profile *profile)
 	uint8_t bandwidth_mhz = 0U;
 
 	if (profile == NULL ||
-	    strlen(CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY) != 2U ||
+	    strlen(sensor_bootstrap_country) != 2U ||
 	    !edgez_rf_resolve_s1g_channel(
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
-		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
+		sensor_bootstrap_country, sensor_bootstrap_channel,
 		&frequency_khz, &bandwidth_mhz)) {
 		LOG_ERR("PAWR_REG invalid bulk profile country=%s channel=%u",
-			CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
-			(unsigned)CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL);
+			sensor_bootstrap_country,
+			(unsigned)sensor_bootstrap_channel);
 		return -EINVAL;
 	}
 
-	memcpy(profile->country_code,
-	       CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY, 2U);
+	memcpy(profile->country_code, sensor_bootstrap_country, 2U);
 	profile->country_code[2] = '\0';
 	profile->mesh_frequency_khz = frequency_khz;
 	profile->mesh_bandwidth_mhz = bandwidth_mhz;
 	LOG_INF("PAWR_REG bulk profile country=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
 		profile->country_code,
-		(unsigned)CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL,
+		(unsigned)sensor_bootstrap_channel,
 		(unsigned)frequency_khz, (unsigned)bandwidth_mhz);
 	return 0;
 }
@@ -2243,6 +2263,8 @@ int main(void)
 	int factory_rc = edgez_factory_data_init();
 	if (factory_rc != 0) {
 		LOG_ERR("factory identity unavailable rc=%d", factory_rc);
+	} else if (sensor_role && sensor_load_factory_bootstrap() != 0) {
+		LOG_ERR("factory discovery country/channel unavailable or invalid");
 	}
 	int sensor_rc = edgez_battery_init();
 	if (sensor_rc != 0) {
@@ -2279,8 +2301,8 @@ int main(void)
 			if (!edgez_config_should_autostart()) {
 				if (sensor_bootstrap_profile(&profile) != 0) {
 					LOG_ERR("invalid zero-touch bootstrap country=%s channel=%d",
-						CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_COUNTRY,
-						CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_CHANNEL);
+						sensor_bootstrap_country,
+						sensor_bootstrap_channel);
 					sensor_force_cpu_low_power();
 					k_msleep(1000);
 					continue;
