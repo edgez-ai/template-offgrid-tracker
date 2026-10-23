@@ -86,6 +86,9 @@ export type ProvisioningRequestDetails = {
   userIdLow: string;
   userPublicKey: string;
   lastSeenAt: string;
+  transport?: "ble" | "mqtt";
+  cloudDeviceId?: string;
+  gatewayNodeNum?: string;
 };
 
 export type StoredProvisioningRequest = ProvisioningRequestDetails & {

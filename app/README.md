@@ -86,6 +86,14 @@ automatically. The realtime SDK flow first reads device status and initializes
 HaLow when required. Mesh packets then pass transparently between the phone,
 BLE device, and HaLow network.
 
+Zero-touch sensors discovered by an MQTT gateway are read directly from the
+Appwrite Devices API when their native Device status is `discovered`. They
+appear in the same `Discovered` view as local BLE discoveries but are not
+copied into the local provisioning-request table. Accepting one encrypts the
+active profile for that sensor, calls the Device discovery API, and lets
+Appwrite publish the opaque packet to the gateway's system MQTT topic. Local
+discoveries continue to use the BLE transport.
+
 The app periodically broadcasts the active user's beacon. Location mode is:
 
 - `Off`: no location is included;

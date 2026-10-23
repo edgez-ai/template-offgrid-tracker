@@ -4,7 +4,10 @@ import { File, Paths } from "expo-file-system";
 import { Account, Client, ExecutionMethod, Functions, ID, Permission, Role, Storage, TablesDB, Teams } from "react-native-appwrite";
 import type { EdgezSensorSample } from "@edgez/react-native-sdk";
 import type { StoredProfile } from "./profile-store";
-import type { StoredDevice, StoredMessage } from "./profile-store";
+import type { ProvisioningRequestDetails, StoredDevice, StoredMessage, StoredProvisioningRequest } from "./profile-store";
+import { provisioningRequestFromPacket } from "./halow-provisioning";
+import { nodeNumFromSerial } from "./mesh-utils";
+import { fromByteArray, toByteArray } from "base64-js";
 
 export type CloudConnectionState = "login" | "offline" | "online";
 
@@ -44,6 +47,25 @@ const functions = client ? new Functions(client) : null;
 const storage = client ? new Storage(client) : null;
 const sessionCacheKey = `offgrid-tracker:cloud-session:${projectId || "unconfigured"}`;
 let cloudSyncQueue: Promise<CloudSyncResult> = Promise.resolve({ syncedAt: "", devices: [], messages: [], sensorSamples: [] });
+
+type NativeDevice = {
+  $id: string;
+  $permissions?: string[];
+  serial: string;
+  status: string;
+  enabled: boolean;
+  halowMac?: string | null;
+  gatewayDeviceId?: string | null;
+  metadata?: {
+    profileId?: string;
+    _edgezDiscovery?: {
+      publicKey?: string;
+      requestPayload?: string;
+      firstSeenAt?: string;
+      lastSeenAt?: string;
+    };
+  };
+};
 
 export type CloudTokenRequest = {
   userId: string;
@@ -207,6 +229,83 @@ export async function logoutCloudSession() {
     if (!isCloudAuthError(error)) throw error;
   }
   await AsyncStorage.removeItem(sessionCacheKey);
+}
+
+async function devicesRequest<T>(path = "", init?: RequestInit): Promise<T> {
+  if (!account) throw new Error("Cloud access is not configured in this app build.");
+  const jwt = await account.createJWT();
+  const response = await fetch(`${endpoint}/devices${path}`, {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": projectId,
+      "x-appwrite-jwt": jwt.jwt,
+      ...init?.headers,
+    },
+  });
+  const payload = await response.json() as T & { message?: string };
+  if (!response.ok) throw new Error(payload.message || "Appwrite Devices request failed.");
+  return payload;
+}
+
+/** Return cloud discoveries routed through a gateway assigned to this profile. */
+export async function listCloudDiscoveredDevices(
+  profileId: string,
+): Promise<StoredProvisioningRequest[]> {
+  const result = await devicesRequest<{ devices: NativeDevice[] }>();
+  const devices = result.devices ?? [];
+  const byId = new Map(devices.map((device) => [device.$id, device]));
+  const requests: StoredProvisioningRequest[] = [];
+  for (const device of devices) {
+    if (device.status !== "discovered" || device.enabled || !device.gatewayDeviceId) continue;
+    let gateway = byId.get(device.gatewayDeviceId);
+    if (!gateway) {
+      try {
+        gateway = await devicesRequest<NativeDevice>(`/${encodeURIComponent(device.gatewayDeviceId)}`);
+      } catch {
+        continue;
+      }
+    }
+    const profilePermission = `team:${profileId}`;
+    const belongsToProfile = gateway.metadata?.profileId === profileId ||
+      [...device.$permissions ?? [], ...gateway.$permissions ?? []]
+        .some((permission) => permission.includes(profilePermission));
+    if (!belongsToProfile) continue;
+    const discovery = device.metadata?._edgezDiscovery;
+    if (!discovery?.requestPayload) continue;
+    let parsed: ProvisioningRequestDetails | null = null;
+    try {
+      parsed = provisioningRequestFromPacket(profileId, toByteArray(discovery.requestPayload));
+    } catch {
+      // Ignore a malformed server record without hiding other valid discoveries.
+    }
+    if (!parsed) continue;
+    const gatewayNodeNum = nodeNumFromSerial(gateway.halowMac || gateway.serial)?.toString() ?? "";
+    requests.push({
+      ...parsed,
+      id: device.$id,
+      status: "pending",
+      firstSeenAt: discovery.firstSeenAt || parsed.lastSeenAt,
+      lastSeenAt: discovery.lastSeenAt || parsed.lastSeenAt,
+      acceptedAt: "",
+      transport: "mqtt",
+      cloudDeviceId: device.$id,
+      gatewayNodeNum,
+    });
+  }
+  return requests;
+}
+
+/** Publish an encrypted acceptance through the gateway's system MQTT topic. */
+export async function acceptCloudProvisioningRequest(
+  deviceId: string,
+  packet: Uint8Array,
+): Promise<void> {
+  if (!deviceId) throw new Error("The cloud discovery record is missing.");
+  await devicesRequest(`/${encodeURIComponent(deviceId)}/discovery`, {
+    method: "PATCH",
+    body: JSON.stringify({ payload: fromByteArray(packet) }),
+  });
 }
 
 export async function syncCloudProfile(profile: StoredProfile) {

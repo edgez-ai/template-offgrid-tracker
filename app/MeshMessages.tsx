@@ -19,6 +19,7 @@ import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes }
 import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
+import { acceptCloudProvisioningRequest } from "./cloud-auth";
 
 type InboxTab = "channels" | "people" | "sensors" | "discovered";
 type ConversationPeer = { id: string; name: string; serial: string; nodeNum: bigint | null; publicChannel: boolean; device: StoredDevice | null };
@@ -183,7 +184,9 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   };
 
   const acceptProvisioningRequest = async () => {
-    if (!selectedRequest || !session || acceptingRequest) return;
+    if (!selectedRequest || acceptingRequest) return;
+    const cloudRequest = selectedRequest.transport === "mqtt";
+    if (!cloudRequest && !session) return;
     const channel = channelsForCountry(profile.country)
       .find(({ number }) => number === profile.halowChannel);
     if (!channel) {
@@ -198,8 +201,11 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
       if (name.length > 64) throw new Error("The device name must not exceed 64 characters.");
       const coordinates = requestLocationMode === "map" ? coordinatesFromLocation(requestLocation) : null;
       if (requestLocationMode === "map" && !coordinates) throw new Error("Choose a valid device location.");
-      const from = meshState?.status?.macAddress;
-      if (!from) throw new Error("Local HaLow address is not ready.");
+      const from = meshState?.status?.macAddress ??
+        (selectedRequest.gatewayNodeNum ? BigInt(selectedRequest.gatewayNodeNum) : null);
+      if (!from) throw new Error(cloudRequest
+        ? "The discovery gateway has no HaLow address."
+        : "Local HaLow address is not ready.");
       const to = BigInt(selectedRequest.nodeNum);
       const identity = profileIdentity(profile);
       const encodedProfile = encodeNetworkPacket({
@@ -250,17 +256,21 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
           payload: encrypted,
         },
       });
-      await session.sdk.transport.invoke("sendPacket", {
-        label: `Accept zero-touch sensor ${selectedRequest.serial}`,
-        packet: Array.from(packet),
-        waitForDrainMs: 3000,
-      });
+      if (cloudRequest) {
+        await acceptCloudProvisioningRequest(selectedRequest.cloudDeviceId ?? "", packet);
+      } else {
+        await session!.sdk.transport.invoke("sendPacket", {
+          label: `Accept zero-touch sensor ${selectedRequest.serial}`,
+          packet: Array.from(packet),
+          waitForDrainMs: 3000,
+        });
+      }
       await saveProfileDevice({
         profileId,
         serial: selectedRequest.serial,
         name,
         kind: "nrf54",
-        firmwareTarget: "edgez-nrf54l15-fgh200m-sensor",
+        firmwareTarget: cloudRequest ? "edgez-ht-hc33-sensor" : "edgez-nrf54l15-fgh200m-sensor",
         locationSource: requestLocationMode === "live" ? "gps" : requestLocationMode,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
@@ -272,7 +282,9 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
         meshMacAddress: provisioningNodeAddress(selectedRequest.nodeNum),
         userPublicKey: selectedRequest.userPublicKey,
       });
-      await markProvisioningRequestAccepted(profileId, selectedRequest.id);
+      if (!cloudRequest) {
+        await markProvisioningRequestAccepted(profileId, selectedRequest.id);
+      }
       await onDevicesChanged();
       await onProvisioningRequestsChanged();
     } catch (caught) {
@@ -405,6 +417,7 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
             <InfoRow label="FIRST SEEN" value={timestamp(Date.parse(selectedRequest.firstSeenAt))} />
             <InfoRow label="LAST SEEN" value={timestamp(Date.parse(selectedRequest.lastSeenAt))} />
             <InfoRow label="PUBLIC KEY" value={`${selectedRequest.userPublicKey.slice(0, 12)}…`} />
+            <InfoRow label="TRANSPORT" value={selectedRequest.transport === "mqtt" ? "CLOUD · MQTT" : "LOCAL · BLE"} />
             <InfoRow label="STATUS" value={selectedRequest.status.toUpperCase()} />
           </View>
           <View style={styles.setupCard}>
@@ -437,10 +450,10 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
             </View>
             <View style={styles.encryptionNotice}><Ionicons name="lock-closed" size={14} color="#0a8c87" /><Text style={styles.encryptionText}>Mesh ID, passphrase, channel and sensor settings are encrypted for this sensor.</Text></View>
           </View>
-          <Pressable style={[styles.send, (acceptingRequest || !meshState?.bleReady) && styles.disabled]} disabled={acceptingRequest || !meshState?.bleReady} onPress={() => void acceptProvisioningRequest()} accessibilityRole="button">
+          <Pressable style={[styles.send, (acceptingRequest || (selectedRequest.transport !== "mqtt" && !meshState?.bleReady)) && styles.disabled]} disabled={acceptingRequest || (selectedRequest.transport !== "mqtt" && !meshState?.bleReady)} onPress={() => void acceptProvisioningRequest()} accessibilityRole="button">
             {acceptingRequest ? <ActivityIndicator color="white" /> : <Text style={styles.sendText}>{selectedRequest.status === "accepted" ? "SEND PROFILE AGAIN" : "ACCEPT AND PROVISION"}</Text>}
           </Pressable>
-          {!meshState?.bleReady ? <Text style={styles.error}>BLE control channel is not ready.</Text> : null}
+          {selectedRequest.transport !== "mqtt" && !meshState?.bleReady ? <Text style={styles.error}>BLE control channel is not ready.</Text> : null}
           {error ? <Text style={styles.error}>{error}</Text> : null}
         </> : null}
       </ScrollView>

@@ -43,6 +43,7 @@ import {
   cloudErrorMessage,
   completeCloudDataSync,
   logoutCloudSession,
+  listCloudDiscoveredDevices,
   syncCloudData,
   syncCloudProfile,
   verifyCloudSession,
@@ -67,6 +68,7 @@ export default function App() {
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
   const [profileMessages, setProfileMessages] = useState<StoredMessage[]>([]);
   const [provisioningRequests, setProvisioningRequests] = useState<StoredProvisioningRequest[]>([]);
+  const [cloudDiscoveredDevices, setCloudDiscoveredDevices] = useState<StoredProvisioningRequest[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [sharedSettings, setSharedSettings] = useState<SharedProfileSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -96,6 +98,9 @@ export default function App() {
     [profile, sharedSettings],
   );
   const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
+  const discoveredDevices = useMemo(() => [...new Map(
+    [...provisioningRequests, ...cloudDiscoveredDevices].map((request) => [request.nodeNum, request]),
+  ).values()], [provisioningRequests, cloudDiscoveredDevices]);
   const cloudOnline = Boolean(
     runtimeProfile?.connectToCloud &&
     cloudSessionLoggedIn &&
@@ -135,6 +140,7 @@ export default function App() {
     setProfileDevices(devices);
     setProfileMessages(messages);
     setProvisioningRequests(requests);
+    setCloudDiscoveredDevices([]);
   };
 
   const resetProfileRuntime = () => {
@@ -147,6 +153,7 @@ export default function App() {
     setProfileDevices([]);
     setProfileMessages([]);
     setProvisioningRequests([]);
+    setCloudDiscoveredDevices([]);
   };
 
   const refreshProfiles = async () => {
@@ -209,7 +216,13 @@ export default function App() {
         listProfileMessages(runtimeProfile.id),
         listProfileSensorSamples(runtimeProfile.id),
         ]);
-        const remote = await syncCloudData(runtimeProfile.id, runtimeProfile.identityId, localDevices, localMessages, localSensorSamples);
+        const [remote, cloudDiscoveries] = await Promise.all([
+          syncCloudData(runtimeProfile.id, runtimeProfile.identityId, localDevices, localMessages, localSensorSamples),
+          listCloudDiscoveredDevices(runtimeProfile.id),
+        ]);
+        if (active && activeProfileIdRef.current === runtimeProfile.id) {
+          setCloudDiscoveredDevices(cloudDiscoveries);
+        }
         for (const device of remote.devices) {
           const existing = localDevices.find((candidate) => candidate.id === device.id ||
             normalizedDeviceSerial(candidate.serial) === normalizedDeviceSerial(device.serial));
@@ -548,7 +561,7 @@ export default function App() {
             profile={runtimeProfile}
             devices={profileDevices}
             messages={profileMessages}
-            provisioningRequests={provisioningRequests}
+            provisioningRequests={discoveredDevices}
             bleStatus={bleStatus}
             cloudStatus={cloudStatus}
             meshLink={currentMeshLink}
