@@ -17,6 +17,12 @@ the configured remote `npm ci` command instead of uploaded.
 
 This changes remote state. Use `npm run check` for local syntax validation.
 
+After the Function and Site deployments using this version are active,
+`npm run clean:sync` removes the retired `mobile-devices`, `messages`, and
+`sensor-samples` tables, the `message-attachments` bucket, and their obsolete
+Function variables. It leaves profiles, native Devices, MQTT telemetry, Time
+Series history, OTA, downlinks, and geofence data unchanged.
+
 `npm run clean` removes the resources with this template's deterministic IDs:
 the Site and its proxy rule, MQTT Function, database with profiles and telemetry,
 and web/local/Android auth platforms. It does not delete profile teams, project users, Appwrite Devices, or

@@ -149,6 +149,19 @@ export function upsertResourceVariable(group, resourceFlag, resourceId, key, val
   }
 }
 
+export function removeResourceVariables(group, resourceFlag, resourceId, keys) {
+  if (dryRun) {
+    for (const key of keys) console.log(`[dry-run] delete ${group} variable ${key}`);
+    return;
+  }
+  const result = run([group, "list-variables", resourceFlag, resourceId, "--json"], { capture: true });
+  const variables = JSON.parse(result.stdout).variables || [];
+  for (const variable of variables.filter((item) => keys.includes(item.key))) {
+    run([group, "delete-variable", resourceFlag, resourceId, "--variable-id", variable.$id]);
+    console.log(`Deleted ${group} variable ${variable.key}`);
+  }
+}
+
 export function ensureProxyDomain(type, resourceId, domain) {
   const found = !dryRun && run(["proxy", "list-rules", "--where", `domain=${domain}`, "--limit", "1", "--json"], { capture: true }).stdout.includes(domain);
   if (found) return console.log(`Kept existing ${type} domain ${domain}`);

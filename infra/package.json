@@ -6,9 +6,10 @@
   "scripts": {
     "deploy": "node install-appwrite.mjs",
     "install:solution": "node install-appwrite.mjs",
+    "clean:sync": "node clean-sync.mjs",
     "clean": "node clean-appwrite.mjs",
     "uninstall:solution": "node clean-appwrite.mjs",
-    "check": "node --check appwrite.mjs && node --check auth.mjs && node --check database.mjs && node --check timeseries.mjs && node --check function.mjs && node --check site.mjs && node --check install-appwrite.mjs && node --check clean-appwrite.mjs"
+    "check": "node --check appwrite.mjs && node --check auth.mjs && node --check database.mjs && node --check timeseries.mjs && node --check function.mjs && node --check site.mjs && node --check install-appwrite.mjs && node --check clean-appwrite.mjs && node --check clean-sync.mjs"
   },
   "dependencies": { "appwrite-cli": "27.3.0" }
 }
