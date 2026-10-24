@@ -590,7 +590,7 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 			factory_identity.channel, &factory_frequency_khz,
 			&factory_bandwidth_mhz);
 	int settings_rc;
-	int load_rc;
+	int load_rc = -ENOENT;
 
 	if (have_factory_identity && factory_identity.has_halow_profile &&
 	    !have_factory_profile) {
@@ -648,7 +648,7 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		load_rc = load_persisted_profile_locked();
 		if (load_rc != 0 && load_rc != -ENOENT) {
 			LOG_WRN("Persistent HaLow profile ignored: %d", load_rc);
-		} else if (load_rc == -ENOENT && !have_factory_profile) {
+		} else if (load_rc == -ENOENT) {
 		#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 			LOG_INF("Persistent HaLow profile absent; zero-touch HaLow provisioning is required");
 		#else
@@ -656,7 +656,15 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		#endif
 		}
 	}
-	if (have_factory_profile) {
+	/* A sensor factory profile is only the zero-touch network bootstrap.  It
+	 * must not make the sensor look cloud-accepted, and it must never replace
+	 * the Appwrite Device UUID restored from settings.  The sensor PAwR state
+	 * machine reads the cached factory country/channel/mesh separately while
+	 * edgez_config_should_autostart() remains false until an encrypted accept
+	 * is durably stored.  Keep the legacy direct factory fallback for other
+	 * roles, but only when no accepted profile was restored. */
+	if (have_factory_profile && load_rc != 0 &&
+	    !IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)) {
 		copy_string(country_code, sizeof(country_code), factory_identity.country);
 		copy_string(settings.mesh_id, sizeof(settings.mesh_id),
 			factory_identity.mesh_id);
@@ -668,9 +676,12 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 		mesh_bandwidth_mhz = factory_bandwidth_mhz;
 		settings.mesh_frequency_khz = factory_frequency_khz;
 		settings.mesh_bandwidth_mhz = factory_bandwidth_mhz;
-		LOG_INF("Using factory HaLow profile country=%s mesh_id=%s channel=%u frequency=%u kHz bandwidth=%u MHz; discovery skipped",
+		LOG_INF("Using factory HaLow profile country=%s mesh_id=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
 			country_code, settings.mesh_id, factory_identity.channel,
 			mesh_frequency_khz, mesh_bandwidth_mhz);
+	} else if (have_factory_profile &&
+		   IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)) {
+		LOG_INF("Factory HaLow profile retained as sensor discovery bootstrap; cloud acceptance still required");
 	}
 	memset(&factory_identity, 0, sizeof(factory_identity));
 	log_profile_readiness_locked("boot");

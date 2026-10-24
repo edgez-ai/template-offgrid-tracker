@@ -87,6 +87,8 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_PROVISIONING_ACK_TIMEOUT_MS 100U
 #define EDGEZ_SENSOR_PROVISIONING_WINDOW_MS 200U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
+#define EDGEZ_SENSOR_PENDING_PACKET_MAX 512U
+#define EDGEZ_SENSOR_PENDING_QUEUE_DEPTH 2U
 #define EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH 12U
 #define EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY "edgez/downlink_ack/v1"
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
@@ -131,6 +133,12 @@ static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
 static bool sensor_pawr_downlink_pending;
 static uint32_t sensor_downlink_ack_id;
+struct sensor_pending_packet {
+	uint16_t length;
+	uint8_t payload[EDGEZ_SENSOR_PENDING_PACKET_MAX];
+};
+K_MSGQ_DEFINE(sensor_pending_packet_queue, sizeof(struct sensor_pending_packet),
+	      EDGEZ_SENSOR_PENDING_QUEUE_DEPTH, 4);
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 static struct edgez_pawr_bulk_sender sensor_bulk_sender;
 static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
@@ -138,12 +146,16 @@ static size_t sensor_bulk_ack_length;
 K_SEM_DEFINE(sensor_bulk_ack_sem, 0, 1);
 #endif
 static char sensor_bootstrap_country[3];
+static char sensor_bootstrap_mesh_id[EDGEZ_FACTORY_MESH_ID_SIZE];
+static char sensor_bootstrap_passphrase[EDGEZ_FACTORY_PASSPHRASE_SIZE];
 static uint8_t sensor_bootstrap_channel;
 K_SEM_DEFINE(sensor_pawr_response_sem, 0, 1);
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 static const struct gpio_dt_spec user_button =
 	GPIO_DT_SPEC_GET(EDGEZ_USER_NODE, key_gpios);
 static bool user_button_ready;
+static struct gpio_callback user_button_callback;
+K_SEM_DEFINE(user_button_sem, 0, 1);
 #endif
 K_MUTEX_DEFINE(batman_state_lock);
 K_MUTEX_DEFINE(batman_tx_lock);
@@ -232,6 +244,60 @@ static bool sensor_apply_downlink(const uint8_t *payload, size_t length)
 		return false;
 	LOG_INF("durably accepted downlink id=%u command=%s", message_id, command);
 	return true;
+}
+
+static bool sensor_apply_zero_touch_acceptance(const uint8_t *payload,
+					       size_t payload_length)
+{
+	uint8_t response[256];
+	size_t response_length = 0U;
+	int rc;
+
+	if (!payload || payload_length == 0U ||
+	    (payload_length >= 5U && memcmp(payload, "EZDL", 4U) == 0 &&
+	     payload[4] == 1U)) {
+		return false;
+	}
+
+	rc = edgez_config_handle_packet(payload, payload_length, response,
+					sizeof(response), &response_length);
+	if (rc != 0 || !edgez_config_should_autostart()) {
+		return false;
+	}
+
+	LOG_INF("Direct PAwR zero-touch acceptance applied bytes=%u response=%u",
+		(unsigned)payload_length, (unsigned)response_length);
+	return true;
+}
+
+static bool sensor_receive_pending_packet(bool provisioning)
+{
+	struct sensor_pending_packet item;
+	int64_t deadline = k_uptime_get() + EDGEZ_SENSOR_PROVISIONING_WINDOW_MS;
+
+	do {
+		int64_t remaining = deadline - k_uptime_get();
+
+		if (remaining < 0) {
+			remaining = 0;
+		}
+		if (k_msgq_get(&sensor_pending_packet_queue, &item,
+			       K_MSEC(remaining)) != 0) {
+			break;
+		}
+		/* Match the proven ESP32 sensor order: a factory-bootstrapped sensor
+		 * receives cloud acceptance through the same pending-packet window as
+		 * normal commands, so try the encrypted NetworkPacket before EZDL. */
+		if (sensor_apply_zero_touch_acceptance(item.payload, item.length)) {
+			LOG_INF("cloud identity accepted from PAwR downlink window");
+			return true;
+		}
+		if (!provisioning && sensor_apply_downlink(item.payload, item.length)) {
+			return true;
+		}
+	} while (k_uptime_get() < deadline);
+
+	return false;
 }
 
 static int acknowledge_pawr_beacon(const struct edgez_pawr_action_view *action,
@@ -415,6 +481,18 @@ static int reset_settings_storage(void)
 	return rc;
 }
 
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
+static void user_button_interrupt(const struct device *port,
+				  struct gpio_callback *callback,
+				  gpio_port_pins_t pins)
+{
+	ARG_UNUSED(port);
+	ARG_UNUSED(callback);
+	ARG_UNUSED(pins);
+	k_sem_give(&user_button_sem);
+}
+#endif
+
 static void configure_user_button(void)
 {
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
@@ -428,8 +506,19 @@ static void configure_user_button(void)
 		LOG_WRN("KEY GPIO configuration failed rc=%d", rc);
 		return;
 	}
+	gpio_init_callback(&user_button_callback, user_button_interrupt,
+			   BIT(user_button.pin));
+	rc = gpio_add_callback(user_button.port, &user_button_callback);
+	if (rc == 0) {
+		rc = gpio_pin_interrupt_configure_dt(&user_button,
+					     GPIO_INT_EDGE_TO_ACTIVE);
+	}
+	if (rc != 0) {
+		LOG_WRN("KEY wake interrupt configuration failed rc=%d", rc);
+		return;
+	}
 	user_button_ready = true;
-	LOG_INF("Hold KEY for %u seconds to clear settings",
+	LOG_INF("KEY wakes the sleeping sensor; hold for %u seconds to clear settings",
 		EDGEZ_BUTTON_RESET_HOLD_MS / 1000U);
 #endif
 }
@@ -438,6 +527,7 @@ static void poll_user_button(void)
 {
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
 	static bool was_pressed;
+	static bool reset_attempted;
 	static int64_t pressed_at_ms;
 
 	if (!user_button_ready) {
@@ -452,24 +542,46 @@ static void poll_user_button(void)
 	int64_t now_ms = k_uptime_get();
 	if (pressed && !was_pressed) {
 		pressed_at_ms = now_ms;
+		reset_attempted = false;
 		LOG_INF("KEY pressed");
+	} else if (pressed && was_pressed && !reset_attempted &&
+		   now_ms - pressed_at_ms >= EDGEZ_BUTTON_RESET_HOLD_MS) {
+		reset_attempted = true;
+		int rc = reset_settings_storage();
+
+		if (rc == 0) {
+			LOG_WRN("settings erased after KEY hold; rebooting unprovisioned");
+			sys_reboot(SYS_REBOOT_COLD);
+		}
+		LOG_ERR("settings erase failed rc=%d", rc);
 	} else if (!pressed && was_pressed) {
 		int64_t held_ms = now_ms - pressed_at_ms;
 
-		if (held_ms >= EDGEZ_BUTTON_RESET_HOLD_MS) {
-			int rc = reset_settings_storage();
-
-			if (rc == 0) {
-				LOG_WRN("settings erased after KEY hold; rebooting unprovisioned");
-				sys_reboot(SYS_REBOOT_COLD);
-			}
-			LOG_ERR("settings erase failed rc=%d", rc);
-		} else if (held_ms >= EDGEZ_BUTTON_DEBOUNCE_MS) {
+		if (!reset_attempted && held_ms >= EDGEZ_BUTTON_DEBOUNCE_MS) {
 			LOG_INF("KEY short press");
 		}
 	}
 	was_pressed = pressed != 0;
 #endif
+}
+
+static void sensor_sleep_until_button_or_timeout(int32_t remaining_ms)
+{
+#if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
+	if (user_button_ready && remaining_ms > 0 &&
+	    k_sem_take(&user_button_sem, K_MSEC(remaining_ms)) == 0) {
+		/* The first press wakes the MCU. Keep polling only while it is held so
+		 * the five-second reset duration starts after this wake, matching the
+		 * ESP32 sensor behavior without periodic wakeups during normal sleep. */
+		do {
+			poll_user_button();
+			k_msleep(10);
+		} while (gpio_pin_get_dt(&user_button) > 0);
+		poll_user_button();
+		return;
+	}
+#endif
+	k_msleep(remaining_ms > 0 ? remaining_ms : 1);
 }
 
 static int deliver_msdu(const uint8_t destination[6], const uint8_t source[6],
@@ -554,8 +666,18 @@ static int join_ignore_unsupported(void *ctx,
 		}
 		if (request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
 			if (IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR) &&
-			    sensor_apply_downlink(request.payload,
-						 request.payload_length)) {
+			    request.payload_length <=
+				    EDGEZ_SENSOR_PENDING_PACKET_MAX) {
+				struct sensor_pending_packet item = {
+					.length = (uint16_t)request.payload_length,
+				};
+
+				memcpy(item.payload, request.payload,
+				       request.payload_length);
+				if (k_msgq_put(&sensor_pending_packet_queue, &item,
+					       K_NO_WAIT) != 0) {
+					LOG_WRN("PAwR pending-packet queue full");
+				}
 				return EDGEZ_UMAC_OK;
 			}
 			(void)edgez_nrf_mesh_receive_pawr(
@@ -869,9 +991,17 @@ static int sensor_load_factory_bootstrap(void)
 	}
 	memcpy(sensor_bootstrap_country, factory.country, 2U);
 	sensor_bootstrap_country[2] = '\0';
+	strcpy(sensor_bootstrap_mesh_id, factory.has_halow_profile ?
+	       factory.mesh_id : "edgez-zero-touch");
+	if (factory.has_halow_profile) {
+		strcpy(sensor_bootstrap_passphrase, factory.passphrase);
+	} else {
+		sensor_bootstrap_passphrase[0] = '\0';
+	}
 	sensor_bootstrap_channel = factory.channel;
-	LOG_INF("factory discovery profile country=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
-		sensor_bootstrap_country, sensor_bootstrap_channel,
+	LOG_INF("factory discovery profile country=%s mesh_id=%s channel=%u frequency=%u kHz bandwidth=%u MHz",
+		sensor_bootstrap_country, sensor_bootstrap_mesh_id,
+		sensor_bootstrap_channel,
 		frequency_khz, bandwidth_mhz);
 	memset(&factory, 0, sizeof(factory));
 	return 0;
@@ -883,6 +1013,7 @@ static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
 	uint8_t bandwidth_mhz = 0;
 
 	if (!profile || strlen(sensor_bootstrap_country) != 2U ||
+	    sensor_bootstrap_mesh_id[0] == '\0' ||
 	    !edgez_rf_resolve_s1g_channel(
 		sensor_bootstrap_country,
 		sensor_bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
@@ -892,7 +1023,8 @@ static int sensor_bootstrap_profile(struct edgez_halow_profile *profile)
 	memset(profile, 0, sizeof(*profile));
 	memcpy(profile->country_code, sensor_bootstrap_country, 2U);
 	profile->country_code[2] = '\0';
-	strcpy(profile->mesh_id, "edgez-zero-touch");
+	strcpy(profile->mesh_id, sensor_bootstrap_mesh_id);
+	strcpy(profile->passphrase, sensor_bootstrap_passphrase);
 	profile->mesh_frequency_khz = frequency_khz;
 	profile->mesh_bandwidth_mhz = bandwidth_mhz;
 	profile->beacon_interval_seconds =
@@ -1048,6 +1180,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	sensor_pawr_waiting = true;
 	sensor_pawr_downlink_pending = false;
 	k_spin_unlock(&sensor_pawr_lock, key);
+	k_msgq_purge(&sensor_pending_packet_queue);
 	rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
 	if (rc != EDGEZ_UMAC_OK) {
 		key = k_spin_lock(&sensor_pawr_lock);
@@ -1068,8 +1201,10 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		 * request.  A cached encrypted profile is returned in a separate PAwR
 		 * mesh-packet action frame, so an unprovisioned sensor must keep RX up
 		 * briefly after the ACK instead of cutting the HaLow rail immediately. */
-		if (provisioning || sensor_pawr_downlink_pending) {
-			k_msleep(EDGEZ_SENSOR_PROVISIONING_WINDOW_MS);
+		if ((provisioning || sensor_pawr_downlink_pending) &&
+		    !sensor_receive_pending_packet(provisioning)) {
+			LOG_WRN("gateway advertised a %s but none was accepted",
+				provisioning ? "zero-touch acceptance" : "downlink");
 		}
 		return 0;
 	}
@@ -2417,7 +2552,7 @@ int main(void)
 				 * the next PAwR cycle or a hardware interrupt (including
 				 * the IMU FIFO watermark interrupt). */
 				sensor_force_cpu_low_power();
-				k_msleep(remaining_ms > 0 ? remaining_ms : 1);
+				sensor_sleep_until_button_or_timeout(remaining_ms);
 			} else {
 				k_msleep(1);
 			}
