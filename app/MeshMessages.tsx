@@ -221,6 +221,12 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
         : "Local HaLow address is not ready.");
       const to = BigInt(selectedRequest.nodeNum);
       const identity = profileIdentity(profile);
+      const provisionedUserId = cloudRequest
+        ? cloudDeviceUserId(selectedRequest.cloudDeviceId)
+        : {
+            high: BigInt(selectedRequest.userIdHigh),
+            low: BigInt(selectedRequest.userIdLow),
+          };
       const encodedProfile = encodeNetworkPacket({
         from,
         to,
@@ -231,8 +237,8 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
           meshId: profile.meshId,
           passphrase: profile.meshPassphrase,
           maxHop: 4,
-          userIdHigh: BigInt(selectedRequest.userIdHigh),
-          userIdLow: BigInt(selectedRequest.userIdLow),
+          userIdHigh: provisionedUserId.high,
+          userIdLow: provisionedUserId.low,
           userName: name,
           userPublicKey: toByteArray(selectedRequest.userPublicKey),
           marker: requestColor,
@@ -508,6 +514,16 @@ function EmptyState({ icon, title, text }: { icon: React.ComponentProps<typeof I
 function InfoRow({ label, value }: { label: string; value: string }) { return <View style={styles.infoRow}><Text style={styles.infoLabel}>{label}</Text><Text style={styles.infoValue}>{value}</Text></View>; }
 function ChoiceButton({ label, selected, loading, onPress }: { label: string; selected: boolean; loading?: boolean; onPress: () => void }) { return <Pressable style={[styles.choiceButton, selected && styles.choiceButtonSelected]} onPress={onPress} accessibilityRole="radio" accessibilityState={{ selected }}>{loading ? <ActivityIndicator size="small" color={selected ? "white" : "#0a8c87"} /> : <Text style={[styles.choiceText, selected && styles.choiceTextSelected]}>{label}</Text>}</Pressable>; }
 function sameSerial(a: string, b: string) { return normalizedDeviceSerial(a) === normalizedDeviceSerial(b); }
+function cloudDeviceUserId(deviceId?: string) {
+  const hex = (deviceId ?? "").replace(/-/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
+    throw new Error("The cloud discovery record has no valid Device ID.");
+  }
+  return {
+    high: BigInt(`0x${hex.slice(0, 16)}`),
+    low: BigInt(`0x${hex.slice(16)}`),
+  };
+}
 function timestamp(value: number) { return new Date(value).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
 function lastSeenLabel(value: number, online: boolean) { return value > 0 ? `${online ? "ONLINE · " : ""}LAST SEEN ${timestamp(value)}` : "LAST SEEN UNKNOWN"; }
 function sensorSummary(data: EdgezSensorData) {
