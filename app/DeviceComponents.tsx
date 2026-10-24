@@ -11,11 +11,13 @@ const swipeActionWidth = 92;
 export function DeviceDetail({
   device,
   liveNode,
+  allowMessaging = true,
   onClose,
   onMessage,
 }: {
   device: StoredDevice | null;
   liveNode: EdgezMeshNode | null;
+  allowMessaging?: boolean;
   onClose: () => void;
   onMessage: (device: StoredDevice) => void;
 }) {
@@ -44,7 +46,7 @@ export function DeviceDetail({
             <DetailRow label="LAST SEEN" value={device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : "Unknown"} />
             <DetailRow label="LOCATION" value={device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "Not shared"} />
           </View>
-          {canMessage ? <Pressable style={styles.primary} onPress={() => onMessage(device)} accessibilityRole="button"><Text style={styles.primaryText}>START NEW CONVERSATION</Text></Pressable> : null}
+          {allowMessaging && canMessage ? <Pressable style={styles.primary} onPress={() => onMessage(device)} accessibilityRole="button"><Text style={styles.primaryText}>START NEW CONVERSATION</Text></Pressable> : null}
         </ScrollView>
       </SafeAreaView>
     </Modal>

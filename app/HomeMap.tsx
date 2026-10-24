@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { EdgezOrganicMap } from "@edgez/react-native-sdk";
-import type { EdgezMapDownloadUpdate, EdgezMeshSession, EdgezMeshState, EdgezOrganicMapRef } from "@edgez/react-native-sdk";
+import type { EdgezMapDownloadUpdate, EdgezMeshSession, EdgezMeshState, EdgezOrganicMapRef, EdgezSensorSample } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
 import React, { useRef, useState } from "react";
@@ -14,7 +14,6 @@ import { styles } from "./app-styles";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, nodeNumFromSerial } from "./mesh-utils";
 import type { CloudConnectionState } from "./cloud-auth";
-import { listProfileMessages } from "./profile-store";
 import type { StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
 
 type MapCamera = { latitude: number; longitude: number; zoom: number };
@@ -51,6 +50,8 @@ export function HomeMap({
   devices,
   messages,
   provisioningRequests,
+  cloudSensorSamples,
+  onlineMode,
   bleStatus,
   cloudStatus,
   meshLink,
@@ -67,6 +68,8 @@ export function HomeMap({
   devices: StoredDevice[];
   messages: StoredMessage[];
   provisioningRequests: StoredProvisioningRequest[];
+  cloudSensorSamples: EdgezSensorSample[];
+  onlineMode: boolean;
   bleStatus: BleLinkStatus;
   cloudStatus: CloudConnectionState;
   meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;
@@ -293,12 +296,12 @@ export function HomeMap({
             style={styles.mapControlButton}
             onPress={() => setMessagesOpen(true)}
             accessibilityRole="button"
-            accessibilityLabel="Open mesh messages"
+            accessibilityLabel={onlineMode ? "Open cloud devices" : "Open mesh messages"}
           >
-            <Ionicons name="chatbubble-ellipses-outline" size={22} color="white" />
+            <Ionicons name={onlineMode ? "server-outline" : "chatbubble-ellipses-outline"} size={22} color="white" />
             {meshLink?.state.nodes.size ? <View style={styles.messageAvailableDot} /> : null}
           </Pressable>
-          <Pressable
+          {!onlineMode ? <Pressable
             style={styles.mapControlButton}
             onPress={() => setDebugOpen(true)}
             accessibilityRole="button"
@@ -323,7 +326,7 @@ export function HomeMap({
               bleStatus.phase === "connected" && styles.bleStatusDotConnected,
               bleStatus.phase === "error" && styles.bleStatusDotError,
             ]} />
-          </Pressable>
+          </Pressable> : null}
           <Pressable
             style={styles.mapControlButton}
             onPress={toggleMapTheme}
@@ -407,6 +410,8 @@ export function HomeMap({
         devices={devices}
         messages={messages}
         provisioningRequests={provisioningRequests}
+        cloudSensorSamples={cloudSensorSamples}
+        onlineMode={onlineMode}
         initialPeerSerial={conversationPeer}
         onMessagesChanged={onMessagesChanged}
         onDevicesChanged={onDevicesChanged}
@@ -428,6 +433,7 @@ export function HomeMap({
           setConversationPeer(device.meshMacAddress || device.serial);
           setMessagesOpen(true);
         }}
+        allowMessaging={!onlineMode}
       />
     </SafeAreaView>
   );

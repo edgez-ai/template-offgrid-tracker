@@ -9,22 +9,12 @@ Profiles may optionally enable **Connect to cloud**. The map and Settings show
 reports that the Internet is reachable. A signed-in phone without usable
 Internet remains `OFFLINE`.
 
-Devices, messages, and sensor samples are always saved to local SQLite first.
-When cloud access is enabled and online, the app runs an incremental sync every
-15 seconds. It sends only records newer than the profile's last successful sync
-to the authenticated Appwrite Function. The Function owns validation and cloud
-database writes, and returns remote changes for the app to merge into SQLite.
-For every changed local device, the Function also creates or updates the
-first-class Appwrite Device with the same serial, profile permissions, map
-appearance, and location. It does not create or rotate MQTT credentials.
-Text stays in the message row. Voice and image bytes upload directly to the
-profile-secured `message-attachments` Storage bucket; the row contains only
-the file ID, kind, name, MIME type, and size.
-
-Cloud message rows are independent of local profiles. They use canonical
-`from` and `to` identity IDs, and sync requests return only rows where the
-active profile identity is one of those endpoints. The Function verifies that
-the requested identity matches the authenticated profile before querying.
+Offline profiles save devices, messages, and sensor samples in local SQLite and
+use the BLE mesh transport. Cloud-connected profiles do not synchronize that
+local database. They read gateways and sensors directly from the Appwrite
+Devices API, sensor history directly from TablesDB, and MQTT discovery records
+through the Devices API, matching the website's source of truth. Cloud data is
+kept in memory and refreshed every five seconds.
 
 ## Data model
 
@@ -59,12 +49,16 @@ The Home page provides:
 - a BLE status button that opens the detailed status dialog also used by a
   profile card.
 
-Messages are organized into `Channels`, `People`, and `Sensors`. Built-in
+Offline messages are organized into `Channels`, `People`, `Sensors`, and
+`Discovered`. Built-in
 channels are visible without message history. A person opens a conversation,
 while a sensor opens its statistics/detail page. Device detail is available
 from the info action. Channel messages are clear text without a conversation
 key; direct user conversations use the identity information persisted for the
 profile and peer.
+
+Cloud-connected profiles show only `Gateways`, `Sensors`, and `Discovered`.
+They do not expose the local channel or person messaging views.
 
 Messages that have not been delivered are retried up to three times when the
 peer is online. A failed message remains in SQLite and exposes a manual resend

@@ -19,17 +19,15 @@ import {
   listProfileDevices,
   listProfileMessages,
   listProfileProvisioningRequests,
-  listProfileSensorSamples,
   listProfiles,
   reconcileProfileMessageDelivery,
-  saveProfileMessage,
   saveProfileDevice,
   saveProfileSensorSamples,
   replaceProfileConversation,
   setActiveProfile,
   updateProfile,
 } from "./profile-store";
-import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
+import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest, StoredSensorSample } from "./profile-store";
 import { ActiveProfileBleLink } from "./ActiveProfileBleLink";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
 import { styles } from "./app-styles";
@@ -41,15 +39,14 @@ import { CloudLoginModal } from "./CloudLoginModal";
 import {
   cachedCloudSession,
   cloudErrorMessage,
-  completeCloudDataSync,
+  deleteCloudDevice,
   logoutCloudSession,
-  listCloudDiscoveredDevices,
-  syncCloudData,
-  syncCloudProfile,
+  listCloudOnlineData,
+  ensureCloudProfile,
   verifyCloudSession,
 } from "./cloud-auth";
 import type { CloudConnectionState } from "./cloud-auth";
-import { nodeNumFromSerial, normalizedDeviceSerial } from "./mesh-utils";
+import { normalizedDeviceSerial } from "./mesh-utils";
 import {
   applySharedProfileSettings,
   loadSharedProfileSettings,
@@ -68,7 +65,7 @@ export default function App() {
   const [profileDevices, setProfileDevices] = useState<StoredDevice[]>([]);
   const [profileMessages, setProfileMessages] = useState<StoredMessage[]>([]);
   const [provisioningRequests, setProvisioningRequests] = useState<StoredProvisioningRequest[]>([]);
-  const [cloudDiscoveredDevices, setCloudDiscoveredDevices] = useState<StoredProvisioningRequest[]>([]);
+  const [cloudSensorSamples, setCloudSensorSamples] = useState<StoredSensorSample[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [sharedSettings, setSharedSettings] = useState<SharedProfileSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -98,9 +95,6 @@ export default function App() {
     [profile, sharedSettings],
   );
   const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
-  const discoveredDevices = useMemo(() => [...new Map(
-    [...provisioningRequests, ...cloudDiscoveredDevices].map((request) => [request.nodeNum, request]),
-  ).values()], [provisioningRequests, cloudDiscoveredDevices]);
   const cloudOnline = Boolean(
     runtimeProfile?.connectToCloud &&
     cloudSessionLoggedIn &&
@@ -114,18 +108,32 @@ export default function App() {
     : cloudOnline ? "online" : "offline";
   const refreshProfileMessages = useCallback(async () => {
     if (!runtimeProfile) return;
+    if (runtimeProfile.connectToCloud) {
+      setProfileMessages([]);
+      return;
+    }
     const refreshedMessages = await listProfileMessages(runtimeProfile.id);
     if (activeProfileIdRef.current === runtimeProfile.id) setProfileMessages(refreshedMessages);
-  }, [runtimeProfile?.id]);
+  }, [runtimeProfile?.connectToCloud, runtimeProfile?.id]);
   const refreshProvisioningRequests = useCallback(async () => {
     if (!runtimeProfile) return;
+    if (runtimeProfile.connectToCloud) {
+      const online = await listCloudOnlineData(runtimeProfile.id);
+      if (activeProfileIdRef.current !== runtimeProfile.id) return;
+      setProfileDevices(online.devices);
+      setProfileMessages([]);
+      setProvisioningRequests(online.discoveries);
+      setCloudSensorSamples(online.sensorSamples.map((sample) => ({ ...sample, profileId: runtimeProfile.id })));
+      setCloudDataHydrated(true);
+      return;
+    }
     const refreshed = await listProfileProvisioningRequests(runtimeProfile.id);
     if (activeProfileIdRef.current === runtimeProfile.id) setProvisioningRequests(refreshed);
-  }, [runtimeProfile?.id]);
+  }, [runtimeProfile?.connectToCloud, runtimeProfile?.id]);
   const { resendMessage } = useMessageDeliveryRetries({
-    profileId: runtimeProfile?.id ?? null,
-    session: currentMeshLink?.session ?? null,
-    meshState: currentMeshLink?.state ?? null,
+    profileId: runtimeProfile?.connectToCloud ? null : runtimeProfile?.id ?? null,
+    session: runtimeProfile?.connectToCloud ? null : currentMeshLink?.session ?? null,
+    meshState: runtimeProfile?.connectToCloud ? null : currentMeshLink?.state ?? null,
     devices: profileDevices,
     onMessagesChanged: refreshProfileMessages,
   });
@@ -140,7 +148,7 @@ export default function App() {
     setProfileDevices(devices);
     setProfileMessages(messages);
     setProvisioningRequests(requests);
-    setCloudDiscoveredDevices([]);
+    setCloudSensorSamples([]);
   };
 
   const resetProfileRuntime = () => {
@@ -153,12 +161,12 @@ export default function App() {
     setProfileDevices([]);
     setProfileMessages([]);
     setProvisioningRequests([]);
-    setCloudDiscoveredDevices([]);
+    setCloudSensorSamples([]);
   };
 
   const refreshProfiles = async () => {
     const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
-    const [availableDevices, availableMessages, availableRequests] = currentProfile
+    const [availableDevices, availableMessages, availableRequests] = currentProfile && !currentProfile.connectToCloud
       ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
       : [[], [], []];
     setProfiles(availableProfiles);
@@ -191,7 +199,7 @@ export default function App() {
     setCloudDataHydrated(false);
     if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || network.isInternetReachable !== true) return;
     let active = true;
-    void syncCloudProfile(runtimeProfile)
+    void ensureCloudProfile(runtimeProfile)
       .then(() => {
         if (active) setCloudProfileReady(true);
       })
@@ -204,75 +212,33 @@ export default function App() {
   }, [cloudSessionLoggedIn, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id, runtimeProfile?.updatedAt]);
 
   useEffect(() => {
-    if (!runtimeProfile || !cloudProfileReady || network.isInternetReachable !== true) return;
+    if (!runtimeProfile?.connectToCloud || !cloudProfileReady || network.isInternetReachable !== true) return;
     let active = true;
     let running = false;
-    const synchronize = async () => {
+    const refreshOnline = async () => {
       if (running) return;
       running = true;
       try {
-        const [localDevices, localMessages, localSensorSamples] = await Promise.all([
-        listProfileDevices(runtimeProfile.id),
-        listProfileMessages(runtimeProfile.id),
-        listProfileSensorSamples(runtimeProfile.id),
-        ]);
-        const [remote, cloudDiscoveries] = await Promise.all([
-          syncCloudData(runtimeProfile.id, runtimeProfile.identityId, localDevices, localMessages, localSensorSamples),
-          listCloudDiscoveredDevices(runtimeProfile.id),
-        ]);
-        if (active && activeProfileIdRef.current === runtimeProfile.id) {
-          setCloudDiscoveredDevices(cloudDiscoveries);
-        }
-        for (const device of remote.devices) {
-          const existing = localDevices.find((candidate) => candidate.id === device.id ||
-            normalizedDeviceSerial(candidate.serial) === normalizedDeviceSerial(device.serial));
-          if (existing && existing.updatedAt.localeCompare(device.updatedAt) > 0) continue;
-          await saveProfileDevice({
-            profileId: runtimeProfile.id, serial: device.serial, name: device.name, kind: device.kind,
-            firmwareTarget: device.firmwareTarget, locationSource: device.locationSource,
-            latitude: device.latitude, longitude: device.longitude, deviceType: device.deviceType,
-            marker: device.marker, iconStyle: device.iconStyle, userUuid: device.userUuid,
-            lastSeenAt: device.lastSeenAt, meshMacAddress: device.meshMacAddress,
-            userPublicKey: device.userPublicKey,
-          }, existing?.id ?? device.id);
-        }
-        const localMessageMap = new Map(localMessages.map((message) => [message.messageUuid, message]));
-        for (const message of remote.messages) {
-          const existing = localMessageMap.get(message.messageUuid);
-          const remoteDelivered = message.status === "Delivered" || message.deliveryState === "Delivered";
-          const localDelivered = existing?.status === "Delivered" || existing?.deliveryState === "Delivered";
-          if (existing && !remoteDelivered && (localDelivered || existing.lastAttemptAtMs > message.lastAttemptAtMs)) continue;
-          await saveProfileMessage(runtimeProfile.id, message.peerSerial, {
-            nodeNum: nodeNumFromSerial(message.peerSerial) ?? 0n, text: message.text, mine: message.mine,
-            timestampMs: message.timestampMs, messageUuid: message.messageUuid, status: message.status,
-            voiceBytes: message.voiceBytes, voiceCodec: message.voiceCodec, durationMs: message.durationMs,
-          }, {
-            retryCount: message.retryCount, retryOfUuid: message.retryOfUuid,
-            lastAttemptAtMs: message.lastAttemptAtMs, deliveryState: message.deliveryState,
-            attachmentFileId: message.attachmentFileId, attachmentKind: message.attachmentKind,
-            attachmentName: message.attachmentName, attachmentMimeType: message.attachmentMimeType,
-            attachmentSize: message.attachmentSize,
-          });
-        }
-        await saveProfileSensorSamples(runtimeProfile.id, remote.sensorSamples);
-        const [devices, messages] = await Promise.all([
-          listProfileDevices(runtimeProfile.id), listProfileMessages(runtimeProfile.id),
-        ]);
+        const online = await listCloudOnlineData(runtimeProfile.id);
         if (!active || activeProfileIdRef.current !== runtimeProfile.id) return;
-        setProfileDevices(devices);
-        setProfileMessages(messages);
-        await completeCloudDataSync(runtimeProfile.identityId, remote.syncedAt);
+        setProfileDevices(online.devices);
+        setProfileMessages([]);
+        setProvisioningRequests(online.discoveries);
+        setCloudSensorSamples(online.sensorSamples.map((sample) => ({ ...sample, profileId: runtimeProfile.id })));
         setCloudDataHydrated(true);
       } catch (caught) {
-        if (active) setSettingsError(`Cloud sync failed: ${cloudErrorMessage(caught)}`);
+        if (active) {
+          setCloudDataHydrated(false);
+          setSettingsError(`Cloud refresh failed: ${cloudErrorMessage(caught)}`);
+        }
       } finally {
         running = false;
       }
     };
-    void synchronize();
-    const timer = setInterval(() => void synchronize(), 15000);
+    void refreshOnline();
+    const timer = setInterval(() => void refreshOnline(), 5000);
     return () => { active = false; clearInterval(timer); };
-  }, [cloudProfileReady, network.isInternetReachable, runtimeProfile?.id]);
+  }, [cloudProfileReady, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id]);
 
   useEffect(() => {
     void (async () => {
@@ -297,7 +263,7 @@ export default function App() {
       }
       const currentProfile = await activeProfile();
       const settings = await loadSharedProfileSettings(currentProfile ?? availableProfiles[0]);
-      const [availableDevices, availableMessages, availableRequests] = currentProfile
+      const [availableDevices, availableMessages, availableRequests] = currentProfile && !currentProfile.connectToCloud
         ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
         : [[], [], []];
       setProfiles(availableProfiles);
@@ -313,7 +279,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
+    if (!profile || profile.connectToCloud || !meshLink || meshLink.profileId !== profile.id) return;
     const discovered = [...meshLink.state.nodes.values()]
       .filter((node) => !isEdgezPublicChannel(node.nodeNum) && node.lastSeenMs > 0);
     if (!discovered.length) return;
@@ -360,7 +326,7 @@ export default function App() {
   }, [meshLink?.profileId, meshLink?.state.nodes, profile]);
 
   useEffect(() => {
-    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
+    if (!profile || profile.connectToCloud || !meshLink || meshLink.profileId !== profile.id) return;
     const conversations = [...meshLink.state.conversations.entries()];
     if (!conversations.length) return;
     const fingerprint = `${profile.id}:` + conversations.map(([nodeNum, items]) =>
@@ -383,7 +349,7 @@ export default function App() {
   }, [meshLink?.profileId, meshLink?.state.conversations, profile]);
 
   useEffect(() => {
-    if (!profile || !meshLink || meshLink.profileId !== profile.id) return;
+    if (!profile || profile.connectToCloud || !meshLink || meshLink.profileId !== profile.id) return;
     const pending = [...meshLink.state.sensorSamples.entries()].flatMap(([nodeNum, samples]) => {
       const key = `${profile.id}:${nodeNum}`;
       const highWater = persistedSensorHighWater.current.get(key) ?? -1;
@@ -493,7 +459,7 @@ export default function App() {
                 const nextProfile = await deleteProfile(profile.id);
                 resetProfileRuntime();
                 const availableProfiles = await listProfiles();
-                const [availableDevices, availableMessages, availableRequests] = nextProfile
+                const [availableDevices, availableMessages, availableRequests] = nextProfile && !nextProfile.connectToCloud
                   ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id), listProfileProvisioningRequests(nextProfile.id)])
                   : [[], [], []];
                 setProfiles(availableProfiles);
@@ -523,9 +489,14 @@ export default function App() {
           style: "destructive",
           onPress: () => {
             void (async () => {
-              await deleteProfileDevice(profile.id, device.id);
-              const refreshedDevices = await listProfileDevices(profile.id);
-              if (activeProfileIdRef.current === profile.id) setProfileDevices(refreshedDevices);
+              if (runtimeProfile?.connectToCloud) {
+                await deleteCloudDevice(device.id);
+                await refreshProvisioningRequests();
+              } else {
+                await deleteProfileDevice(profile.id, device.id);
+                const refreshedDevices = await listProfileDevices(profile.id);
+                if (activeProfileIdRef.current === profile.id) setProfileDevices(refreshedDevices);
+              }
             })().catch((caught) => {
               setSettingsError(caught instanceof Error ? caught.message : "Could not remove the device.");
             });
@@ -544,7 +515,7 @@ export default function App() {
         </SafeAreaView>
       ) : runtimeProfile ? (
         <>
-          {!provisioningOpen ? (
+          {!provisioningOpen && !runtimeProfile.connectToCloud ? (
             <ActiveProfileBleLink
               key={`ble:${runtimeProfile.id}:${runtimeProfile.bleDeviceId}`}
               profile={runtimeProfile}
@@ -561,17 +532,22 @@ export default function App() {
             profile={runtimeProfile}
             devices={profileDevices}
             messages={profileMessages}
-            provisioningRequests={discoveredDevices}
+            provisioningRequests={provisioningRequests}
+            cloudSensorSamples={cloudSensorSamples}
+            onlineMode={runtimeProfile.connectToCloud}
             bleStatus={bleStatus}
             cloudStatus={cloudStatus}
-            meshLink={currentMeshLink}
+            meshLink={runtimeProfile.connectToCloud ? null : currentMeshLink}
             onRemoveDevice={requestRemoveDevice}
             onMessagesChanged={async () => {
               await refreshProfileMessages();
             }}
             onDevicesChanged={async () => {
-              const refreshedDevices = await listProfileDevices(runtimeProfile.id);
-              if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+              if (runtimeProfile.connectToCloud) await refreshProvisioningRequests();
+              else {
+                const refreshedDevices = await listProfileDevices(runtimeProfile.id);
+                if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+              }
             }}
             onProvisioningRequestsChanged={refreshProvisioningRequests}
             onResendMessage={resendMessage}
@@ -636,8 +612,11 @@ export default function App() {
               profile={runtimeProfile}
               onClose={() => setProvisioningOpen(false)}
               onProvisioned={async () => {
-                const refreshedDevices = await listProfileDevices(runtimeProfile.id);
-                if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+                if (runtimeProfile.connectToCloud) await refreshProvisioningRequests();
+                else {
+                  const refreshedDevices = await listProfileDevices(runtimeProfile.id);
+                  if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+                }
               }}
             />
           </Modal>

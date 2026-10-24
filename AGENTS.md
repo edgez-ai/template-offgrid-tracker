@@ -15,7 +15,7 @@ under Appwrite permissions. The Function writes application sensor telemetry. Ap
 | --- | --- |
 | `site/` | Read-only Next.js telemetry portal. Never create Devices here. |
 | `app/` | Expo + React Native BLE provisioning client. |
-| `function/` | Appwrite Function; MQTT-to-TablesDB writer and mobile-sync Device registrar. |
+| `function/` | Appwrite Function; MQTT-to-TablesDB writer and compatibility APIs. |
 | `firmware/` | PlatformIO ESP-IDF and Zephyr firmware for ESP32 and nRF54L15 targets. |
 | `edgez.json` | EdgeZ solution and workspace manifest. |
 | `appwrite.config.json` | Declarative auth, platform, database, Function, and Site plan. |
@@ -27,11 +27,13 @@ Keep these boundaries. Never expose `APPWRITE_API_KEY` to clients. Authenticated
 web and mobile clients read latest state from TablesDB and history from Time
 Series; only the Function writes MQTT telemetry.
 
-The mobile-sync Function creates and updates Device records from locally stored
-devices. Only mobile calls the Device credential endpoints. Web and mobile may
-list Devices, read the latest `telemetry` row, and query the project
-Time Series Store with the active Appwrite session. Serial is the MQTT username
-and is unique within the Appwrite project.
+Cloud-connected mobile profiles use the same online Devices and TablesDB APIs
+as the website; they never synchronize local SQLite data into the cloud.
+Offline profiles keep their BLE mesh devices, messages, and samples locally.
+Only mobile calls the Device credential endpoints. Web and mobile may list
+Devices, read the latest `telemetry` row, and query the project Time Series
+Store with the active Appwrite session. Serial is the MQTT username and is
+unique within the Appwrite project.
 MQTT telemetry inherits only the built-in device's read permissions.
 
 Firmware source lives in `firmware/`. The mobile client retains provisioning,

@@ -3,7 +3,7 @@ import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { Interface, Mime, Operation, edgezNodeDisplayName, edgezNodeId, edgezNodeOpensConversation, edgezPublicChannelNode, edgezPublicChannelPorts, encodeNetworkPacket } from "@edgez/react-native-sdk";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { toByteArray } from "base64-js";
-import type { EdgezMeshSession, EdgezMeshState, EdgezSensorData } from "@edgez/react-native-sdk";
+import type { EdgezMeshSession, EdgezMeshState, EdgezSensorData, EdgezSensorSample } from "@edgez/react-native-sdk";
 import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -19,9 +19,9 @@ import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes }
 import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
-import { acceptCloudProvisioningRequest } from "./cloud-auth";
+import { acceptCloudProvisioningRequest, deleteCloudDevice } from "./cloud-auth";
 
-type InboxTab = "channels" | "people" | "sensors" | "discovered";
+type InboxTab = "channels" | "people" | "gateways" | "sensors" | "discovered";
 type ConversationPeer = { id: string; name: string; serial: string; nodeNum: bigint | null; publicChannel: boolean; device: StoredDevice | null };
 
 const inboxTabStorageKey = "offgrid-tracker:last-inbox-tab:v1";
@@ -42,7 +42,7 @@ const sensorFields: ReadonlyArray<{ key: keyof EdgezSensorData; label: string; u
   { key: "longitude", label: "Longitude", unit: "°", decimals: 5 },
 ];
 
-export function MeshMessages({ visible, profile, profileId, session, meshState, devices, messages, provisioningRequests, initialPeerSerial, onMessagesChanged, onDevicesChanged, onProvisioningRequestsChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
+export function MeshMessages({ visible, profile, profileId, session, meshState, devices, messages, provisioningRequests, cloudSensorSamples, onlineMode, initialPeerSerial, onMessagesChanged, onDevicesChanged, onProvisioningRequestsChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
   visible: boolean;
   profile: StoredProfile;
   profileId: string;
@@ -51,6 +51,8 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   devices: StoredDevice[];
   messages: StoredMessage[];
   provisioningRequests: StoredProvisioningRequest[];
+  cloudSensorSamples: EdgezSensorSample[];
+  onlineMode: boolean;
   initialPeerSerial: string | null;
   onMessagesChanged: () => Promise<void>;
   onDevicesChanged: () => Promise<void>;
@@ -60,20 +62,22 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   onRemoveDevice: (device: StoredDevice) => void;
   onClose: () => void;
 }) {
-  const channels: ConversationPeer[] = edgezPublicChannelPorts
+  const channels: ConversationPeer[] = (onlineMode ? [] : edgezPublicChannelPorts)
     .map((nodeNum, index) => meshState?.nodes.get(nodeNum) ?? edgezPublicChannelNode(index + 1))
     .filter((node) => node.enabled !== false)
     .map((node) => ({ id: `channel-${node.nodeNum}`, name: edgezNodeDisplayName(node), serial: edgezNodeId(node.nodeNum).toUpperCase(), nodeNum: node.nodeNum, publicChannel: true, device: null }));
-  const people = devices.filter((device) => {
+  const gateways = devices.filter((device) => device.kind === "h7608" || device.deviceType.trim().toLowerCase() === "gateway");
+  const gatewayIds = new Set(gateways.map((device) => device.id));
+  const people = onlineMode ? [] : devices.filter((device) => {
     const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
     const liveNode = nodeNum === null ? undefined : meshState?.nodes.get(nodeNum);
     return liveNode ? edgezNodeOpensConversation(liveNode) : personTypes.has(device.deviceType.trim().toLowerCase());
   });
   const peopleIds = new Set(people.map((device) => device.id));
-  const sensors = devices.filter((device) => !peopleIds.has(device.id));
+  const sensors = devices.filter((device) => !gatewayIds.has(device.id) && (onlineMode || !peopleIds.has(device.id)));
   const peoplePeers: ConversationPeer[] = people.map((device) => ({ id: device.id, name: device.name, serial: device.meshMacAddress || device.serial, nodeNum: nodeNumFromSerial(device.meshMacAddress || device.serial), publicChannel: false, device }));
   const peers = [...channels, ...peoplePeers];
-  const [tab, setTab] = useState<InboxTab>("channels");
+  const [tab, setTab] = useState<InboxTab>(onlineMode ? "gateways" : "channels");
   const [peerSerial, setPeerSerial] = useState<string | null>(null);
   const [sensorId, setSensorId] = useState<string | null>(null);
   const [requestId, setRequestId] = useState<string | null>(null);
@@ -105,15 +109,24 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   const selectedNode = selectedPeer?.nodeNum == null ? null : meshState?.nodes.get(selectedPeer.nodeNum) ?? null;
   const conversation = selectedPeer ? messages.filter((item) => !item.retryOfUuid && sameSerial(item.peerSerial, selectedPeer.serial)).sort((a, b) => a.timestampMs - b.timestampMs) : [];
   const sensorNodeNum = selectedSensor ? nodeNumFromSerial(selectedSensor.meshMacAddress || selectedSensor.serial) : null;
-  const samples = sensorNodeNum === null ? [] : meshState?.sensorSamples.get(sensorNodeNum) ?? [];
+  const onlineSamples = useMemo(() => {
+    const grouped = new Map<bigint, EdgezSensorSample[]>();
+    for (const sample of cloudSensorSamples) grouped.set(sample.nodeNum, [...grouped.get(sample.nodeNum) ?? [], sample]);
+    return grouped;
+  }, [cloudSensorSamples]);
+  const samples = sensorNodeNum === null ? [] : onlineMode
+    ? onlineSamples.get(sensorNodeNum) ?? []
+    : meshState?.sensorSamples.get(sensorNodeNum) ?? [];
 
   useEffect(() => {
     let mounted = true;
     void AsyncStorage.getItem(inboxTabStorageKey).then((storedTab) => {
-      if (mounted && (storedTab === "channels" || storedTab === "people" || storedTab === "sensors" || storedTab === "discovered")) setTab(storedTab);
+      if (!mounted) return;
+      if (onlineMode) setTab(storedTab === "sensors" || storedTab === "discovered" || storedTab === "gateways" ? storedTab : "gateways");
+      else if (storedTab === "channels" || storedTab === "people" || storedTab === "sensors" || storedTab === "discovered") setTab(storedTab);
     }).catch(() => undefined);
     return () => { mounted = false; };
-  }, []);
+  }, [onlineMode]);
 
   useEffect(() => {
     if (!visible) return;
@@ -265,28 +278,31 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
           waitForDrainMs: 3000,
         });
       }
-      await saveProfileDevice({
-        profileId,
-        serial: selectedRequest.serial,
-        name,
-        kind: "nrf54",
-        firmwareTarget: cloudRequest ? "edgez-ht-hc33-sensor" : "edgez-nrf54l15-fgh200m-sensor",
-        locationSource: requestLocationMode === "live" ? "gps" : requestLocationMode,
-        latitude: coordinates?.latitude ?? null,
-        longitude: coordinates?.longitude ?? null,
-        deviceType: "sensor",
-        marker: requestColor,
-        iconStyle: requestIcon,
-        userUuid: `${selectedRequest.userIdHigh}:${selectedRequest.userIdLow}`,
-        lastSeenAt: selectedRequest.lastSeenAt,
-        meshMacAddress: provisioningNodeAddress(selectedRequest.nodeNum),
-        userPublicKey: selectedRequest.userPublicKey,
-      });
       if (!cloudRequest) {
+        await saveProfileDevice({
+          profileId,
+          serial: selectedRequest.serial,
+          name,
+          kind: "nrf54",
+          firmwareTarget: "edgez-nrf54l15-fgh200m-sensor",
+          locationSource: requestLocationMode === "live" ? "gps" : requestLocationMode,
+          latitude: coordinates?.latitude ?? null,
+          longitude: coordinates?.longitude ?? null,
+          deviceType: "sensor",
+          marker: requestColor,
+          iconStyle: requestIcon,
+          userUuid: `${selectedRequest.userIdHigh}:${selectedRequest.userIdLow}`,
+          lastSeenAt: selectedRequest.lastSeenAt,
+          meshMacAddress: provisioningNodeAddress(selectedRequest.nodeNum),
+          userPublicKey: selectedRequest.userPublicKey,
+        });
         await markProvisioningRequestAccepted(profileId, selectedRequest.id);
       }
-      await onDevicesChanged();
-      await onProvisioningRequestsChanged();
+      if (cloudRequest) await onProvisioningRequestsChanged();
+      else {
+        await onDevicesChanged();
+        await onProvisioningRequestsChanged();
+      }
       setRequestId(null);
       Alert.alert(
         cloudRequest ? "Provisioning queued" : "Provisioning sent",
@@ -313,7 +329,8 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
           onPress: () => {
             void (async () => {
               setError("");
-              await deleteProfileProvisioningRequest(profileId, request.id);
+              if (request.transport === "mqtt" && request.cloudDeviceId) await deleteCloudDevice(request.cloudDeviceId);
+              else await deleteProfileProvisioningRequest(profileId, request.id);
               if (requestId === request.id) setRequestId(null);
               await onProvisioningRequestsChanged();
             })().catch((caught) => {
@@ -340,7 +357,7 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   return <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
     <SafeAreaView style={styles.page}>
       <View style={styles.header}>
-        <View><Text style={styles.eyebrow}>OFFGRID</Text><Text style={styles.title}>{selectedPeer?.name ?? selectedSensor?.name ?? selectedRequest?.serial ?? "Messages"}</Text></View>
+        <View><Text style={styles.eyebrow}>OFFGRID</Text><Text style={styles.title}>{selectedPeer?.name ?? selectedSensor?.name ?? selectedRequest?.serial ?? (onlineMode ? "Devices" : "Messages")}</Text></View>
         <View style={styles.headerActions}>
           {selectedPeer || selectedSensor ? <Pressable style={styles.iconButton} onPress={() => {
             const device = selectedPeer?.device ?? selectedSensor;
@@ -350,7 +367,10 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
         </View>
       </View>
 
-      {!selectedPeer && !selectedSensor && !selectedRequest ? <View style={styles.tabs}>{(["channels", "people", "sensors", "discovered"] as const).map((item) => <Pressable key={item} style={[styles.tab, tab === item && styles.activeTab]} onPress={() => selectTab(item)} accessibilityRole="tab" accessibilityState={{ selected: tab === item }}><Text style={[styles.tabText, tab === item && styles.activeTabText]}>{item.toUpperCase()}</Text></Pressable>)}</View> : null}
+      {!selectedPeer && !selectedSensor && !selectedRequest ? <View style={styles.tabs}>{(onlineMode
+        ? (["gateways", "sensors", "discovered"] as const)
+        : (["channels", "people", "sensors", "discovered"] as const)
+      ).map((item) => <Pressable key={item} style={[styles.tab, tab === item && styles.activeTab]} onPress={() => selectTab(item)} accessibilityRole="tab" accessibilityState={{ selected: tab === item }}><Text style={[styles.tabText, tab === item && styles.activeTabText]}>{item.toUpperCase()}</Text></Pressable>)}</View> : null}
 
       <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         {!selectedPeer && !selectedSensor && !selectedRequest && tab === "channels" ? <View style={styles.list}>{channels.map((peer) => <ChannelRow key={peer.id} peer={peer} latest={latestBySerial.get(normalizedDeviceSerial(peer.serial))} onOpen={() => setPeerSerial(peer.serial)} />)}</View> : null}
@@ -362,9 +382,21 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
           return <SwipeableDeviceRow key={device.id} device={device} icon="person-outline" subtitle={latest?.text || "Start a mesh conversation"} meta={lastSeenLabel(lastSeen, isPeerOnline(serial, devices, meshState))} badge={latest?.mine ? displayedMessageStatus(latest).toUpperCase() : undefined} onOpen={() => setPeerSerial(serial)} onRemove={onRemoveDevice} />;
         })}</View> : <EmptyState icon="people-outline" title="No people discovered" text="People appear here after their beacon reaches this profile. They remain available before the first message." /> : null}
 
+        {!selectedPeer && !selectedSensor && !selectedRequest && tab === "gateways" ? gateways.length ? <View style={styles.list}>{gateways.map((device) => <SwipeableDeviceRow
+          key={device.id}
+          device={device}
+          icon="git-network-outline"
+          subtitle={device.meshMacAddress || device.serial}
+          meta={device.lastSeenAt ? `LAST SEEN ${timestamp(Date.parse(device.lastSeenAt))}` : "WAITING FOR STATUS"}
+          onOpen={() => onShowDevice(device)}
+          onRemove={onRemoveDevice}
+        />)}</View> : <EmptyState icon="git-network-outline" title="No gateways" text="Provisioned H7608 gateways assigned to this profile appear here." /> : null}
+
         {!selectedPeer && !selectedSensor && !selectedRequest && tab === "sensors" ? sensors.length ? <View style={styles.list}>{sensors.map((device) => {
           const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
-          const deviceSamples = nodeNum === null ? [] : meshState?.sensorSamples.get(nodeNum) ?? [];
+          const deviceSamples = nodeNum === null ? [] : onlineMode
+            ? onlineSamples.get(nodeNum) ?? []
+            : meshState?.sensorSamples.get(nodeNum) ?? [];
           const latest = deviceSamples[deviceSamples.length - 1];
           const serial = device.meshMacAddress || device.serial;
           const lastSeen = peerLastSeenMs(serial, devices, meshState);

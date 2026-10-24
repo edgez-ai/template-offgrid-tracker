@@ -22,10 +22,11 @@ A legacy single JSON object follows the same path for the publishing device.
 Sensor type 12 carries battery voltage in volts; types 3 and 4 carry latitude
 and longitude. Other application telemetry channels keep their JSON payloads.
 
-Authenticated mobile executions may call `/sync`. The app sends incremental
-SQLite changes together with its last successful sync watermark. This Function,
-not the mobile client, validates and upserts device, message, and sensor rows and
-returns cloud-side changes for the app to merge locally. The same sync request
+The `/sync` route remains for compatibility with older mobile releases. Current
+mobile builds read Devices and TablesDB directly and do not call it. Legacy
+authenticated executions may send incremental SQLite changes together with
+their last successful sync watermark. This Function validates and upserts
+device, message, and sensor rows and returns cloud-side changes. The same request
 idempotently creates or updates first-class Appwrite
 Devices by serial, including profile permissions, map appearance, and location;
 credential creation remains an explicit mobile provisioning operation.
