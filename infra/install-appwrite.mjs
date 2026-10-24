@@ -3,7 +3,6 @@ import { installAuth } from "./auth.mjs";
 import { installDatabase } from "./database.mjs";
 import { installFunction } from "./function.mjs";
 import { installSite } from "./site.mjs";
-import { installStorage } from "./storage.mjs";
 import { installTimeseries } from "./timeseries.mjs";
 
 configureClient();
@@ -13,6 +12,5 @@ configureClient();
 await installTimeseries();
 installAuth();
 installDatabase();
-installStorage();
 installFunction();
 installSite();

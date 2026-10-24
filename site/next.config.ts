@@ -8,18 +8,10 @@ function localResourceIds() {
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   const telemetryTable = config.tables?.find((table: { $id?: string }) => table.$id === "telemetry");
   const otaUpdateTable = config.tables?.find((table: { $id?: string }) => table.$id === "ota-updates");
-  const mobileDeviceTable = config.tables?.find((table: { $id?: string }) => table.$id === "mobile-devices");
-  const messageTable = config.tables?.find((table: { $id?: string }) => table.$id === "messages");
-  const sensorSampleTable = config.tables?.find((table: { $id?: string }) => table.$id === "sensor-samples");
-  const messageAttachmentBucket = config.buckets?.find((bucket: { $id?: string }) => bucket.$id === "message-attachments");
   return {
     databaseId: telemetryTable?.databaseId as string | undefined,
     telemetryTableId: telemetryTable?.$id as string | undefined,
     otaUpdateTableId: otaUpdateTable?.$id as string | undefined,
-    mobileDeviceTableId: mobileDeviceTable?.$id as string | undefined,
-    messageTableId: messageTable?.$id as string | undefined,
-    sensorSampleTableId: sensorSampleTable?.$id as string | undefined,
-    messageAttachmentBucketId: messageAttachmentBucket?.$id as string | undefined,
   };
 }
 
@@ -47,14 +39,6 @@ const required = {
     process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID || localResources.telemetryTableId,
   NEXT_PUBLIC_OTA_UPDATE_TABLE_ID:
     process.env.OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID || localResources.otaUpdateTableId,
-  NEXT_PUBLIC_MOBILE_DEVICE_TABLE_ID:
-    process.env.OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID || localResources.mobileDeviceTableId,
-  NEXT_PUBLIC_MESSAGE_TABLE_ID:
-    process.env.OFFGRID_TRACKER_MESSAGE_TABLE_ID || localResources.messageTableId,
-  NEXT_PUBLIC_SENSOR_SAMPLE_TABLE_ID:
-    process.env.OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID || localResources.sensorSampleTableId,
-  NEXT_PUBLIC_MESSAGE_ATTACHMENT_BUCKET_ID:
-    process.env.OFFGRID_TRACKER_MESSAGE_ATTACHMENT_BUCKET_ID || localResources.messageAttachmentBucketId,
 };
 
 const missing = Object.entries(required).filter(([, value]) => !value).map(([key]) => key);

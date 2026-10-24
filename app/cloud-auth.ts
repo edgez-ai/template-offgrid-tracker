@@ -16,7 +16,7 @@ type CloudConfig = {
   appwritePlatform?: string;
   appwriteDatabaseId?: string;
   appwriteProfileTableId?: string;
-  appwriteSensorSampleTableId?: string;
+  appwriteTelemetryTableId?: string;
 };
 
 const extra = (Constants.expoConfig?.extra ?? {}) as CloudConfig;
@@ -25,7 +25,7 @@ const projectId = (extra.appwriteProjectId ?? "").trim();
 const platform = (extra.appwritePlatform ?? "").trim();
 const databaseId = (extra.appwriteDatabaseId ?? "offgrid-tracker").trim();
 const profileTableId = (extra.appwriteProfileTableId ?? "profiles").trim();
-const sensorSampleTableId = (extra.appwriteSensorSampleTableId ?? "sensor-samples").trim();
+const telemetryTableId = (extra.appwriteTelemetryTableId ?? "telemetry").trim();
 
 export const cloudAuthConfigured = Boolean(
   endpoint && projectId && projectId !== "<PROJECT_ID>" && platform,
@@ -362,23 +362,11 @@ export async function ensureCloudProfile(profile: StoredProfile) {
   await account.updatePrefs({ prefs: { ...user.prefs, currentProfileId: profile.id } });
 }
 
-type CloudSensorRow = Models.Row & {
-  nodeNum: string;
-  timestampMs: number;
-  latitude?: number | null;
-  longitude?: number | null;
-  altitude?: number | null;
-  temperature?: number | null;
-  humidity?: number | null;
-  pressure?: number | null;
-  vibrationAverage?: number | null;
-  accelX?: number | null;
-  accelY?: number | null;
-  accelZ?: number | null;
-  gyroX?: number | null;
-  gyroY?: number | null;
-  gyroZ?: number | null;
-  binaryLengthBytes?: number | null;
+type CloudTelemetryRow = Models.Row & {
+  deviceId: string;
+  serial: string;
+  payload: string;
+  receivedAt: string;
 };
 
 export type CloudOnlineData = {
@@ -416,29 +404,38 @@ function storedDeviceFromCloud(profileId: string, device: NativeDevice): StoredD
   };
 }
 
-function sensorSampleFromCloud(row: CloudSensorRow): EdgezSensorSample {
+function sensorSampleFromCloud(row: CloudTelemetryRow, device: NativeDevice): EdgezSensorSample | null {
+  const nodeNum = nodeNumFromSerial(device.halowMac || device.serial || row.serial);
+  if (nodeNum === null) return null;
   const data: EdgezSensorSample["data"] = {};
-  const fields = [
-    "latitude", "longitude", "altitude", "temperature", "humidity", "pressure",
-    "vibrationAverage", "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", "binaryLengthBytes",
-  ] as const;
-  for (const field of fields) {
-    const value = row[field];
-    if (typeof value === "number" && Number.isFinite(value)) data[field] = value;
+  const fields = new Map<number, keyof EdgezSensorSample["data"]>([
+    [1, "temperature"], [2, "humidity"], [3, "latitude"], [4, "longitude"],
+    [5, "binaryLengthBytes"], [6, "accelX"], [7, "accelY"], [8, "accelZ"],
+    [9, "gyroX"], [10, "gyroY"], [11, "gyroZ"],
+  ]);
+  try {
+    const payload = JSON.parse(row.payload) as { sensors?: { type?: unknown; value?: unknown }[] };
+    for (const sensor of payload.sensors ?? []) {
+      const field = typeof sensor.type === "number" ? fields.get(sensor.type) : undefined;
+      if (field && typeof sensor.value === "number" && Number.isFinite(sensor.value)) data[field] = sensor.value;
+    }
+  } catch {
+    return null;
   }
-  return { nodeNum: BigInt(row.nodeNum), timestampMs: row.timestampMs, data };
+  if (!Object.keys(data).length) return null;
+  return { nodeNum, timestampMs: Date.parse(row.receivedAt) || Date.now(), data };
 }
 
 /** Read the cloud view directly, using the same Devices and TablesDB APIs as the website. */
 export async function listCloudOnlineData(profileId: string): Promise<CloudOnlineData> {
   if (!tables) throw new Error("Cloud access is not configured in this app build.");
   const deviceQuery = `includeTopology=true&queries[]=${encodeURIComponent(Query.limit(100))}`;
-  const [deviceResult, sensorResult] = await Promise.all([
+  const [deviceResult, telemetryResult] = await Promise.all([
     devicesRequest<{ devices?: NativeDevice[] }>(`?${deviceQuery}`),
-    tables.listRows<CloudSensorRow>({
+    tables.listRows<CloudTelemetryRow>({
       databaseId,
-      tableId: sensorSampleTableId,
-      queries: [Query.equal("profileId", [profileId]), Query.orderDesc("timestampMs"), Query.limit(500)],
+      tableId: telemetryTableId,
+      queries: [Query.equal("profileId", [profileId]), Query.orderDesc("receivedAt"), Query.limit(500)],
     }),
   ]);
   const nativeDevices = deviceResult.devices ?? [];
@@ -446,9 +443,14 @@ export async function listCloudOnlineData(profileId: string): Promise<CloudOnlin
   const devices = nativeDevices
     .filter((device) => device.status !== "discovered" && cloudDeviceBelongsToProfile(profileId, device, devicesById))
     .map((device) => storedDeviceFromCloud(profileId, device));
+  const sensorSamples = telemetryResult.rows.flatMap((row) => {
+    const device = devicesById.get(row.deviceId);
+    const sample = device ? sensorSampleFromCloud(row, device) : null;
+    return sample ? [sample] : [];
+  }).sort((left, right) => left.timestampMs - right.timestampMs);
   return {
     devices,
-    sensorSamples: sensorResult.rows.map(sensorSampleFromCloud).sort((left, right) => left.timestampMs - right.timestampMs),
+    sensorSamples,
     discoveries: cloudDiscoveredDevices(profileId, nativeDevices),
   };
 }

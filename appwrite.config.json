@@ -67,99 +67,6 @@
       ]
     },
     {
-      "$id": "mobile-devices",
-      "databaseId": "offgrid-tracker",
-      "name": "Mobile profile devices",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "localId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "serial", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "kind", "type": "varchar", "size": 16, "required": true, "array": false },
-        { "key": "firmwareTarget", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "locationSource", "type": "varchar", "size": 16, "required": true, "array": false },
-        { "key": "latitude", "type": "double", "required": false, "array": false },
-        { "key": "longitude", "type": "double", "required": false, "array": false },
-        { "key": "deviceType", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "marker", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "iconStyle", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "userUuid", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "lastSeenAt", "type": "varchar", "size": 40, "required": true, "array": false },
-        { "key": "meshMacAddress", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "userPublicKey", "type": "varchar", "size": 256, "required": true, "array": false },
-        { "key": "updatedAt", "type": "varchar", "size": 40, "required": true, "array": false }
-      ],
-      "indexes": [
-        { "key": "profile-updated", "type": "key", "attributes": ["profileId", "updatedAt"], "orders": ["ASC", "DESC"] },
-        { "key": "profile-local-id", "type": "unique", "attributes": ["profileId", "localId"] }
-      ]
-    },
-    {
-      "$id": "messages",
-      "databaseId": "offgrid-tracker",
-      "name": "Identity messages",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "messageUuid", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "from", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "to", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "text", "type": "varchar", "size": 10000, "required": true, "array": false, "encrypt": true },
-        { "key": "timestampMs", "type": "integer", "required": true, "array": false },
-        { "key": "status", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "attachmentFileId", "type": "varchar", "size": 36, "required": false, "array": false },
-        { "key": "attachmentKind", "type": "varchar", "size": 16, "required": false, "array": false },
-        { "key": "attachmentName", "type": "varchar", "size": 128, "required": false, "array": false },
-        { "key": "attachmentMimeType", "type": "varchar", "size": 128, "required": false, "array": false },
-        { "key": "attachmentSize", "type": "integer", "required": false, "array": false },
-        { "key": "voiceCodec", "type": "integer", "required": true, "array": false },
-        { "key": "durationMs", "type": "integer", "required": true, "array": false },
-        { "key": "retryCount", "type": "integer", "required": true, "array": false },
-        { "key": "retryOfUuid", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "lastAttemptAtMs", "type": "integer", "required": true, "array": false },
-        { "key": "deliveryState", "type": "varchar", "size": 32, "required": true, "array": false }
-      ],
-      "indexes": [
-        { "key": "from-time", "type": "key", "attributes": ["from", "timestampMs"], "orders": ["ASC", "DESC"] },
-        { "key": "to-time", "type": "key", "attributes": ["to", "timestampMs"], "orders": ["ASC", "DESC"] },
-        { "key": "message-id", "type": "unique", "attributes": ["messageUuid"] }
-      ]
-    },
-    {
-      "$id": "sensor-samples",
-      "databaseId": "offgrid-tracker",
-      "name": "Mobile sensor samples",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "nodeNum", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "timestampMs", "type": "integer", "required": true, "array": false },
-        { "key": "latitude", "type": "double", "required": false, "array": false },
-        { "key": "longitude", "type": "double", "required": false, "array": false },
-        { "key": "altitude", "type": "double", "required": false, "array": false },
-        { "key": "temperature", "type": "double", "required": false, "array": false },
-        { "key": "humidity", "type": "double", "required": false, "array": false },
-        { "key": "pressure", "type": "double", "required": false, "array": false },
-        { "key": "vibrationAverage", "type": "double", "required": false, "array": false },
-        { "key": "accelX", "type": "double", "required": false, "array": false },
-        { "key": "accelY", "type": "double", "required": false, "array": false },
-        { "key": "accelZ", "type": "double", "required": false, "array": false },
-        { "key": "gyroX", "type": "double", "required": false, "array": false },
-        { "key": "gyroY", "type": "double", "required": false, "array": false },
-        { "key": "gyroZ", "type": "double", "required": false, "array": false },
-        { "key": "binaryLengthBytes", "type": "integer", "required": false, "array": false }
-      ],
-      "indexes": [
-        { "key": "profile-node-time", "type": "key", "attributes": ["profileId", "nodeNum", "timestampMs"], "orders": ["ASC", "ASC", "DESC"] }
-      ]
-    },
-    {
       "$id": "telemetry",
       "databaseId": "offgrid-tracker",
       "name": "Latest telemetry",
@@ -296,21 +203,7 @@
       ]
     }
   ],
-  "buckets": [
-    {
-      "$id": "message-attachments",
-      "name": "Message attachments",
-      "permissions": ["create(\"users\")"],
-      "fileSecurity": true,
-      "enabled": true,
-      "maximumFileSize": 10485760,
-      "allowedFileExtensions": ["opus", "ogg", "wav", "m4a", "aac", "jpg", "jpeg", "png", "webp", "gif", "bin"],
-      "compression": "none",
-      "encryption": true,
-      "antivirus": true,
-      "transformations": true
-    }
-  ],
+  "buckets": [],
   "functions": [
     {
       "$id": "offgrid-tracker",
@@ -330,10 +223,6 @@
       "vars": [
         { "key": "OFFGRID_TRACKER_DATABASE_ID", "value": "offgrid-tracker" },
         { "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "OFFGRID_TRACKER_PROFILE_TABLE_ID", "value": "profiles" },
-        { "key": "OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID", "value": "mobile-devices" },
-        { "key": "OFFGRID_TRACKER_MESSAGE_TABLE_ID", "value": "messages" },
-        { "key": "OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID", "value": "sensor-samples" },
         { "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", "value": "ota-updates" },
         { "key": "OFFGRID_TRACKER_DOWNLINK_TABLE_ID", "value": "downlinks" },
         { "key": "OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID", "value": "geofence-areas" },
@@ -362,10 +251,6 @@
         { "key": "OFFGRID_TRACKER_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
         { "key": "OFFGRID_TRACKER_DATABASE_ID", "value": "offgrid-tracker" },
         { "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID", "value": "mobile-devices" },
-        { "key": "OFFGRID_TRACKER_MESSAGE_TABLE_ID", "value": "messages" },
-        { "key": "OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID", "value": "sensor-samples" },
-        { "key": "OFFGRID_TRACKER_MESSAGE_ATTACHMENT_BUCKET_ID", "value": "message-attachments" },
         { "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
       ]
     }

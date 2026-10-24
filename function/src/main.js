@@ -8,10 +8,6 @@ const OTA_REPOSITORY_URL = process.env.OFFGRID_TRACKER_REPOSITORY_URL || process
 const GEOFENCE_AREA_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_ALARM_TABLE_ID;
-const PROFILE_TABLE_ID = process.env.OFFGRID_TRACKER_PROFILE_TABLE_ID || "profiles";
-const MOBILE_DEVICE_TABLE_ID = process.env.OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_ID || "mobile-devices";
-const MESSAGE_TABLE_ID = process.env.OFFGRID_TRACKER_MESSAGE_TABLE_ID || "messages";
-const SENSOR_SAMPLE_TABLE_ID = process.env.OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID || "sensor-samples";
 const SENSOR_BATTERY_VOLTAGE = 12;
 const SENSOR_MCU_TEMPERATURE = 13;
 const SENSOR_LATITUDE = 3;
@@ -359,184 +355,6 @@ function topicParts(topic) {
   return match ? { projectId: match[1], serial: match[2], channel: match[3] } : null;
 }
 
-function stableRowId(prefix, value) {
-  let left = 0x811c9dc5;
-  let right = 0x9e3779b9;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    left = Math.imul(left ^ code, 0x01000193) >>> 0;
-    right = Math.imul(right ^ (code + index), 0x85ebca6b) >>> 0;
-  }
-  return `${prefix}-${left.toString(16).padStart(8, "0")}${right.toString(16).padStart(8, "0")}`;
-}
-
-function fields(value, names) {
-  return Object.fromEntries(names.filter((name) => value[name] !== undefined).map((name) => [name, value[name]]));
-}
-
-async function deviceApi(req, method, path, body, queries = []) {
-  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
-  const url = new URL(`${endpoint}${path}`);
-  for (const query of queries) url.searchParams.append("queries[]", query);
-  if (method === "GET") url.searchParams.set("total", "false");
-  const response = await fetch(url, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      "x-appwrite-project": process.env.APPWRITE_FUNCTION_PROJECT_ID,
-      "x-appwrite-key": req.headers["x-appwrite-key"],
-    },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw Object.assign(new Error(payload.message || `Device API request failed with ${response.status}`), {
-      code: response.status,
-    });
-  }
-  return payload;
-}
-
-async function findCloudDevice(req, serial) {
-  const result = await deviceApi(req, "GET", "/devices", null, [Query.equal("serial", [serial])]);
-  return result.devices?.find((device) => device.serial === serial) || null;
-}
-
-function cloudDeviceData(profileId, device, permissions) {
-  const hasLocation = Number.isFinite(device.latitude) && Number.isFinite(device.longitude);
-  return {
-    name: device.name || device.serial,
-    permissions,
-    enabled: true,
-    metadata: {
-      profileId,
-      localId: device.id,
-      kind: device.kind,
-      deviceType: device.deviceType,
-      firmwareTarget: device.firmwareTarget,
-    },
-    markerType: device.iconStyle || null,
-    markerColor: device.marker === "default" ? null : device.marker || null,
-    location: hasLocation ? [device.longitude, device.latitude] : null,
-  };
-}
-
-async function upsertCloudDevice(req, profileId, device, permissions) {
-  let cloudDevice = await findCloudDevice(req, device.serial);
-  const data = cloudDeviceData(profileId, device, permissions);
-  if (!cloudDevice) {
-    try {
-      return await deviceApi(req, "POST", "/devices", { serial: device.serial, ...data });
-    } catch (caught) {
-      if (caught?.code !== 409) throw caught;
-      cloudDevice = await findCloudDevice(req, device.serial);
-      if (!cloudDevice) throw caught;
-    }
-  }
-  return deviceApi(req, "PATCH", `/devices/${encodeURIComponent(cloudDevice.$id)}`, data);
-}
-
-async function syncMobileData(req, res, error) {
-  const syncedAt = new Date().toISOString();
-  const userId = req.headers["x-appwrite-user-id"];
-  const userJwt = req.headers["x-appwrite-user-jwt"];
-  if (!userId || !userJwt) return json(res, { error: "Authentication required" }, 401);
-  const body = bodyOf(req);
-  const profileId = typeof body.profileId === "string" ? body.profileId : "";
-  const identityId = typeof body.identityId === "string" ? body.identityId : "";
-  const lastSyncAt = typeof body.lastSyncAt === "string" && !Number.isNaN(Date.parse(body.lastSyncAt))
-    ? body.lastSyncAt : "";
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,35}$/.test(profileId)) {
-    return json(res, { error: "Invalid profile" }, 400);
-  }
-  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$/.test(identityId)) {
-    return json(res, { error: "Invalid identity" }, 400);
-  }
-  const groups = [body.devices, body.messages, body.sensorSamples];
-  if (groups.some((group) => !Array.isArray(group) || group.length > 100) || JSON.stringify(body).length > 4000000) {
-    return json(res, { error: "Invalid sync batch" }, 400);
-  }
-  const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT;
-  const project = process.env.APPWRITE_FUNCTION_PROJECT_ID;
-  try {
-    const userTables = new TablesDB(new Client().setEndpoint(endpoint).setProject(project).setJWT(userJwt));
-    const profile = await userTables.getRow({ databaseId: DATABASE_ID, tableId: PROFILE_TABLE_ID, rowId: profileId });
-    if (profile.ownerId !== userId && profile.teamId !== profileId) return json(res, { error: "Profile access denied" }, 403);
-    if (profile.identityId !== identityId) return json(res, { error: "Identity access denied" }, 403);
-
-    const tables = new TablesDB(new Client().setEndpoint(endpoint).setProject(project).setKey(req.headers["x-appwrite-key"]));
-    const permissions = profile.$permissions || [];
-    for (const device of body.devices) {
-      await upsertCloudDevice(req, profileId, device, permissions);
-    }
-    const specs = [
-      {
-        tableId: MOBILE_DEVICE_TABLE_ID, prefix: "d", items: body.devices,
-        key: (item) => item.id,
-        names: ["serial", "name", "kind", "firmwareTarget", "locationSource", "latitude", "longitude", "deviceType", "marker", "iconStyle", "userUuid", "lastSeenAt", "meshMacAddress", "userPublicKey", "updatedAt"],
-        identify: (item) => ({ localId: item.id }),
-        profileScoped: true,
-      },
-      {
-        tableId: MESSAGE_TABLE_ID, prefix: "m", items: body.messages,
-        key: (item) => item.messageUuid,
-        names: ["messageUuid", "from", "to", "text", "timestampMs", "status", "attachmentFileId", "attachmentKind", "attachmentName", "attachmentMimeType", "attachmentSize", "voiceCodec", "durationMs", "retryCount", "retryOfUuid", "lastAttemptAtMs", "deliveryState"],
-        identify: () => ({}),
-        profileScoped: false,
-      },
-      {
-        tableId: SENSOR_SAMPLE_TABLE_ID, prefix: "s", items: body.sensorSamples,
-        key: (item) => `${item.nodeNum}:${item.timestampMs}`,
-        names: ["nodeNum", "timestampMs", "latitude", "longitude", "altitude", "temperature", "humidity", "pressure", "vibrationAverage", "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", "binaryLengthBytes"],
-        identify: () => ({}),
-        flatten: (item) => ({ nodeNum: item.nodeNum, timestampMs: item.timestampMs, ...(item.data || {}) }),
-        profileScoped: true,
-      },
-    ];
-    for (const spec of specs) {
-      for (const original of spec.items) {
-        const item = spec.flatten ? spec.flatten(original) : original;
-        const key = spec.key(original);
-        if (typeof key !== "string" || !key || key.length > 200) return json(res, { error: "Invalid sync item" }, 400);
-        if (!spec.profileScoped && (typeof item.from !== "string" || typeof item.to !== "string" ||
-            (item.from !== identityId && item.to !== identityId))) {
-          return json(res, { error: "Message does not belong to this identity" }, 403);
-        }
-        await tables.upsertRow({
-          databaseId: DATABASE_ID,
-          tableId: spec.tableId,
-          rowId: stableRowId(spec.prefix, spec.profileScoped ? `${profileId}:${key}` : key),
-          data: { ...(spec.profileScoped ? { profileId } : {}), ...spec.identify(original), ...fields(item, spec.names) },
-          permissions,
-        });
-      }
-    }
-
-    const changedSince = lastSyncAt ? [Query.greaterThan("$updatedAt", lastSyncAt)] : [];
-    const profileQueries = [Query.equal("profileId", [profileId]), ...changedSince, Query.limit(5000)];
-    const messageQueries = [Query.or([
-      Query.equal("from", [identityId]),
-      Query.equal("to", [identityId]),
-    ]), ...changedSince, Query.limit(5000)];
-    const [devices, messages, sensorSamples] = await Promise.all([
-      tables.listRows({ databaseId: DATABASE_ID, tableId: MOBILE_DEVICE_TABLE_ID, queries: profileQueries, total: false }),
-      tables.listRows({ databaseId: DATABASE_ID, tableId: MESSAGE_TABLE_ID, queries: messageQueries, total: false }),
-      tables.listRows({ databaseId: DATABASE_ID, tableId: SENSOR_SAMPLE_TABLE_ID, queries: profileQueries, total: false }),
-    ]);
-    const clean = (row) => Object.fromEntries(Object.entries(row).filter(([key]) => !key.startsWith("$")));
-    return json(res, {
-      syncedAt,
-      devices: devices.rows.map((row) => ({ id: row.localId, profileId, createdAt: row.$createdAt, ...clean(row) })),
-      messages: messages.rows.map(clean),
-      sensorSamples: sensorSamples.rows.map((row) => ({ nodeNum: row.nodeNum, timestampMs: row.timestampMs, data: fields(row, ["latitude", "longitude", "altitude", "temperature", "humidity", "pressure", "vibrationAverage", "accelX", "accelY", "accelZ", "gyroX", "gyroY", "gyroZ", "binaryLengthBytes"]) })),
-    });
-  } catch (caught) {
-    const status = caught?.code === 401 || caught?.code === 404 ? 403 : 500;
-    error(caught instanceof Error ? caught.message : String(caught));
-    return json(res, { error: status === 403 ? "Profile access denied" : "Cloud sync failed" }, status);
-  }
-}
-
 async function getDevice(req, deviceId) {
   const endpoint = process.env.APPWRITE_FUNCTION_API_ENDPOINT.replace(/\/+$/, "");
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}`, {
@@ -571,9 +389,6 @@ export default async function main({ req, res, error, log = () => {} }) {
   }
 
   const body = bodyOf(req);
-  if (body.action === "sync" || req.path === "/sync") {
-    return syncMobileData(req, res, error);
-  }
 
   const removedDeviceId = deletedDeviceId(req);
   if (removedDeviceId) {

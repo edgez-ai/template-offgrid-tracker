@@ -1,7 +1,7 @@
 const appwriteConfig = require("../appwrite.config.json");
 const edgezProject = require("../edgez.json");
 const profileTable = appwriteConfig.tables?.find((table) => table.$id === "profiles");
-const sensorSampleTable = appwriteConfig.tables?.find((table) => table.$id === "sensor-samples");
+const telemetryTable = appwriteConfig.tables?.find((table) => table.$id === "telemetry");
 const databaseId = profileTable?.databaseId || "offgrid-tracker";
 const profileTableId = profileTable?.$id || "profiles";
 
@@ -47,7 +47,7 @@ module.exports = {
       appwritePlatform: platform,
       appwriteDatabaseId: databaseId,
       appwriteProfileTableId: profileTableId,
-      appwriteSensorSampleTableId: sensorSampleTable?.$id || "sensor-samples",
+      appwriteTelemetryTableId: telemetryTable?.$id || "telemetry",
       otaRepositoryUrl: vcsRepositoryUrl.replace(/\.git$/, "").replace(/\/$/, ""),
       otaProxyUrl,
       bundleRuntimeVersion,

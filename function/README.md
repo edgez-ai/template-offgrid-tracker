@@ -22,20 +22,6 @@ A legacy single JSON object follows the same path for the publishing device.
 Sensor type 12 carries battery voltage in volts; types 3 and 4 carry latitude
 and longitude. Other application telemetry channels keep their JSON payloads.
 
-The `/sync` route remains for compatibility with older mobile releases. Current
-mobile builds read Devices and TablesDB directly and do not call it. Legacy
-authenticated executions may send incremental SQLite changes together with
-their last successful sync watermark. This Function validates and upserts
-device, message, and sensor rows and returns cloud-side changes. The same request
-idempotently creates or updates first-class Appwrite
-Devices by serial, including profile permissions, map appearance, and location;
-credential creation remains an explicit mobile provisioning operation.
-Message rows contain text and attachment metadata only. Voice and image bytes upload directly to
-Appwrite Storage and never pass through this Function or the messages table.
-Cloud messages have no `profileId`: the Function stores canonical `from` and
-`to` identity IDs, rejects uploads unrelated to the authenticated identity,
-and queries only messages where that identity is the sender or recipient.
-
 When an Appwrite Device is deleted, the same Function removes its deterministic
 latest-telemetry row. This releases the unique HaLow MAC mapping before a device
 with the same serial and radio is recreated; deleting an already-absent row is

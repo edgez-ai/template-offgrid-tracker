@@ -11,10 +11,10 @@ type Device = DeviceSystemState & { $id: string; $permissions?: string[]; serial
 type Profile = Models.Row & { name: string; identityId?: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
-type CloudSensorSample = Models.Row & { profileId: string; nodeNum: string; timestampMs: number; latitude?: number | null; longitude?: number | null; altitude?: number | null; temperature?: number | null; humidity?: number | null; pressure?: number | null; vibrationAverage?: number | null; accelX?: number | null; accelY?: number | null; accelZ?: number | null; gyroX?: number | null; gyroY?: number | null; gyroZ?: number | null; binaryLengthBytes?: number | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
 type SensorPoint = { timestamp: number; value: number };
 type SensorSeries = { field: string; label: string; color: string; points: SensorPoint[] };
+type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown; channel?: unknown };
 type HistoryReading = { timestamp: number; channel: string; payload: string };
 type SensorPayload = {
   batteryVoltageMv?: unknown;
@@ -30,7 +30,6 @@ const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const profileTableId = "profiles";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
-const sensorSampleTableId = process.env.NEXT_PUBLIC_SENSOR_SAMPLE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
 const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
@@ -48,27 +47,51 @@ const topologyRecentMs = 2 * 60 * 1000;
 const chartColors = ["#0a8c87", "#d47a1f", "#7c5ce5", "#d14b78", "#3977c3", "#6c8f2d", "#a75b32", "#53646f"];
 
 function sensorLabel(field: string) {
-  const name = field.replace(/([a-z])([A-Z])/g, "$1 $2").replaceAll("_", " ");
+  const name = (field.startsWith("sensor_") ? field.slice("sensor_".length) : field).replaceAll("_", " ");
   return name.replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-const sensorSampleFields = [
-  "temperature", "humidity", "pressure", "vibrationAverage", "accelX", "accelY", "accelZ",
-  "gyroX", "gyroY", "gyroZ", "latitude", "longitude", "altitude", "binaryLengthBytes",
-] as const;
+function measurementForDevice(deviceId: string) {
+  return `device_${deviceId.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+}
 
-function mobileSensorSeries(rows: CloudSensorSample[], duration: number): SensorSeries[] {
+function timeseriesRange(duration: number) {
+  if (duration <= 60 * 60 * 1000) return "1h";
+  if (duration <= 6 * 60 * 60 * 1000) return "6h";
+  return "24h";
+}
+
+async function queryDeviceTimeseries(deviceId: string, duration: number) {
+  const jwt = (await account.createJWT()).jwt;
+  const response = await fetch(`${endpoint}/timeseries/stores/${encodeURIComponent(projectId)}/queries`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-appwrite-project": projectId,
+      "x-appwrite-jwt": jwt,
+    },
+    body: JSON.stringify({
+      measurement: measurementForDevice(deviceId),
+      range: timeseriesRange(duration),
+      limit: 1000,
+    }),
+  });
+  const payload = await response.json() as { rows?: TimeseriesRow[]; message?: string };
+  if (!response.ok) throw new Error(payload.message || "Could not query time-series data.");
+  return payload.rows || [];
+}
+
+function timeseriesSensorSeries(rows: TimeseriesRow[], duration: number): SensorSeries[] {
   const since = Date.now() - duration;
   const pointsByField = new Map<string, SensorPoint[]>();
   for (const row of rows) {
-    if (!Number.isFinite(row.timestampMs) || row.timestampMs < since) continue;
-    for (const field of sensorSampleFields) {
-      const value = row[field];
-      if (typeof value !== "number" || !Number.isFinite(value)) continue;
-      const points = pointsByField.get(field) || [];
-      points.push({ timestamp: row.timestampMs, value });
-      pointsByField.set(field, points);
-    }
+    if (typeof row._field !== "string" || !row._field.startsWith("sensor_")) continue;
+    const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
+    const value = typeof row._value === "number" ? row._value : Number(row._value);
+    if (!Number.isFinite(timestamp) || timestamp < since || !Number.isFinite(value)) continue;
+    const points = pointsByField.get(row._field) || [];
+    points.push({ timestamp, value });
+    pointsByField.set(row._field, points);
   }
   return [...pointsByField.entries()]
     .sort(([left], [right]) => left.localeCompare(right, undefined, { numeric: true }))
@@ -80,29 +103,13 @@ function mobileSensorSeries(rows: CloudSensorSample[], duration: number): Sensor
     }));
 }
 
-function mobileSensorReadings(rows: CloudSensorSample[], duration: number): HistoryReading[] {
-  const since = Date.now() - duration;
-  return rows.filter((row) => Number.isFinite(row.timestampMs) && row.timestampMs >= since)
-    .sort((left, right) => right.timestampMs - left.timestampMs)
-    .slice(0, 10)
-    .map((row) => ({
-      timestamp: row.timestampMs,
-      channel: `sensor/${row.nodeNum}`,
-      payload: JSON.stringify({
-        nodeNum: row.nodeNum,
-        timestampMs: row.timestampMs,
-        data: Object.fromEntries(sensorSampleFields.flatMap((field) =>
-          typeof row[field] === "number" ? [[field, row[field]]] : [])),
-      }),
-    }));
-}
-
-function deviceNodeNum(device: Device) {
-  for (const value of [device.halowMac, device.serial]) {
-    const normalized = value?.replace(/[^0-9a-f]/gi, "");
-    if (normalized?.length === 12) return BigInt(`0x${normalized}`).toString();
-  }
-  return "";
+function timeseriesReadings(rows: TimeseriesRow[]): HistoryReading[] {
+  return rows.flatMap((row) => {
+    if (row._field !== "payload" || typeof row._value !== "string") return [];
+    const timestamp = typeof row._time === "string" ? Date.parse(row._time) : NaN;
+    if (!Number.isFinite(timestamp)) return [];
+    return [{ timestamp, channel: typeof row.channel === "string" ? row.channel : "telemetry", payload: row._value }];
+  }).sort((left, right) => right.timestamp - left.timestamp).slice(0, 10);
 }
 
 function errorMessage(error: unknown) {
@@ -340,7 +347,6 @@ export default function Home() {
   const [telemetry, setTelemetry] = useState<Telemetry[]>([]);
   const [topology, setTopology] = useState<TopologyLink[]>([]);
   const [otaUpdates, setOtaUpdates] = useState<OtaUpdate[]>([]);
-  const [cloudSensorSamples, setCloudSensorSamples] = useState<CloudSensorSample[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState("");
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [historyRange, setHistoryRange] = useState<HistoryRange>("1h");
@@ -425,47 +431,24 @@ export default function Home() {
   }, [profileDevices]);
 
   useEffect(() => {
-    const device = profileDevices.find((candidate) => candidate.$id === selectedDeviceId);
-    const nodeNum = device ? deviceNodeNum(device) : "";
-    if (!currentProfileId || !nodeNum) { setCloudSensorSamples([]); return; }
+    if (!selectedDeviceId) { setHistorySeries([]); setHistoryReadings([]); return; }
     let active = true;
     const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
-    setHistoryLoading(true); setHistoryError(""); setCloudSensorSamples([]);
-    const load = () => tables.listRows<CloudSensorSample>({
-      databaseId,
-      tableId: sensorSampleTableId,
-      queries: [
-        Query.equal("profileId", [currentProfileId]),
-        Query.equal("nodeNum", [nodeNum]),
-        Query.greaterThanEqual("timestampMs", Date.now() - duration),
-        Query.orderDesc("timestampMs"),
-        Query.limit(10),
-      ],
-    }).then((result) => { if (active) setCloudSensorSamples(result.rows); })
-      .catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
+    setHistoryLoading(true); setHistoryError(""); setHistorySeries([]); setHistoryReadings([]);
+    queryDeviceTimeseries(selectedDeviceId, duration).then((rows) => {
+      if (!active) return;
+      const series = timeseriesSensorSeries(rows, duration);
+      setHistorySeries(series);
+      setHistoryReadings(timeseriesReadings(rows));
+      setSelectedSensorFields((current) => {
+        const available = new Set(series.map((item) => item.field));
+        const retained = current.filter((field) => available.has(field));
+        return retained.length ? retained : series.slice(0, 3).map((item) => item.field);
+      });
+    }).catch((caught) => { if (active) setHistoryError(errorMessage(caught)); })
       .finally(() => { if (active) setHistoryLoading(false); });
-    void load();
-    const timer = window.setInterval(() => void load(), 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, [currentProfileId, historyRange, profileDevices, selectedDeviceId]);
-
-  useEffect(() => {
-    if (!selectedDeviceId) { setHistorySeries([]); setHistoryReadings([]); return; }
-    const duration = historyRanges.find((range) => range.key === historyRange)!.duration;
-    const device = profileDevices.find((candidate) => candidate.$id === selectedDeviceId);
-    const nodeNum = device ? deviceNodeNum(device) : "";
-    const rows = nodeNum ? cloudSensorSamples.filter((sample) => sample.nodeNum === nodeNum) : [];
-    const series = mobileSensorSeries(rows, duration);
-    setHistoryLoading(false);
-    setHistoryError(nodeNum ? "" : "This device has no HaLow MAC or compatible serial for mobile sensor history.");
-    setHistorySeries(series);
-    setHistoryReadings(mobileSensorReadings(rows, duration));
-    setSelectedSensorFields((current) => {
-      const available = new Set(series.map((item) => item.field));
-      const retained = current.filter((field) => available.has(field));
-      return retained.length ? retained : series.slice(0, 3).map((item) => item.field);
-    });
-  }, [cloudSensorSamples, historyRange, profileDevices, selectedDeviceId]);
+    return () => { active = false; };
+  }, [historyRange, selectedDeviceId]);
 
   async function requestOtp() {
     setBusy(true); setError("");
@@ -489,7 +472,7 @@ export default function Home() {
 
   async function signOut() {
     await account.deleteSession({ sessionId: "current" });
-    setUser(null); setDevices([]); setCloudSensorSamples([]); setProfiles([]); setCurrentProfileId(""); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false); setOtpUserId(""); setOtpCode(""); setOtpPhrase("");
+    setUser(null); setDevices([]); setProfiles([]); setCurrentProfileId(""); setTelemetry([]); setTopology([]); setOtaUpdates([]); setSelectedDeviceId(""); setMobileDetailOpen(false); setDeleteConfirm(false); setOtpUserId(""); setOtpCode(""); setOtpPhrase("");
   }
 
   async function removeSelectedDevice() {
@@ -603,7 +586,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/messages">Messages</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read device state and mobile-synced sensor history.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void (otpUserId ? verifyOtp() : requestOtp()); }}>

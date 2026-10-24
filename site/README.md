@@ -1,7 +1,7 @@
 # Next.js operator portal
 
 The Next.js client uses Appwrite email OTP sessions. It reads native status and
-topology from the Devices API and mobile-synced sensor samples from TablesDB.
+topology from the Devices API, current telemetry from TablesDB, and sensor history from Time Series.
 Appwrite permissions restrict both data paths to the signed-in user. The
 Function is not used for dashboard reads.
 The Site lists Devices but never creates them or MQTT credentials. Onboarding
@@ -9,10 +9,9 @@ is exclusively available from the React Native app over BLE.
 
 On desktop, the authenticated dashboard uses a master-detail layout with the
 device list on the left and the selected device's current reading, multi-sensor
-history chart, statistics, and recent raw mobile sensor messages on the right.
+history chart, statistics, and recent raw MQTT readings on the right.
 Sensor fields are discovered dynamically and operators can overlay any
-combination in one chart. The separate `/messages` tab groups cloud-synced text
-and attachment messages by conversation. On mobile, devices are
+combination in one chart. On mobile, devices are
 shown as app-style cards and selecting one opens a full-screen detail view.
 Both layouts require an explicit confirmation before deleting the selected
 device through the authenticated Appwrite Devices API. The detail view also
