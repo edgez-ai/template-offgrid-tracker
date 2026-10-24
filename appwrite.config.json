@@ -1,258 +1,803 @@
 {
-  "projectId": "<PROJECT_ID>",
-  "endpoint": "https://appwrite.edgez.ai/v1",
-  "authMethods": [
-    { "$id": "email-password", "name": "Email and password", "enabled": false },
-    { "$id": "magic-url", "name": "Magic URL", "enabled": false },
-    { "$id": "email-otp", "name": "Email OTP", "enabled": true },
-    { "$id": "jwt", "name": "JWT", "enabled": true },
-    { "$id": "anonymous", "name": "Anonymous sessions", "enabled": false }
-  ],
-  "platforms": [
-    {
-      "$id": "offgrid-tracker-web",
-      "name": "Offgrid Tracker web",
-      "type": "web",
-      "hostname": "{siteDomain:offgrid-tracker-site}"
-    },
-    {
-      "$id": "offgrid-tracker-local",
-      "name": "Offgrid Tracker local web",
-      "type": "web",
-      "hostname": "localhost"
-    },
-    {
-      "$id": "offgrid-tracker-android",
-      "name": "Offgrid Tracker Android",
-      "type": "android",
-      "applicationId": "biz.edgez.offgrid_tracker"
-    }
-  ],
-  "tablesDB": [
-    {
-      "$id": "offgrid-tracker",
-      "name": "Offgrid Tracker",
-      "enabled": true
-    }
-  ],
-  "timeseriesStores": [
-    {
-      "$id": "<PROJECT_ID>",
-      "name": "Offgrid Tracker telemetry",
-      "permissions": ["read(\"users\")"],
-      "enabled": true
-    }
-  ],
-  "tables": [
-    {
-      "$id": "profiles",
-      "databaseId": "offgrid-tracker",
-      "name": "Profiles",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "country", "type": "varchar", "size": 2, "required": true, "array": false },
-        { "key": "location", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "halowChannel", "type": "integer", "min": 0, "max": 255, "required": true, "array": false },
-        { "key": "meshId", "type": "varchar", "size": 32, "required": true, "array": false },
-        { "key": "meshPassphrase", "type": "varchar", "size": 63, "required": true, "array": false, "encrypt": true },
-        { "key": "teamId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "ownerId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "identityId", "type": "varchar", "size": 64, "required": false, "array": false }
-      ],
-      "indexes": [
-        { "key": "team-id", "type": "key", "attributes": ["teamId"] }
-      ]
-    },
-    {
-      "$id": "telemetry",
-      "databaseId": "offgrid-tracker",
-      "name": "Latest telemetry",
-      "permissions": [],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "profileId", "type": "varchar", "size": 36, "required": false, "array": false },
-        { "key": "halowMac", "type": "varchar", "size": 17, "required": false, "array": false },
-        { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": false, "array": false },
-        { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "channel", "type": "varchar", "size": 160, "required": true, "array": false },
-        { "key": "status", "type": "varchar", "size": 32, "required": false, "array": false },
-        { "key": "topic", "type": "varchar", "size": 320, "required": true, "array": false },
-        { "key": "payload", "type": "varchar", "size": 10000, "required": true, "array": false },
-        { "key": "location", "type": "point", "required": false, "array": false },
-        { "key": "icon", "type": "varchar", "size": 32, "required": false, "array": false },
-        { "key": "markerColor", "type": "varchar", "size": 32, "required": false, "array": false },
-        { "key": "receivedAt", "type": "varchar", "size": 40, "required": true, "array": false }
-      ],
-      "indexes": [
-        { "key": "received-at", "type": "key", "attributes": ["receivedAt"], "orders": ["DESC"] },
-        { "key": "device-id", "type": "unique", "attributes": ["deviceId"] },
-        { "key": "halow-mac", "type": "unique", "attributes": ["halowMac"] },
-        { "key": "gateway-device-id", "type": "key", "attributes": ["gatewayDeviceId"] },
-        { "key": "location-spatial", "type": "spatial", "attributes": ["location"] }
-      ]
-    },
-    {
-      "$id": "ota-updates",
-      "databaseId": "offgrid-tracker",
-      "name": "OTA updates",
-      "permissions": [],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "requestId", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "status", "type": "varchar", "size": 16, "required": true, "array": false },
-        { "key": "detail", "type": "varchar", "size": 256, "required": false, "array": false },
-        { "key": "firmwareVersion", "type": "varchar", "size": 128, "required": false, "array": false },
-        { "key": "targetFirmwareVersion", "type": "varchar", "size": 128, "required": false, "array": false },
-        { "key": "reportedAt", "type": "varchar", "size": 40, "required": true, "array": false },
-        { "key": "completedAt", "type": "varchar", "size": 40, "required": false, "array": false }
-      ],
-      "indexes": [
-        { "key": "request-id", "type": "unique", "attributes": ["requestId"] },
-        { "key": "device-reported", "type": "key", "attributes": ["deviceId", "reportedAt"], "orders": ["ASC", "DESC"] }
-      ]
-    },
-    {
-      "$id": "downlinks",
-      "databaseId": "offgrid-tracker",
-      "name": "Companion downlinks",
-      "permissions": [],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "serial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "gatewayDeviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "gatewaySerial", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "requestId", "type": "varchar", "size": 64, "required": true, "array": false },
-        { "key": "revision", "type": "integer", "required": true, "array": false, "min": 1 },
-        { "key": "status", "type": "varchar", "size": 16, "required": true, "array": false },
-        { "key": "detail", "type": "varchar", "size": 256, "required": false, "array": false },
-        { "key": "reportedAt", "type": "varchar", "size": 40, "required": true, "array": false },
-        { "key": "completedAt", "type": "varchar", "size": 40, "required": false, "array": false }
-      ],
-      "indexes": [
-        { "key": "request-id", "type": "unique", "attributes": ["requestId"] },
-        { "key": "device-reported", "type": "key", "attributes": ["deviceId", "reportedAt"], "orders": ["ASC", "DESC"] },
-        { "key": "gateway-status", "type": "key", "attributes": ["gatewayDeviceId", "status"] }
-      ]
-    },
-    {
-      "$id": "geofence-areas",
-      "databaseId": "offgrid-tracker",
-      "name": "Geofence areas",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "shape", "type": "varchar", "size": 12, "required": true, "array": false },
-        { "key": "geometry", "type": "varchar", "size": 4000, "required": true, "array": false }
-      ]
-    },
-    {
-      "$id": "geofence-rules",
-      "databaseId": "offgrid-tracker",
-      "name": "Geofence rules",
-      "permissions": ["create(\"users\")"],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "name", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "deviceIds", "type": "varchar", "size": 36, "required": false, "array": true },
-        { "key": "enterAlert", "type": "boolean", "required": true, "array": false },
-        { "key": "exitAlert", "type": "boolean", "required": true, "array": false }
-      ],
-      "indexes": [
-        { "key": "profile-id", "type": "key", "attributes": ["profileId"] }
-      ]
-    },
-    {
-      "$id": "geofence-alarms",
-      "databaseId": "offgrid-tracker",
-      "name": "Geofence alarms",
-      "permissions": [],
-      "rowSecurity": true,
-      "enabled": true,
-      "columns": [
-        { "key": "profileId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "areaId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "ruleId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "deviceId", "type": "varchar", "size": 36, "required": true, "array": false },
-        { "key": "event", "type": "varchar", "size": 8, "required": true, "array": false },
-        { "key": "active", "type": "boolean", "required": true, "array": false },
-        { "key": "acknowledged", "type": "boolean", "required": true, "array": false },
-        { "key": "lastLocation", "type": "varchar", "size": 128, "required": true, "array": false },
-        { "key": "raisedAt", "type": "varchar", "size": 40, "required": true, "array": false },
-        { "key": "clearedAt", "type": "varchar", "size": 40, "required": false, "array": false },
-        { "key": "acknowledgedAt", "type": "varchar", "size": 40, "required": false, "array": false }
-      ],
-      "indexes": [
-        { "key": "profile-active", "type": "key", "attributes": ["profileId", "active"], "orders": ["ASC", "ASC"] },
-        { "key": "rule-device-event", "type": "unique", "attributes": ["ruleId", "deviceId", "event"] }
-      ]
-    }
-  ],
-  "buckets": [],
-  "functions": [
-    {
-      "$id": "offgrid-tracker",
-      "name": "Offgrid Tracker MQTT ingest",
-      "runtime": "node-24",
-      "path": "function",
-      "entrypoint": "src/main.js",
-      "commands": "npm ci",
-      "execute": ["users"],
-      "events": ["devices.*.mqtt.message.publish", "devices.*.delete"],
-      "schedule": "",
-      "timeout": 15,
-      "enabled": true,
-      "logging": true,
-      "runtimeSpecification": "s-1vcpu-2gb",
-      "scopes": ["devices.read", "devices.write", "rows.read", "rows.write", "timeseries.write"],
-      "vars": [
-        { "key": "OFFGRID_TRACKER_DATABASE_ID", "value": "offgrid-tracker" },
-        { "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", "value": "ota-updates" },
-        { "key": "OFFGRID_TRACKER_DOWNLINK_TABLE_ID", "value": "downlinks" },
-        { "key": "OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID", "value": "geofence-areas" },
-        { "key": "OFFGRID_TRACKER_GEOFENCE_RULE_TABLE_ID", "value": "geofence-rules" },
-        { "key": "OFFGRID_TRACKER_GEOFENCE_ALARM_TABLE_ID", "value": "geofence-alarms" }
-      ]
-    }
-  ],
-  "sites": [
-    {
-      "$id": "offgrid-tracker-site",
-      "name": "Offgrid Tracker",
-      "framework": "nextjs",
-      "buildRuntime": "node-24",
-      "buildSpecification": "s-1vcpu-2gb",
-      "adapter": "static",
-      "path": "site",
-      "enabled": true,
-      "logging": true,
-      "timeout": 30,
-      "installCommand": "npm ci",
-      "buildCommand": "npm run build",
-      "outputDirectory": "out",
-      "fallbackFile": "index.html",
-      "vars": [
-        { "key": "OFFGRID_TRACKER_ENDPOINT", "value": "https://appwrite.edgez.ai/v1" },
-        { "key": "OFFGRID_TRACKER_DATABASE_ID", "value": "offgrid-tracker" },
-        { "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID", "value": "telemetry" },
-        { "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID", "value": "ota-updates" }
-      ]
-    }
-  ]
+    "projectId": "tracker",
+    "endpoint": "https://appwrite.edgez.ai/v1",
+    "functions": [
+        {
+            "$id": "offgrid-tracker",
+            "name": "Offgrid Tracker MQTT ingest",
+            "runtime": "node-24",
+            "path": "function",
+            "entrypoint": "src/main.js",
+            "commands": "npm ci",
+            "execute": [
+                "users"
+            ],
+            "events": [
+                "devices.*.mqtt.message.publish",
+                "devices.*.delete"
+            ],
+            "schedule": "",
+            "timeout": 15,
+            "enabled": true,
+            "logging": true,
+            "runtimeSpecification": "s-1vcpu-2gb",
+            "scopes": [
+                "devices.read",
+                "devices.write",
+                "rows.read",
+                "rows.write",
+                "timeseries.write"
+            ],
+            "vars": [
+                {
+                    "key": "OFFGRID_TRACKER_DATABASE_ID",
+                    "value": "offgrid-tracker"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID",
+                    "value": "telemetry"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID",
+                    "value": "ota-updates"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_DOWNLINK_TABLE_ID",
+                    "value": "downlinks"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID",
+                    "value": "geofence-areas"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_GEOFENCE_RULE_TABLE_ID",
+                    "value": "geofence-rules"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_GEOFENCE_ALARM_TABLE_ID",
+                    "value": "geofence-alarms"
+                }
+            ]
+        }
+    ],
+    "sites": [
+        {
+            "$id": "offgrid-tracker-site",
+            "name": "Offgrid Tracker",
+            "framework": "nextjs",
+            "buildRuntime": "node-24",
+            "buildSpecification": "s-1vcpu-2gb",
+            "adapter": "static",
+            "path": "site",
+            "enabled": true,
+            "logging": true,
+            "timeout": 30,
+            "installCommand": "npm ci",
+            "buildCommand": "npm run build",
+            "outputDirectory": "out",
+            "fallbackFile": "index.html",
+            "vars": [
+                {
+                    "key": "OFFGRID_TRACKER_ENDPOINT",
+                    "value": "https://appwrite.edgez.ai/v1"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_DATABASE_ID",
+                    "value": "offgrid-tracker"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_TELEMETRY_TABLE_ID",
+                    "value": "telemetry"
+                },
+                {
+                    "key": "OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID",
+                    "value": "ota-updates"
+                }
+            ]
+        }
+    ],
+    "tablesDB": [
+        {
+            "$id": "offgrid-tracker",
+            "name": "Offgrid Tracker",
+            "enabled": true
+        }
+    ],
+    "tables": [
+        {
+            "$id": "profiles",
+            "databaseId": "offgrid-tracker",
+            "name": "Profiles",
+            "permissions": [
+                "create(\"users\")"
+            ],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "name",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "country",
+                    "type": "varchar",
+                    "size": 2,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "location",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "halowChannel",
+                    "type": "integer",
+                    "min": 0,
+                    "max": 255,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "meshId",
+                    "type": "varchar",
+                    "size": 32,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "meshPassphrase",
+                    "type": "varchar",
+                    "size": 63,
+                    "required": true,
+                    "array": false,
+                    "encrypt": true
+                },
+                {
+                    "key": "teamId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "ownerId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "identityId",
+                    "type": "varchar",
+                    "size": 64,
+                    "required": false,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "team-id",
+                    "type": "key",
+                    "attributes": [
+                        "teamId"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "telemetry",
+            "databaseId": "offgrid-tracker",
+            "name": "Latest telemetry",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "deviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "profileId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "halowMac",
+                    "type": "varchar",
+                    "size": 17,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "gatewayDeviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "serial",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "channel",
+                    "type": "varchar",
+                    "size": 160,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "status",
+                    "type": "varchar",
+                    "size": 32,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "topic",
+                    "type": "varchar",
+                    "size": 320,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "payload",
+                    "type": "varchar",
+                    "size": 10000,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "location",
+                    "type": "point",
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "icon",
+                    "type": "varchar",
+                    "size": 32,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "markerColor",
+                    "type": "varchar",
+                    "size": 32,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "receivedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": true,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "received-at",
+                    "type": "key",
+                    "attributes": [
+                        "receivedAt"
+                    ],
+                    "orders": [
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "device-id",
+                    "type": "unique",
+                    "attributes": [
+                        "deviceId"
+                    ]
+                },
+                {
+                    "key": "halow-mac",
+                    "type": "unique",
+                    "attributes": [
+                        "halowMac"
+                    ]
+                },
+                {
+                    "key": "gateway-device-id",
+                    "type": "key",
+                    "attributes": [
+                        "gatewayDeviceId"
+                    ]
+                },
+                {
+                    "key": "location-spatial",
+                    "type": "spatial",
+                    "attributes": [
+                        "location"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "ota-updates",
+            "databaseId": "offgrid-tracker",
+            "name": "OTA updates",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "deviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "serial",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "requestId",
+                    "type": "varchar",
+                    "size": 64,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "status",
+                    "type": "varchar",
+                    "size": 16,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "detail",
+                    "type": "varchar",
+                    "size": 256,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "firmwareVersion",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "targetFirmwareVersion",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "reportedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "completedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": false,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "request-id",
+                    "type": "unique",
+                    "attributes": [
+                        "requestId"
+                    ]
+                },
+                {
+                    "key": "device-reported",
+                    "type": "key",
+                    "attributes": [
+                        "deviceId",
+                        "reportedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "downlinks",
+            "databaseId": "offgrid-tracker",
+            "name": "Companion downlinks",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "deviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "serial",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "gatewayDeviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "gatewaySerial",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "requestId",
+                    "type": "varchar",
+                    "size": 64,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "revision",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "min": 1
+                },
+                {
+                    "key": "status",
+                    "type": "varchar",
+                    "size": 16,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "detail",
+                    "type": "varchar",
+                    "size": 256,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "reportedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "completedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": false,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "request-id",
+                    "type": "unique",
+                    "attributes": [
+                        "requestId"
+                    ]
+                },
+                {
+                    "key": "device-reported",
+                    "type": "key",
+                    "attributes": [
+                        "deviceId",
+                        "reportedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "gateway-status",
+                    "type": "key",
+                    "attributes": [
+                        "gatewayDeviceId",
+                        "status"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "geofence-areas",
+            "databaseId": "offgrid-tracker",
+            "name": "Geofence areas",
+            "permissions": [
+                "create(\"users\")"
+            ],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "profileId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "name",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "shape",
+                    "type": "varchar",
+                    "size": 12,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "geometry",
+                    "type": "varchar",
+                    "size": 4000,
+                    "required": true,
+                    "array": false
+                }
+            ]
+        },
+        {
+            "$id": "geofence-rules",
+            "databaseId": "offgrid-tracker",
+            "name": "Geofence rules",
+            "permissions": [
+                "create(\"users\")"
+            ],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "profileId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "name",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "areaId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "deviceIds",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": false,
+                    "array": true
+                },
+                {
+                    "key": "enterAlert",
+                    "type": "boolean",
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "exitAlert",
+                    "type": "boolean",
+                    "required": true,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "profile-id",
+                    "type": "key",
+                    "attributes": [
+                        "profileId"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "geofence-alarms",
+            "databaseId": "offgrid-tracker",
+            "name": "Geofence alarms",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "profileId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "areaId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "ruleId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "deviceId",
+                    "type": "varchar",
+                    "size": 36,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "event",
+                    "type": "varchar",
+                    "size": 8,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "active",
+                    "type": "boolean",
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "acknowledged",
+                    "type": "boolean",
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "lastLocation",
+                    "type": "varchar",
+                    "size": 128,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "raisedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": true,
+                    "array": false
+                },
+                {
+                    "key": "clearedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": false,
+                    "array": false
+                },
+                {
+                    "key": "acknowledgedAt",
+                    "type": "varchar",
+                    "size": 40,
+                    "required": false,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "profile-active",
+                    "type": "key",
+                    "attributes": [
+                        "profileId",
+                        "active"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC"
+                    ]
+                },
+                {
+                    "key": "rule-device-event",
+                    "type": "unique",
+                    "attributes": [
+                        "ruleId",
+                        "deviceId",
+                        "event"
+                    ]
+                }
+            ]
+        }
+    ],
+    "authMethods": [
+        {
+            "$id": "email-password",
+            "name": "Email and password",
+            "enabled": false
+        },
+        {
+            "$id": "magic-url",
+            "name": "Magic URL",
+            "enabled": false
+        },
+        {
+            "$id": "email-otp",
+            "name": "Email OTP",
+            "enabled": true
+        },
+        {
+            "$id": "jwt",
+            "name": "JWT",
+            "enabled": true
+        },
+        {
+            "$id": "anonymous",
+            "name": "Anonymous sessions",
+            "enabled": false
+        }
+    ],
+    "platforms": [
+        {
+            "$id": "offgrid-tracker-web",
+            "name": "Offgrid Tracker web",
+            "type": "web",
+            "hostname": "{siteDomain:offgrid-tracker-site}"
+        },
+        {
+            "$id": "offgrid-tracker-local",
+            "name": "Offgrid Tracker local web",
+            "type": "web",
+            "hostname": "localhost"
+        },
+        {
+            "$id": "offgrid-tracker-android",
+            "name": "Offgrid Tracker Android",
+            "type": "android",
+            "applicationId": "biz.edgez.offgrid_tracker"
+        }
+    ],
+    "timeseriesStores": [
+        {
+            "$id": "<PROJECT_ID>",
+            "name": "Offgrid Tracker telemetry",
+            "permissions": [
+                "read(\"users\")"
+            ],
+            "enabled": true
+        }
+    ]
 }
