@@ -68,6 +68,7 @@ type NativeDevice = {
       requestPayload?: string;
       firstSeenAt?: string;
       lastSeenAt?: string;
+      acceptedAt?: string;
     };
   };
 };
@@ -237,7 +238,7 @@ function cloudDiscoveredDevices(
   const byId = new Map(devices.map((device) => [device.$id, device]));
   const requests: StoredProvisioningRequest[] = [];
   for (const device of devices) {
-    if (device.status !== "discovered" || device.enabled || !device.gatewayDeviceId) continue;
+    if (device.status !== "discovered" || !device.gatewayDeviceId) continue;
     const gateway = byId.get(device.gatewayDeviceId);
     if (!gateway) continue;
     const profilePermission = `team:${profileId}`;
@@ -258,16 +259,29 @@ function cloudDiscoveredDevices(
     requests.push({
       ...parsed,
       id: device.$id,
-      status: "pending",
+      status: device.enabled ? "accepted" : "pending",
       firstSeenAt: discovery.firstSeenAt || parsed.lastSeenAt,
       lastSeenAt: discovery.lastSeenAt || parsed.lastSeenAt,
-      acceptedAt: "",
+      acceptedAt: discovery.acceptedAt || "",
       transport: "mqtt",
       cloudDeviceId: device.$id,
       gatewayNodeNum,
     });
   }
   return requests;
+}
+
+function cloudDeviceBelongsToProfile(
+  profileId: string,
+  device: NativeDevice,
+  byId: ReadonlyMap<string, NativeDevice>,
+): boolean {
+  const gateway = device.gatewayDeviceId ? byId.get(device.gatewayDeviceId) : device;
+  const profilePermission = `team:${profileId}`;
+  return device.metadata?.profileId === profileId ||
+    gateway?.metadata?.profileId === profileId ||
+    [...device.$permissions ?? [], ...gateway?.$permissions ?? []]
+      .some((permission) => permission.includes(profilePermission));
 }
 
 /** Publish an encrypted acceptance through the gateway's system MQTT topic. */
@@ -405,8 +419,9 @@ export async function listCloudOnlineData(profileId: string): Promise<CloudOnlin
     }),
   ]);
   const nativeDevices = deviceResult.devices ?? [];
+  const devicesById = new Map(nativeDevices.map((device) => [device.$id, device]));
   const devices = nativeDevices
-    .filter((device) => device.metadata?.profileId === profileId && device.status !== "discovered")
+    .filter((device) => device.status !== "discovered" && cloudDeviceBelongsToProfile(profileId, device, devicesById))
     .map((device) => storedDeviceFromCloud(profileId, device));
   return {
     devices,
