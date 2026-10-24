@@ -180,6 +180,7 @@ typedef struct _ai_edgez_halow_Beacon {
     ai_edgez_halow_GeoFence geo_fence;
     pb_size_t sensor_data_count;
     ai_edgez_halow_SensorData sensor_data[9]; /* only for beacon and sensor type */
+    uint32_t downlink_ack_id; /* last durable downlink processed by the sensor */
 } ai_edgez_halow_Beacon;
 
 typedef struct _ai_edgez_halow_HaLowInterfaceStatus {
@@ -366,7 +367,7 @@ extern "C" {
 #define ai_edgez_halow_GeoFence_init_default     {0, 0, "", _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_AlertCondition_MIN, 0}
 #define ai_edgez_halow_SensorData_init_default   {_ai_edgez_halow_SensorType_MIN, 0, {0}}
 #define ai_edgez_halow_Peer_init_default         {0, 0, 0, {ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default}}
-#define ai_edgez_halow_Beacon_init_default       {0, 0, "", {0, {0}}, 0, 0, _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_DeviceType_MIN, 0, 0, "", false, ai_edgez_halow_GeoFence_init_default, 0, {ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default}}
+#define ai_edgez_halow_Beacon_init_default       {0, 0, "", {0, {0}}, 0, 0, _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_DeviceType_MIN, 0, 0, "", false, ai_edgez_halow_GeoFence_init_default, 0, {ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default, ai_edgez_halow_SensorData_init_default}, 0}
 #define ai_edgez_halow_HaLowInterfaceStatus_init_default {0, 0, 0, 0, 0, 0, 0, "", "", "", 0, _ai_edgez_halow_LicenseStatus_MIN, ""}
 #define ai_edgez_halow_HaLowInitConfig_init_default {"", "", "", 0, 0, 0, "", {0, {0}}, "", 0, 0, 0, 0, 0, 0, ""}
 #define ai_edgez_halow_DeviceSettings_init_default {_ai_edgez_halow_DeviceSettingsAction_MIN, 0, "", 0, "", _ai_edgez_halow_MarkerColor_MIN, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, false, ai_edgez_halow_GeoFence_init_default, "", "", 0, "", "", "", 0, _ai_edgez_halow_DeviceType_MIN, 0, 0, 0, 0, ""}
@@ -377,7 +378,7 @@ extern "C" {
 #define ai_edgez_halow_GeoFence_init_zero        {0, 0, "", _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_AlertCondition_MIN, 0}
 #define ai_edgez_halow_SensorData_init_zero      {_ai_edgez_halow_SensorType_MIN, 0, {0}}
 #define ai_edgez_halow_Peer_init_zero            {0, 0, 0, {ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero}}
-#define ai_edgez_halow_Beacon_init_zero          {0, 0, "", {0, {0}}, 0, 0, _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_DeviceType_MIN, 0, 0, "", false, ai_edgez_halow_GeoFence_init_zero, 0, {ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero}}
+#define ai_edgez_halow_Beacon_init_zero          {0, 0, "", {0, {0}}, 0, 0, _ai_edgez_halow_MarkerColor_MIN, _ai_edgez_halow_DeviceType_MIN, 0, 0, "", false, ai_edgez_halow_GeoFence_init_zero, 0, {ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero, ai_edgez_halow_SensorData_init_zero}, 0}
 #define ai_edgez_halow_HaLowInterfaceStatus_init_zero {0, 0, 0, 0, 0, 0, 0, "", "", "", 0, _ai_edgez_halow_LicenseStatus_MIN, ""}
 #define ai_edgez_halow_HaLowInitConfig_init_zero {"", "", "", 0, 0, 0, "", {0, {0}}, "", 0, 0, 0, 0, 0, 0, ""}
 #define ai_edgez_halow_DeviceSettings_init_zero  {_ai_edgez_halow_DeviceSettingsAction_MIN, 0, "", 0, "", _ai_edgez_halow_MarkerColor_MIN, 0, 0, 0, {0, {0}}, {0, {0}}, 0, 0, 0, false, ai_edgez_halow_GeoFence_init_zero, "", "", 0, "", "", "", 0, _ai_edgez_halow_DeviceType_MIN, 0, 0, 0, 0, ""}
@@ -418,6 +419,7 @@ extern "C" {
 #define ai_edgez_halow_Beacon_icon_style_tag     11
 #define ai_edgez_halow_Beacon_geo_fence_tag      100
 #define ai_edgez_halow_Beacon_sensor_data_tag    101
+#define ai_edgez_halow_Beacon_downlink_ack_id_tag 102
 #define ai_edgez_halow_HaLowInterfaceStatus_supported_tag 1
 #define ai_edgez_halow_HaLowInterfaceStatus_stack_initialized_tag 2
 #define ai_edgez_halow_HaLowInterfaceStatus_mesh_mode_tag 3
@@ -580,7 +582,8 @@ X(a, STATIC,   SINGULAR, UINT32,   channel_number,    9) \
 X(a, STATIC,   SINGULAR, BOOL,     sleeping,         10) \
 X(a, STATIC,   SINGULAR, STRING,   icon_style,       11) \
 X(a, STATIC,   OPTIONAL, MESSAGE,  geo_fence,       100) \
-X(a, STATIC,   REPEATED, MESSAGE,  sensor_data,     101)
+X(a, STATIC,   REPEATED, MESSAGE,  sensor_data,     101) \
+X(a, STATIC,   SINGULAR, UINT32,   downlink_ack_id, 102)
 #define ai_edgez_halow_Beacon_CALLBACK NULL
 #define ai_edgez_halow_Beacon_DEFAULT NULL
 #define ai_edgez_halow_Beacon_geo_fence_MSGTYPE ai_edgez_halow_GeoFence
@@ -699,13 +702,13 @@ extern const pb_msgdesc_t ai_edgez_halow_ScriptConfig_msg;
 
 /* Maximum encoded size of messages (where known) */
 #define AI_EDGEZ_HALOW_USB_CONTROL_PB_H_MAX_SIZE ai_edgez_halow_NetworkPacket_size
-#define ai_edgez_halow_Beacon_size               363
+#define ai_edgez_halow_Beacon_size               369
 #define ai_edgez_halow_DeviceSettings_size       620
 #define ai_edgez_halow_GeoFence_size             98
 #define ai_edgez_halow_HaLowInitConfig_size      296
 #define ai_edgez_halow_HaLowInterfaceStatus_size 133
 #define ai_edgez_halow_MessageBody_size          475
-#define ai_edgez_halow_NetworkPacket_size        720
+#define ai_edgez_halow_NetworkPacket_size        684
 #define ai_edgez_halow_Peer_size                 107
 #define ai_edgez_halow_Report_size               654
 #define ai_edgez_halow_ScriptConfig_size         425

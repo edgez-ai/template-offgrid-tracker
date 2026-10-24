@@ -182,6 +182,7 @@ message Beacon {
   string icon_style = 11;
   GeoFence geo_fence = 100;
   repeated SensorData sensor_data = 101;  // only for beacon and sensor type
+  uint32 downlink_ack_id = 102;  // last durable downlink processed by the sensor
 }
 
 

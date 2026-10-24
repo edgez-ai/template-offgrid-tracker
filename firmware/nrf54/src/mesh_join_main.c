@@ -16,6 +16,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
+#include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
 #include <zephyr/sys/reboot.h>
 #include <helpers/nrfx_ram_ctrl.h>
@@ -44,6 +45,10 @@
 #include "edgez_reboot.h"
 #include "livestocking_config.h"
 #include "usb_control.pb.h"
+
+#ifndef EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING
+#define EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING 0x01U
+#endif
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 #include "mmhal_wlan.h"
@@ -82,6 +87,8 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_PROVISIONING_ACK_TIMEOUT_MS 100U
 #define EDGEZ_SENSOR_PROVISIONING_WINDOW_MS 200U
 #define EDGEZ_SENSOR_UPDATE_INTERVAL_MS 15000U
+#define EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH 12U
+#define EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY "edgez/downlink_ack/v1"
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
 #define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
@@ -122,6 +129,8 @@ static bool mesh_services_initialized;
 static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
+static bool sensor_pawr_downlink_pending;
+static uint32_t sensor_downlink_ack_id;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 static struct edgez_pawr_bulk_sender sensor_bulk_sender;
 static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
@@ -151,6 +160,78 @@ static uint64_t mac_to_u64(const uint8_t mac[6])
 		value = (value << 8U) | mac[i];
 	}
 	return value;
+}
+
+__attribute__((weak)) int edgez_sensor_handle_downlink(
+	const char *command, const uint8_t *payload, size_t payload_length)
+{
+	LOG_INF("downlink command=%s bytes=%u", command, (unsigned)payload_length);
+	ARG_UNUSED(payload);
+	return 0;
+}
+
+static uint16_t sensor_downlink_le16(const uint8_t *value)
+{
+	return (uint16_t)value[0] | (uint16_t)value[1] << 8;
+}
+
+static uint32_t sensor_downlink_le32(const uint8_t *value)
+{
+	return (uint32_t)value[0] | (uint32_t)value[1] << 8 |
+	       (uint32_t)value[2] << 16 | (uint32_t)value[3] << 24;
+}
+
+static int sensor_downlink_save_ack(uint32_t message_id)
+{
+	int rc = settings_save_one(EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY,
+				   &message_id, sizeof(message_id));
+
+	if (rc == 0) {
+		sensor_downlink_ack_id = message_id;
+		edgez_config_set_downlink_ack_id(message_id);
+	}
+	return rc;
+}
+
+static void sensor_downlink_load_ack(void)
+{
+	uint32_t message_id = 0U;
+	ssize_t length = settings_load_one(EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY,
+					   &message_id, sizeof(message_id));
+
+	if (length == sizeof(message_id))
+		sensor_downlink_ack_id = message_id;
+	edgez_config_set_downlink_ack_id(sensor_downlink_ack_id);
+}
+
+static bool sensor_apply_downlink(const uint8_t *payload, size_t length)
+{
+	char command[256];
+	uint8_t command_length;
+	uint16_t body_length;
+	uint32_t message_id;
+
+	if (!payload || length < EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH ||
+	    memcmp(payload, "EZDL", 4U) != 0 || payload[4] != 1U)
+		return false;
+	command_length = payload[5];
+	body_length = sensor_downlink_le16(payload + 6U);
+	message_id = sensor_downlink_le32(payload + 8U);
+	if (command_length == 0U || message_id == 0U ||
+	    EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH + (size_t)command_length +
+		body_length != length)
+		return false;
+	if (message_id == sensor_downlink_ack_id)
+		return true;
+	memcpy(command, payload + EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH,
+	       command_length);
+	command[command_length] = '\0';
+	if (edgez_sensor_handle_downlink(command,
+		payload + EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH + command_length,
+		body_length) != 0 || sensor_downlink_save_ack(message_id) != 0)
+		return false;
+	LOG_INF("durably accepted downlink id=%u command=%s", message_id, command);
+	return true;
 }
 
 static int acknowledge_pawr_beacon(const struct edgez_pawr_action_view *action,
@@ -472,6 +553,11 @@ static int join_ignore_unsupported(void *ctx,
 			return EDGEZ_UMAC_OK;
 		}
 		if (request.type == EDGEZ_PAWR_REQUEST_MESH_PACKET) {
+			if (IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR) &&
+			    sensor_apply_downlink(request.payload,
+						 request.payload_length)) {
+				return EDGEZ_UMAC_OK;
+			}
 			(void)edgez_nrf_mesh_receive_pawr(
 				request.payload, request.payload_length, action.source);
 			return EDGEZ_UMAC_OK;
@@ -520,6 +606,8 @@ static int join_ignore_unsupported(void *ctx,
 
 		if (matched) {
 			sensor_pawr_waiting = false;
+			sensor_pawr_downlink_pending =
+				(action.payload[7] & EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING) != 0U;
 		}
 		k_spin_unlock(&sensor_pawr_lock, key);
 		if (matched) {
@@ -958,6 +1046,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
 	sensor_pawr_expected_hash = hash;
 	sensor_pawr_waiting = true;
+	sensor_pawr_downlink_pending = false;
 	k_spin_unlock(&sensor_pawr_lock, key);
 	rc = edgez_umac_transmit(&mesh_runtime.umac, &request);
 	if (rc != EDGEZ_UMAC_OK) {
@@ -979,7 +1068,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		 * request.  A cached encrypted profile is returned in a separate PAwR
 		 * mesh-packet action frame, so an unprovisioned sensor must keep RX up
 		 * briefly after the ACK instead of cutting the HaLow rail immediately. */
-		if (provisioning) {
+		if (provisioning || sensor_pawr_downlink_pending) {
 			k_msleep(EDGEZ_SENSOR_PROVISIONING_WINDOW_MS);
 		}
 		return 0;
@@ -2277,6 +2366,9 @@ int main(void)
 		LOG_INF("IMU initialized for low-power sensor sampling");
 	}
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
+	if (sensor_role) {
+		sensor_downlink_load_ack();
+	}
 	livestock_config_init();
 	if (!sensor_role && edgez_ble_start() != 0) {
 		LOG_ERR("BLE control service failed to start");

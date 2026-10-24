@@ -72,6 +72,7 @@ static uint8_t halow_mac[6];
 static int64_t runtime_start_not_before_ms;
 static atomic_t halow_beacon_build_count;
 static atomic_t halow_beacon_last_ies_len;
+static atomic_t downlink_ack_id;
 static uint8_t beacon_vendor_ies[EDGEZ_VENDOR_IES_MAX_LEN];
 static size_t beacon_vendor_ies_len;
 volatile uint32_t edgez_config_provisioning_stage;
@@ -1308,6 +1309,7 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 	       snapshot.user_public_key.size);
 	beacon.marker = snapshot.marker;
 	beacon.device_type = snapshot.device_type;
+	beacon.downlink_ack_id = (uint32_t)atomic_get(&downlink_ack_id);
 	copy_string(beacon.icon_style, sizeof(beacon.icon_style), snapshot.icon_style);
 	/* Match edge-device-esp32-internal management beacon encoding exactly:
 	 * location is SensorData and is reserved before the sampled IMU entries.
@@ -1429,6 +1431,11 @@ int edgez_config_build_vendor_ies(uint8_t *out, size_t out_cap,
 		(unsigned long long)beacon.user_id_high,
 		(unsigned long long)beacon.user_id_low);
 	return 0;
+}
+
+void edgez_config_set_downlink_ack_id(uint32_t message_id)
+{
+	atomic_set(&downlink_ack_id, (atomic_val_t)message_id);
 }
 
 int edgez_config_copy_halow_beacon(uint8_t *out, size_t out_cap,

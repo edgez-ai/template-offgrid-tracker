@@ -39,6 +39,7 @@ int edgez_config_copy_halow_beacon(uint8_t *out, size_t out_cap,
 				   size_t *out_len);
 bool edgez_config_is_complete(void);
 bool edgez_config_should_autostart(void);
+void edgez_config_set_downlink_ack_id(uint32_t message_id);
 
 int edgez_config_handle_packet(const uint8_t *payload, size_t payload_len,
 			       uint8_t *response, size_t response_cap,

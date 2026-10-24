@@ -23,6 +23,10 @@
 #include "psa/crypto.h"
 #include "usb_control.pb.h"
 
+#ifndef EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING
+#define EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING 0x01U
+#endif
+
 #define SENSOR_PROFILE_MAGIC UINT32_C(0x455a5331)
 #define SENSOR_PROFILE_VERSION 1U
 #define SENSOR_PACKET_MAX 512U
@@ -33,6 +37,8 @@
 #define SENSOR_ATTEMPTS 1U
 #define SENSOR_NVS_NAMESPACE "edgez_sensor"
 #define SENSOR_NVS_PROFILE_KEY "profile_v1"
+#define SENSOR_NVS_DOWNLINK_ACK_KEY "dl_ack_v1"
+#define DOWNLINK_HEADER_LENGTH 12U
 #define PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define PROVISIONING_NONCE_LEN 12U
 #define PROVISIONING_TAG_LEN 16U
@@ -84,6 +90,17 @@ static uint32_t request_id;
 static bool waiting_for_response;
 static bool radio_running;
 static uint8_t active_bandwidth_mhz = 1U;
+static bool response_downlink_pending;
+static uint32_t downlink_ack_id;
+
+__attribute__((weak)) esp_err_t edgez_sensor_handle_downlink(
+    const char *command, const uint8_t *payload, size_t payload_length)
+{
+    ESP_LOGI(TAG, "downlink command=%s bytes=%u", command,
+             (unsigned)payload_length);
+    (void)payload;
+    return ESP_OK;
+}
 
 static uint32_t ieee_crc32(const void *data, size_t length)
 {
@@ -158,6 +175,36 @@ static esp_err_t save_profile(sensor_profile_t *candidate)
     if (err == ESP_OK) err = nvs_commit(handle);
     if (handle != 0) nvs_close(handle);
     if (err == ESP_OK) profile = *candidate;
+    return err;
+}
+
+static void load_downlink_ack(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(SENSOR_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        (void)nvs_get_u32(handle, SENSOR_NVS_DOWNLINK_ACK_KEY,
+                          &downlink_ack_id);
+        nvs_close(handle);
+    }
+}
+
+static esp_err_t save_downlink_ack(uint32_t message_id)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = message_id == 0U
+            ? nvs_erase_key(handle, SENSOR_NVS_DOWNLINK_ACK_KEY)
+            : nvs_set_u32(handle, SENSOR_NVS_DOWNLINK_ACK_KEY, message_id);
+    }
+    if (handle != 0 && (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND)) {
+        err = nvs_commit(handle);
+    }
+    if (handle != 0) nvs_close(handle);
+    if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
+        downlink_ack_id = message_id;
+        return ESP_OK;
+    }
     return err;
 }
 
@@ -252,6 +299,7 @@ static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length)
         beacon.latitude = profile.latitude;
         beacon.longitude = profile.longitude;
     }
+    beacon.downlink_ack_id = downlink_ack_id;
     pb_ostream_t stream = pb_ostream_from_buffer(output, capacity);
     if (!pb_encode(&stream, ai_edgez_halow_Beacon_fields, &beacon)) {
         return ESP_ERR_INVALID_SIZE;
@@ -491,6 +539,8 @@ static void receive_frame(void *ctx, const struct edgez_umac_rx_frame *radio)
                                    &hash, &compressed_ssid) &&
         waiting_for_response && hash == expected_hash &&
         compressed_ssid == active_compressed_ssid) {
+        response_downlink_pending =
+            (action.payload[7] & EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING) != 0U;
         waiting_for_response = false;
         xSemaphoreGive(response_sem);
         return;
@@ -627,6 +677,7 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
     };
     xSemaphoreTake(response_sem, 0);
     expected_hash = hash;
+    response_downlink_pending = false;
     waiting_for_response = true;
     if (edgez_umac_transmit(&sensor_umac, &request) != EDGEZ_UMAC_OK) {
         waiting_for_response = false;
@@ -638,6 +689,65 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;
+}
+
+static uint16_t downlink_read_le16(const uint8_t *value)
+{
+    return (uint16_t)value[0] | (uint16_t)value[1] << 8;
+}
+
+static uint32_t downlink_read_le32(const uint8_t *value)
+{
+    return (uint32_t)value[0] | (uint32_t)value[1] << 8 |
+        (uint32_t)value[2] << 16 | (uint32_t)value[3] << 24;
+}
+
+static bool apply_downlink(const uint8_t *payload, size_t length)
+{
+    char command[256];
+    uint8_t command_length;
+    uint16_t body_length;
+    uint32_t message_id;
+
+    if (length < DOWNLINK_HEADER_LENGTH || memcmp(payload, "EZDL", 4U) != 0 ||
+        payload[4] != 1U)
+        return false;
+    command_length = payload[5];
+    body_length = downlink_read_le16(payload + 6U);
+    message_id = downlink_read_le32(payload + 8U);
+    if (command_length == 0U || message_id == 0U ||
+        DOWNLINK_HEADER_LENGTH + (size_t)command_length + body_length != length)
+        return false;
+    if (message_id == downlink_ack_id)
+        return true;
+    memcpy(command, payload + DOWNLINK_HEADER_LENGTH, command_length);
+    command[command_length] = '\0';
+    if (edgez_sensor_handle_downlink(command,
+            payload + DOWNLINK_HEADER_LENGTH + command_length,
+            body_length) != ESP_OK)
+        return false;
+    if (save_downlink_ack(message_id) != ESP_OK)
+        return false;
+    ESP_LOGI(TAG, "durably accepted downlink id=%lu command=%s",
+             (unsigned long)message_id, command);
+    return true;
+}
+
+static bool receive_downlink(void)
+{
+    acceptance_item_t item;
+    const TickType_t deadline = xTaskGetTickCount() +
+        pdMS_TO_TICKS(SENSOR_ACCEPT_WINDOW_MS);
+
+    do {
+        const TickType_t now = xTaskGetTickCount();
+        const TickType_t remaining = deadline > now ? deadline - now : 0;
+        if (xQueueReceive(acceptance_queue, &item, remaining) != pdTRUE)
+            break;
+        if (apply_downlink(item.payload, item.length))
+            return true;
+    } while (xTaskGetTickCount() < deadline);
+    return false;
 }
 
 static bool try_acceptance(void)
@@ -689,6 +799,10 @@ static void sensor_task(void *arg)
         if (err == ESP_OK) {
             err = send_request(payload, payload_length, interval_ms);
         }
+		if (err == ESP_OK && response_downlink_pending &&
+		    !receive_downlink()) {
+			ESP_LOGW(TAG, "gateway advertised a downlink but none was received");
+		}
         ESP_LOGI(TAG, "Beacon PAwR request %s bytes=%u",
                  err == ESP_OK ? "acknowledged" : "unacknowledged",
                  (unsigned)payload_length);
@@ -765,6 +879,7 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+    load_downlink_ack();
     ESP_ERROR_CHECK(edgez_esp_factory_data_init());
     ESP_ERROR_CHECK(edgez_esp_factory_data_get(&factory_identity));
     ESP_ERROR_CHECK(edgez_rf_platform_init() == 0 ? ESP_OK : ESP_FAIL);
