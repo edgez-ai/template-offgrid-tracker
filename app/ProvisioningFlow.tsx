@@ -7,9 +7,11 @@ import React, { useState } from "react";
 import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { styles } from "./app-styles";
+import { prepareDeviceCredential } from "./cloud-auth";
+import type { PreparedDeviceCredential } from "./cloud-auth";
 import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
-import { profileDeviceUuid, saveProfileDevice } from "./profile-store";
+import { saveProfileDevice } from "./profile-store";
 import type { StoredProfile } from "./profile-store";
 
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
@@ -76,6 +78,7 @@ export function ProvisioningFlow({
   const [selectedDevice, setSelectedDevice] = useState<EdgezProvisioningDevice | null>(null);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [preparedCredential, setPreparedCredential] = useState<PreparedDeviceCredential | null>(null);
   const [status, setStatus] = useState("Start by scanning for a device in provisioning mode.");
   const [error, setError] = useState("");
   const [name, setName] = useState("");
@@ -104,6 +107,7 @@ export function ProvisioningFlow({
     try {
       await disconnect();
       setSelectedDevice(null);
+      setPreparedCredential(null);
       const result = await provisioningManager.scan({ esp32BlePrefix: "EZ_" });
       setDevices(result.devices);
       setStatus(result.devices.length
@@ -120,6 +124,7 @@ export function ProvisioningFlow({
   const selectDevice = (device: EdgezProvisioningDevice) => {
     if (selectedDevice) void provisioningManager.disconnect(selectedDevice);
     setSelectedDevice(device);
+    setPreparedCredential(null);
     setConnected(false);
     setName(device.requiresDeviceName ? device.serial : "");
     setProofOfPossession(provisioningPop);
@@ -175,6 +180,21 @@ export function ProvisioningFlow({
       ? `Connecting to ${selectedDevice.name} directly…`
       : `Connecting to ${selectedDevice.name} over Bluetooth…`);
     try {
+      let credential = preparedCredential;
+      if (selectedDevice.kind === "h7608" && !credential) {
+        setStatus("Creating the cloud device and MQTT credential…");
+        credential = await prepareDeviceCredential(
+          profile.id,
+          selectedDevice.serial,
+          name.trim() || selectedDevice.serial,
+          selectedDevice.firmwareTarget,
+          true,
+        );
+        setPreparedCredential(credential);
+      }
+      setStatus(selectedDevice.transport === "softap"
+        ? `Connecting to ${selectedDevice.name} directly…`
+        : `Connecting to ${selectedDevice.name} over Bluetooth…`);
       await provisioningManager.connect(
         selectedDevice,
         selectedDevice.requiresProofOfPossession ? proofOfPossession.trim() : undefined,
@@ -204,9 +224,21 @@ export function ProvisioningFlow({
     setError("");
     setStatus("Saving the local HaLow configuration…");
     try {
-      const deviceId = await profileDeviceUuid(profile.id, selectedDevice.serial);
+      const credential = preparedCredential ?? await prepareDeviceCredential(
+        profile.id,
+        selectedDevice.serial,
+        name.trim() || selectedDevice.serial,
+        selectedDevice.firmwareTarget,
+        selectedDevice.kind === "h7608",
+      );
+      setPreparedCredential(credential);
+      const deviceId = credential.deviceId;
       const localInput = {
-        clientId: deviceId,
+        clientId: credential.clientId,
+        username: credential.username,
+        password: credential.password,
+        projectId: credential.projectId,
+        channel: credential.channel,
         meshId: profile.meshId,
         passphrase: profile.meshPassphrase,
         country: profile.country,
@@ -260,6 +292,7 @@ export function ProvisioningFlow({
       return;
     }
     setSelectedDevice(null);
+    setPreparedCredential(null);
     setStatus("Select a device to provision.");
     setStep(1);
   };

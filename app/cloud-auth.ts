@@ -52,12 +52,15 @@ type NativeDevice = {
   $id: string;
   $permissions?: string[];
   serial: string;
+  name?: string;
   status: string;
   enabled: boolean;
   halowMac?: string | null;
   gatewayDeviceId?: string | null;
   metadata?: {
     profileId?: string;
+    firmwareTarget?: string;
+    mqttGateway?: boolean;
     _edgezDiscovery?: {
       publicKey?: string;
       requestPayload?: string;
@@ -65,6 +68,15 @@ type NativeDevice = {
       lastSeenAt?: string;
     };
   };
+};
+
+export type PreparedDeviceCredential = {
+  deviceId: string;
+  clientId: string;
+  username: string;
+  password: string;
+  projectId: string;
+  channel: string;
 };
 
 export type CloudTokenRequest = {
@@ -245,6 +257,60 @@ async function devicesRequest<T>(path = "", init?: RequestInit): Promise<T> {
   const payload = await response.json() as T & { message?: string };
   if (!response.ok) throw new Error(payload.message || "Appwrite Devices request failed.");
   return payload;
+}
+
+/**
+ * Create (or reuse) the cloud Device and rotate its MQTT credential before a
+ * local provisioning transport is opened. H7608 must complete this while the
+ * phone still has internet, because joining its SoftAP temporarily replaces
+ * the phone's normal Wi-Fi connection.
+ */
+export async function prepareDeviceCredential(
+  profileId: string,
+  serial: string,
+  name: string,
+  firmwareTarget: string,
+  mqttGateway: boolean,
+): Promise<PreparedDeviceCredential> {
+  const normalizedSerial = serial.trim().toUpperCase();
+  if (!normalizedSerial) throw new Error("The device did not advertise a serial number.");
+  const query = `queries[]=${encodeURIComponent(Query.equal("serial", [normalizedSerial]))}`;
+  const listed = await devicesRequest<{ devices: NativeDevice[] }>(`?${query}`);
+  let device = listed.devices?.[0];
+  if (device?.metadata?.profileId && device.metadata.profileId !== profileId) {
+    throw new Error("This device is already assigned to another profile.");
+  }
+  if (!device) {
+    device = await devicesRequest<NativeDevice>("", {
+      method: "POST",
+      body: JSON.stringify({
+        serial: normalizedSerial,
+        name: name.trim() || normalizedSerial,
+        enabled: true,
+        permissions: rowPermissions(profileId),
+        metadata: { profileId, firmwareTarget, mqttGateway },
+      }),
+    });
+  }
+  const credential = await devicesRequest<{
+    clientId: string;
+    username: string;
+    password: string;
+  }>(`/${encodeURIComponent(device.$id)}/credentials`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  if (credential.username.toUpperCase() !== normalizedSerial) {
+    throw new Error("The server returned an MQTT username that does not match the device serial.");
+  }
+  return {
+    deviceId: device.$id,
+    clientId: credential.clientId,
+    username: credential.username,
+    password: credential.password,
+    projectId,
+    channel: "status",
+  };
 }
 
 /** Return cloud discoveries routed through a gateway assigned to this profile. */

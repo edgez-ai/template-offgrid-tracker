@@ -4,12 +4,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "edgez_esp_factory_data.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_rf_api.h"
 #include "edgez_umac.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -25,9 +27,8 @@
 #define SENSOR_PROFILE_VERSION 1U
 #define SENSOR_PACKET_MAX 512U
 #define SENSOR_ACCEPT_QUEUE_DEPTH 2U
-#define SENSOR_RESPONSE_TIMEOUT_MS 2000U
-#define SENSOR_ACCEPT_WINDOW_MS 2500U
-#define SENSOR_DISCOVERY_CHANNEL_DWELL_MS 250U
+#define SENSOR_RESPONSE_TIMEOUT_MS 100U
+#define SENSOR_ACCEPT_WINDOW_MS 200U
 #define SENSOR_MCS 0U
 #define SENSOR_ATTEMPTS 1U
 #define SENSOR_NVS_NAMESPACE "edgez_sensor"
@@ -570,6 +571,32 @@ static esp_err_t start_radio(const char country[3], uint32_t frequency_khz,
     return ESP_OK;
 }
 
+static void stop_radio(void)
+{
+    if (!radio_running) return;
+    (void)edgez_umac_stop(&sensor_umac);
+    edgez_rf_unbind_umac();
+    memset(&sensor_umac, 0, sizeof(sensor_umac));
+    radio_running = false;
+}
+
+static void sensor_sleep(uint32_t interval_ms)
+{
+    stop_radio();
+
+    /* Keep the MM6108 in reset throughout ESP32-S3 deep sleep. mmhal_init()
+     * releases this hold on the next timer wake before initializing HaLow. */
+    ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)CONFIG_MM_RESET_N, 0));
+    ESP_ERROR_CHECK(gpio_hold_en((gpio_num_t)CONFIG_MM_RESET_N));
+    gpio_deep_sleep_hold_en();
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(
+        (uint64_t)interval_ms * UINT64_C(1000)));
+    ESP_LOGI(TAG, "sensor cycle complete; deep sleep for %lu ms",
+             (unsigned long)interval_ms);
+    esp_deep_sleep_start();
+    abort();
+}
+
 static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
                               uint32_t interval_ms)
 {
@@ -627,21 +654,6 @@ static bool try_acceptance(void)
     return false;
 }
 
-static bool select_first_bootstrap_channel(const char *country,
-                                           uint8_t *channel)
-{
-    uint32_t frequency_khz;
-    uint8_t bandwidth_mhz;
-    for (unsigned candidate = 1U; candidate <= UINT8_MAX; ++candidate) {
-        if (edgez_rf_resolve_s1g_channel(country, (uint8_t)candidate,
-                &frequency_khz, &bandwidth_mhz) && bandwidth_mhz == 1U) {
-            *channel = (uint8_t)candidate;
-            return true;
-        }
-    }
-    return false;
-}
-
 static bool advance_bootstrap_channel(const char *country, uint8_t *channel)
 {
     uint32_t frequency_khz;
@@ -663,79 +675,85 @@ static void sensor_task(void *arg)
     (void)arg;
     bool provisioned = profile_valid(&profile);
     uint8_t bootstrap_channel = factory_identity.channel;
-    uint8_t discovery_attempts = 0U;
     const uint32_t interval_ms =
         CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS * 1000U;
 
-    if (!provisioned && bootstrap_channel == 0U &&
-        !select_first_bootstrap_channel(
-            factory_identity.country, &bootstrap_channel)) {
-        ESP_LOGE(TAG, "no 1 MHz discovery channel for country=%s",
-                 factory_identity.country);
+    if (provisioned) {
+        uint8_t payload[SENSOR_PACKET_MAX];
+        size_t payload_length = 0U;
+        esp_err_t err = start_radio(profile.country, profile.frequency_khz,
+                                    profile.bandwidth_mhz, profile.mesh_id);
+        if (err == ESP_OK) {
+            err = build_beacon(payload, sizeof(payload), &payload_length);
+        }
+        if (err == ESP_OK) {
+            err = send_request(payload, payload_length, interval_ms);
+        }
+        ESP_LOGI(TAG, "Beacon PAwR request %s bytes=%u",
+                 err == ESP_OK ? "acknowledged" : "unacknowledged",
+                 (unsigned)payload_length);
+        const uint32_t report_seconds =
+            profile.beacon_interval_seconds != 0U ?
+            profile.beacon_interval_seconds :
+            CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
+        sensor_sleep(report_seconds * 1000U);
+    }
+
+    uint32_t factory_frequency_khz = 0U;
+    uint8_t factory_bandwidth_mhz = 0U;
+    if (strlen(factory_identity.country) != 2U || bootstrap_channel == 0U ||
+        !edgez_rf_resolve_s1g_channel(factory_identity.country,
+            bootstrap_channel, &factory_frequency_khz,
+            &factory_bandwidth_mhz) || factory_bandwidth_mhz != 1U) {
+        ESP_LOGE(TAG,
+                 "factory discovery country/channel unavailable or invalid country=%s channel=%u",
+                 factory_identity.country, (unsigned)bootstrap_channel);
         vTaskDelete(NULL);
         return;
     }
 
-    for (;;) {
-        const char *country = provisioned ? profile.country :
-            factory_identity.country;
-        const char *mesh_id = provisioned ? profile.mesh_id :
-            "edgez-zero-touch";
-        uint32_t frequency_khz = provisioned ? profile.frequency_khz : 0U;
-        uint8_t bandwidth_mhz = provisioned ? profile.bandwidth_mhz : 0U;
-        if (!provisioned && !edgez_rf_resolve_s1g_channel(
-                country, bootstrap_channel, &frequency_khz,
-                &bandwidth_mhz)) {
-            ESP_LOGE(TAG, "invalid bootstrap country=%s channel=%u", country,
-                     (unsigned)bootstrap_channel);
-            vTaskDelay(pdMS_TO_TICKS(interval_ms));
-            continue;
-        }
-        if (!radio_running && start_radio(country, frequency_khz,
-                                          bandwidth_mhz, mesh_id) != ESP_OK) {
-            (void)advance_bootstrap_channel(country, &bootstrap_channel);
-            discovery_attempts = 0U;
-            vTaskDelay(pdMS_TO_TICKS(SENSOR_DISCOVERY_CHANNEL_DWELL_MS));
-            continue;
-        }
-
-        uint8_t payload[SENSOR_PACKET_MAX];
-        size_t payload_length = 0U;
-        esp_err_t err = provisioned ?
-            build_beacon(payload, sizeof(payload), &payload_length) :
-            build_discovery(payload, sizeof(payload), &payload_length);
-        if (err == ESP_OK) err = send_request(payload, payload_length,
-                                               interval_ms);
-        ESP_LOGI(TAG, "%s PAwR request %s channel=%u bytes=%u",
-                 provisioned ? "Beacon" : "discover",
-                 err == ESP_OK ? "acknowledged" : "unacknowledged",
-                 (unsigned)bootstrap_channel, (unsigned)payload_length);
-        if (!provisioned && err == ESP_OK && try_acceptance()) {
-            provisioned = true;
-            (void)edgez_umac_stop(&sensor_umac);
-            edgez_rf_unbind_umac();
-            memset(&sensor_umac, 0, sizeof(sensor_umac));
-            radio_running = false;
-            continue;
-        }
-
-        if (!provisioned) {
-            if (++discovery_attempts >= 3U) {
-                discovery_attempts = 0U;
-                (void)advance_bootstrap_channel(country, &bootstrap_channel);
-                (void)edgez_umac_stop(&sensor_umac);
-                edgez_rf_unbind_umac();
-                memset(&sensor_umac, 0, sizeof(sensor_umac));
-                radio_running = false;
+    const uint8_t first_channel = bootstrap_channel;
+    bool accepted = false;
+    do {
+        uint32_t frequency_khz = 0U;
+        uint8_t bandwidth_mhz = 0U;
+        if (!edgez_rf_resolve_s1g_channel(factory_identity.country,
+                bootstrap_channel, &frequency_khz, &bandwidth_mhz) ||
+            bandwidth_mhz != 1U) {
+            ESP_LOGW(TAG, "skipping invalid discovery channel=%u country=%s",
+                     (unsigned)bootstrap_channel, factory_identity.country);
+        } else {
+            uint8_t payload[SENSOR_PACKET_MAX];
+            size_t payload_length = 0U;
+            esp_err_t err = start_radio(factory_identity.country,
+                frequency_khz, bandwidth_mhz, "edgez-zero-touch");
+            if (err == ESP_OK) {
+                err = build_discovery(payload, sizeof(payload),
+                                      &payload_length);
             }
+            if (err == ESP_OK) {
+                err = send_request(payload, payload_length, interval_ms);
+            }
+            ESP_LOGI(TAG,
+                     "discover PAwR request %s channel=%u frequency=%lu kHz bytes=%u",
+                     err == ESP_OK ? "acknowledged" : "unacknowledged",
+                     (unsigned)bootstrap_channel,
+                     (unsigned long)frequency_khz, (unsigned)payload_length);
+            if (err == ESP_OK) accepted = try_acceptance();
+            stop_radio();
+            if (accepted) break;
         }
-        const uint32_t report_seconds = provisioned &&
-            profile.beacon_interval_seconds != 0U ?
-            profile.beacon_interval_seconds :
-            CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
-        vTaskDelay(pdMS_TO_TICKS(provisioned ? report_seconds * 1000U :
-                                 SENSOR_DISCOVERY_CHANNEL_DWELL_MS));
+
+        if (!advance_bootstrap_channel(factory_identity.country,
+                                       &bootstrap_channel)) {
+            break;
+        }
+    } while (bootstrap_channel != first_channel);
+
+    if (accepted) {
+        ESP_LOGI(TAG, "discovery accepted; saved profile for next wake");
     }
+    sensor_sleep(interval_ms);
 }
 
 void app_main(void)
