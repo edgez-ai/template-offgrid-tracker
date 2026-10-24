@@ -287,6 +287,13 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
       }
       await onDevicesChanged();
       await onProvisioningRequestsChanged();
+      setRequestId(null);
+      Alert.alert(
+        cloudRequest ? "Provisioning queued" : "Provisioning sent",
+        cloudRequest
+          ? "The encrypted profile was sent to the gateway. This sensor becomes active after the gateway receives its first beacon or bulk block."
+          : "The encrypted profile was sent to the sensor.",
+      );
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not accept the provisioning request.");
     } finally {
