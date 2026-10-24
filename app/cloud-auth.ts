@@ -411,7 +411,7 @@ function sensorSampleFromCloud(row: CloudTelemetryRow, device: NativeDevice): Ed
   const fields = new Map<number, keyof EdgezSensorSample["data"]>([
     [1, "temperature"], [2, "humidity"], [3, "latitude"], [4, "longitude"],
     [5, "binaryLengthBytes"], [6, "accelX"], [7, "accelY"], [8, "accelZ"],
-    [9, "gyroX"], [10, "gyroY"], [11, "gyroZ"],
+    [9, "gyroX"], [10, "gyroY"], [11, "gyroZ"], [13, "mcuTemperature"],
   ]);
   try {
     const payload = JSON.parse(row.payload) as { sensors?: { type?: unknown; value?: unknown }[] };
@@ -435,15 +435,19 @@ export async function listCloudOnlineData(profileId: string): Promise<CloudOnlin
     tables.listRows<CloudTelemetryRow>({
       databaseId,
       tableId: telemetryTableId,
-      queries: [Query.equal("profileId", [profileId]), Query.orderDesc("receivedAt"), Query.limit(500)],
+      queries: [Query.orderDesc("receivedAt"), Query.limit(500)],
     }),
   ]);
   const nativeDevices = deviceResult.devices ?? [];
   const devicesById = new Map(nativeDevices.map((device) => [device.$id, device]));
-  const devices = nativeDevices
-    .filter((device) => device.status !== "discovered" && cloudDeviceBelongsToProfile(profileId, device, devicesById))
+  const profileNativeDevices = nativeDevices.filter((device) =>
+    cloudDeviceBelongsToProfile(profileId, device, devicesById));
+  const profileDeviceIds = new Set(profileNativeDevices.map((device) => device.$id));
+  const devices = profileNativeDevices
+    .filter((device) => device.status !== "discovered")
     .map((device) => storedDeviceFromCloud(profileId, device));
   const sensorSamples = telemetryResult.rows.flatMap((row) => {
+    if (!profileDeviceIds.has(row.deviceId)) return [];
     const device = devicesById.get(row.deviceId);
     const sample = device ? sensorSampleFromCloud(row, device) : null;
     return sample ? [sample] : [];
