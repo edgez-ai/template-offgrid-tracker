@@ -61,6 +61,7 @@ else()
     if(CONFIG_OFFGRID_HT_HC33_SENSOR)
         list(APPEND component_private_dependencies
             esp_hw_support
+            esp_driver_tsens
             mbedtls
             nvs_flash
             spi_flash)

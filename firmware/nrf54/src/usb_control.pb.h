@@ -117,7 +117,8 @@ typedef enum _ai_edgez_halow_SensorType {
     ai_edgez_halow_SensorType_SENSOR_GYRO_X = 9, /* angular velocity in rad/s */
     ai_edgez_halow_SensorType_SENSOR_GYRO_Y = 10, /* angular velocity in rad/s */
     ai_edgez_halow_SensorType_SENSOR_GYRO_Z = 11, /* angular velocity in rad/s */
-    ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE = 12 /* volts */
+    ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE = 12, /* volts */
+    ai_edgez_halow_SensorType_SENSOR_MCU_TEMPERATURE = 13 /* MCU internal temperature in degrees Celsius */
 } ai_edgez_halow_SensorType;
 
 /* Struct definitions */
@@ -332,8 +333,8 @@ extern "C" {
 #define _ai_edgez_halow_AlertCondition_ARRAYSIZE ((ai_edgez_halow_AlertCondition)(ai_edgez_halow_AlertCondition_ALERT_CONDITION_LOW_BATTERY+1))
 
 #define _ai_edgez_halow_SensorType_MIN ai_edgez_halow_SensorType_SENSOR_UNKNOWN
-#define _ai_edgez_halow_SensorType_MAX ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE
-#define _ai_edgez_halow_SensorType_ARRAYSIZE ((ai_edgez_halow_SensorType)(ai_edgez_halow_SensorType_SENSOR_BATTERY_VOLTAGE+1))
+#define _ai_edgez_halow_SensorType_MAX ai_edgez_halow_SensorType_SENSOR_MCU_TEMPERATURE
+#define _ai_edgez_halow_SensorType_ARRAYSIZE ((ai_edgez_halow_SensorType)(ai_edgez_halow_SensorType_SENSOR_MCU_TEMPERATURE+1))
 
 #define ai_edgez_halow_MessageBody_mime_ENUMTYPE ai_edgez_halow_Mime
 

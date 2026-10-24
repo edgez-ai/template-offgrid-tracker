@@ -13,6 +13,8 @@ import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
 import { saveProfileDevice } from "./profile-store";
 import type { StoredProfile } from "./profile-store";
+import { beaconColorValues, beaconIconColors } from "./beacon-options";
+import type { BeaconIconColor } from "./beacon-options";
 
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 
@@ -88,6 +90,7 @@ export function ProvisioningFlow({
   const [deviceLocation, setDeviceLocation] = useState("");
   const [deviceLocationLoading, setDeviceLocationLoading] = useState(false);
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
+  const [deviceMarkerColor, setDeviceMarkerColor] = useState<BeaconIconColor>("blue");
 
   const disconnect = async () => {
     if (selectedDevice) await provisioningManager.disconnect(selectedDevice);
@@ -131,6 +134,7 @@ export function ProvisioningFlow({
     setDeviceWifiPassword("");
     setDeviceLocationChoice("none");
     setDeviceLocation("");
+    setDeviceMarkerColor("blue");
     setError("");
     setStatus(`Confirm the details for ${device.name}.`);
     setStep(2);
@@ -189,6 +193,8 @@ export function ProvisioningFlow({
           name.trim() || selectedDevice.serial,
           selectedDevice.firmwareTarget,
           true,
+          "gateway",
+          deviceMarkerColor,
         );
         setPreparedCredential(credential);
       }
@@ -230,6 +236,8 @@ export function ProvisioningFlow({
         name.trim() || selectedDevice.serial,
         selectedDevice.firmwareTarget,
         selectedDevice.kind === "h7608",
+        selectedDevice.kind === "h7608" ? "gateway" : "sensor",
+        deviceMarkerColor,
       );
       setPreparedCredential(credential);
       const deviceId = credential.deviceId;
@@ -258,9 +266,9 @@ export function ProvisioningFlow({
         locationSource: deviceLocationChoice,
         latitude: coordinates?.latitude ?? null,
         longitude: coordinates?.longitude ?? null,
-        deviceType: "Unspecified",
-        marker: "default",
-        iconStyle: "sensor",
+        deviceType: selectedDevice.kind === "h7608" ? "gateway" : "sensor",
+        marker: deviceMarkerColor,
+        iconStyle: selectedDevice.kind === "h7608" ? "gateway" : "sensor",
         userUuid: "",
         lastSeenAt: "",
         meshMacAddress: selectedDevice.serial,
@@ -341,7 +349,7 @@ export function ProvisioningFlow({
               <Text style={styles.settingsMuted}>{selectedDevice.kind === "nrf54" ? "Device GPS location supported" : `Firmware target ${selectedDevice.firmwareTarget}`}</Text>
             </View>
             <Text style={styles.provisioningFieldLabel}>NAME</Text>
-            <TextInput style={styles.provisioningInput} value={name} onChangeText={setName} placeholder="Device name" placeholderTextColor="#829693" maxLength={selectedDevice.deviceNameMaxLength} />
+            <TextInput style={styles.provisioningInput} value={name} onChangeText={(value) => { setName(value); setPreparedCredential(null); }} placeholder="Device name" placeholderTextColor="#829693" maxLength={selectedDevice.deviceNameMaxLength} />
             <Text style={styles.provisioningFieldLabel}>LOCATION · OPTIONAL</Text>
             <Pressable style={[styles.provisioningChoice, deviceLocationChoice === "none" && styles.provisioningChoiceSelected]} onPress={() => { setDeviceLocationChoice("none"); setDeviceLocation(""); }}>
               <Text style={styles.provisioningDeviceName}>None</Text>
@@ -368,6 +376,21 @@ export function ProvisioningFlow({
             ) : null}
             {selectedDevice.kind === "h7608" ? (
               <>
+                <Text style={styles.provisioningFieldLabel}>GATEWAY MARKER COLOR</Text>
+                <View style={styles.beaconColorOptions} accessibilityRole="radiogroup">
+                  {beaconIconColors.map((color) => (
+                    <Pressable
+                      key={color}
+                      style={[styles.beaconColorOption, deviceMarkerColor === color && styles.beaconColorOptionSelected]}
+                      onPress={() => { setDeviceMarkerColor(color); setPreparedCredential(null); }}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: deviceMarkerColor === color }}
+                      accessibilityLabel={`${color} gateway marker`}
+                    >
+                      <View style={[styles.beaconColorSwatch, { backgroundColor: beaconColorValues[color] }]} />
+                    </Pressable>
+                  ))}
+                </View>
                 <Text style={styles.provisioningFieldLabel}>NEW DEVICE WI-FI PASSWORD</Text>
                 <ProvisioningPasswordField value={deviceWifiPassword} onChangeText={setDeviceWifiPassword} placeholder="8–63 characters" accessibilityName="new device Wi-Fi password" />
               </>

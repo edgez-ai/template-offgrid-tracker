@@ -7,7 +7,7 @@ import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "
 
 import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../lib/device-status";
 
-type Device = DeviceSystemState & { $id: string; serial: string; name: string; status: string; enabled: boolean; metadata?: { profileId?: string; firmwareTarget?: string; [key: string]: unknown } };
+type Device = DeviceSystemState & { $id: string; $permissions?: string[]; serial: string; name: string; status: string; enabled: boolean; metadata?: { profileId?: string; firmwareTarget?: string; [key: string]: unknown } };
 type Profile = Models.Row & { name: string; identityId?: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
@@ -111,6 +111,7 @@ function errorMessage(error: unknown) {
 
 const batteryVoltageSensorType = 12;
 const temperatureSensorType = 1;
+const mcuTemperatureSensorType = 13;
 const randomTemperatureIntervalSeconds = 30;
 const randomTemperatureScript = `math.randomseed((os.time() % 100000) + math.floor((os.clock() or 0) * 1000))
 
@@ -145,6 +146,14 @@ function temperatureOf(row: Telemetry) {
   } catch { return null; }
 }
 
+function mcuTemperatureOf(row: Telemetry) {
+  try {
+    const payload = JSON.parse(row.payload) as SensorPayload;
+    const value = payload.sensors?.find((sensor) => sensor?.type === mcuTemperatureSensorType)?.value;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
+  } catch { return null; }
+}
+
 function firmwareVersionOf(device?: Device | null) {
   return device?.firmwareVersion || "";
 }
@@ -167,6 +176,15 @@ function gatewayStatusOf(device?: Device | null) {
 function isGatewayDevice(device: Device, latest?: Telemetry) {
   const gatewayStatus = gatewayStatusOf(device);
   return device.metadata?.mqttGateway === true || gatewayStatus === "online" || gatewayStatus === "offline";
+}
+
+function deviceBelongsToProfile(device: Device, profileId: string, devicesById: ReadonlyMap<string, Device>) {
+  const gateway = device.gatewayDeviceId ? devicesById.get(device.gatewayDeviceId) : device;
+  const profilePermission = `team:${profileId}`;
+  return device.metadata?.profileId === profileId ||
+    gateway?.metadata?.profileId === profileId ||
+    [...device.$permissions ?? [], ...gateway?.$permissions ?? []]
+      .some((permission) => permission.includes(profilePermission));
 }
 
 function relativeTime(value: string) {
@@ -250,7 +268,8 @@ function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[
 
 async function listDevices<T>() {
   const jwt = await account.createJWT();
-  const response = await fetch(`${endpoint}/devices?includeTopology=true`, {
+  const query = encodeURIComponent(Query.limit(100));
+  const response = await fetch(`${endpoint}/devices?includeTopology=true&queries[]=${query}`, {
     headers: {
       "content-type": "application/json",
       "x-appwrite-project": projectId,
@@ -396,7 +415,10 @@ export default function Home() {
     window.localStorage.setItem(selectedProfileStorageKey(user.$id), currentProfileId);
   }, [currentProfileId, profiles, user]);
 
-  const profileDevices = useMemo(() => devices.filter((device) => device.metadata?.profileId === currentProfileId), [currentProfileId, devices]);
+  const profileDevices = useMemo(() => {
+    const devicesById = new Map(devices.map((device) => [device.$id, device]));
+    return devices.filter((device) => deviceBelongsToProfile(device, currentProfileId, devicesById));
+  }, [currentProfileId, devices]);
   const currentProfile = profiles.find((profile) => profile.$id === currentProfileId);
   useEffect(() => {
     setSelectedDeviceId((current) => profileDevices.some((device) => device.$id === current) ? current : profileDevices[0]?.$id || "");
@@ -534,6 +556,15 @@ export default function Home() {
     }
     return latest;
   }, [telemetry]);
+  const latestMcuTemperatureByDevice = useMemo(() => {
+    const latest = new Map<string, { row: Telemetry; value: number }>();
+    for (const row of telemetry) {
+      if (latest.has(row.deviceId)) continue;
+      const value = mcuTemperatureOf(row);
+      if (value !== null) latest.set(row.deviceId, { row, value });
+    }
+    return latest;
+  }, [telemetry]);
   const selectedDevice = profileDevices.find((device) => device.$id === selectedDeviceId);
   const selectedLatestTelemetry = selectedDevice ? latestTelemetryByDevice.get(selectedDevice.$id) : undefined;
   const selectedGateway = selectedDevice?.gatewayDeviceId
@@ -546,6 +577,7 @@ export default function Home() {
     : null;
   const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
   const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
+  const selectedMcuTemperature = selectedDevice ? latestMcuTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatestTelemetry) : "";
   const selectedFirmwareVersion = firmwareVersionOf(selectedDevice);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
@@ -610,6 +642,7 @@ export default function Home() {
             <div className="gateway-summary"><div><span>DEVICE ROLE</span><strong>{selectedIsGateway ? "Gateway" : "Leaf device"}</strong></div><div><span>GATEWAY AVAILABLE</span><strong className={selectedGatewayAvailable === true ? "available" : selectedGatewayAvailable === false ? "unavailable" : "unknown"}>{selectedGatewayAvailable === true ? "Available" : selectedGatewayAvailable === false ? "Unavailable" : "Not configured"}</strong></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
             <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
+            <div className="metric-card"><span>MCU TEMPERATURE</span><strong>{selectedMcuTemperature ? `${selectedMcuTemperature.value.toFixed(1)} °C` : "—"}</strong><small>{selectedMcuTemperature ? `Updated ${relativeTime(selectedMcuTemperature.row.receivedAt)}` : "No MCU reading received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
             <div className="chart-card"><header><div><h3>Sensor history</h3><p>Mobile sync · {selectedHistorySeries.reduce((total, series) => total + series.points.length, 0)} selected readings</p></div>{historyLoading && <span className="spinner" />}</header>
               <div className="sensor-picker" aria-label="Sensors displayed in the history chart">{historySeries.map((series) => <label key={series.field} className={selectedSensorFields.includes(series.field) ? "selected" : ""}><input type="checkbox" checked={selectedSensorFields.includes(series.field)} onChange={() => toggleSensor(series.field)} /><i style={{ background: series.color }} />{series.label}<small>{series.points.length}</small></label>)}{!historyLoading && !historySeries.length && <span>No sensor fields found.</span>}</div>

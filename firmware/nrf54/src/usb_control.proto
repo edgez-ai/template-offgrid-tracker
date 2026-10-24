@@ -151,6 +151,7 @@ enum SensorType {
   SENSOR_GYRO_Y = 10;  // angular velocity in rad/s
   SENSOR_GYRO_Z = 11;  // angular velocity in rad/s
   SENSOR_BATTERY_VOLTAGE = 12;  // volts
+  SENSOR_MCU_TEMPERATURE = 13;  // MCU internal temperature in degrees Celsius
 }
 
 message SensorData {

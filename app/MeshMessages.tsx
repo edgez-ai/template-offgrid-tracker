@@ -276,7 +276,12 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
         },
       });
       if (cloudRequest) {
-        await acceptCloudProvisioningRequest(selectedRequest.cloudDeviceId ?? "", packet);
+        await acceptCloudProvisioningRequest(
+          selectedRequest.cloudDeviceId ?? "",
+          packet,
+          requestIcon,
+          requestColor,
+        );
       } else {
         await session!.sdk.transport.invoke("sendPacket", {
           label: `Accept zero-touch sensor ${selectedRequest.serial}`,

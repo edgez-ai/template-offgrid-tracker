@@ -13,6 +13,7 @@ import { BleDebugModal } from "./SettingsScreens";
 import { styles } from "./app-styles";
 import { compatibleCurrentLocation } from "./location-utils";
 import { coordinatesFromLocation, nodeNumFromSerial } from "./mesh-utils";
+import { updateCloudDevice } from "./cloud-auth";
 import type { CloudConnectionState } from "./cloud-auth";
 import type { StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest } from "./profile-store";
 
@@ -423,6 +424,8 @@ export function HomeMap({
       />
       <DeviceDetail
         device={selectedDevice}
+        country={profile.country}
+        editable={onlineMode}
         liveNode={selectedDevice ? (() => {
           const nodeNum = nodeNumFromSerial(selectedDevice.meshMacAddress || selectedDevice.serial);
           return nodeNum === null ? null : meshLink?.state.nodes.get(nodeNum) ?? null;
@@ -434,6 +437,19 @@ export function HomeMap({
           setMessagesOpen(true);
         }}
         allowMessaging={!onlineMode}
+        onUpdate={async (device, update) => {
+          await updateCloudDevice(device.id, update);
+          setSelectedDevice({
+            ...device,
+            name: update.name,
+            marker: update.markerColor,
+            iconStyle: update.markerType,
+            locationSource: update.latitude === null ? "none" : "map",
+            latitude: update.latitude,
+            longitude: update.longitude,
+          });
+          await onDevicesChanged();
+        }}
       />
     </SafeAreaView>
   );

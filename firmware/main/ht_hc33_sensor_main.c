@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/temperature_sensor.h"
 #include "edgez_esp_factory_data.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_rf_api.h"
@@ -107,6 +108,23 @@ static bool response_downlink_pending;
 static uint32_t downlink_ack_id;
 static bool nvs_ready;
 static RTC_DATA_ATTR sensor_rtc_cache_t rtc_cache;
+
+static esp_err_t read_mcu_temperature(float *celsius)
+{
+    if (celsius == NULL) return ESP_ERR_INVALID_ARG;
+    temperature_sensor_handle_t sensor = NULL;
+    const temperature_sensor_config_t config =
+        TEMPERATURE_SENSOR_CONFIG_DEFAULT(-10, 80);
+    esp_err_t err = temperature_sensor_install(&config, &sensor);
+    if (err != ESP_OK) return err;
+    err = temperature_sensor_enable(sensor);
+    if (err == ESP_OK) {
+        err = temperature_sensor_get_celsius(sensor, celsius);
+        (void)temperature_sensor_disable(sensor);
+    }
+    (void)temperature_sensor_uninstall(sensor);
+    return err;
+}
 
 __attribute__((weak)) esp_err_t edgez_sensor_handle_downlink(
     const char *command, const uint8_t *payload, size_t payload_length)
@@ -363,6 +381,23 @@ static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length)
     if (profile.share_location) {
         beacon.latitude = profile.latitude;
         beacon.longitude = profile.longitude;
+    }
+    float mcu_temperature = 0.0f;
+    const esp_err_t temperature_err = read_mcu_temperature(&mcu_temperature);
+    if (temperature_err == ESP_OK &&
+        beacon.sensor_data_count <
+            sizeof(beacon.sensor_data) / sizeof(beacon.sensor_data[0])) {
+        ai_edgez_halow_SensorData *temperature =
+            &beacon.sensor_data[beacon.sensor_data_count++];
+        temperature->type =
+            ai_edgez_halow_SensorType_SENSOR_MCU_TEMPERATURE;
+        temperature->which_value =
+            ai_edgez_halow_SensorData_float_value_tag;
+        temperature->value.float_value = mcu_temperature;
+        ESP_LOGI(TAG, "MCU temperature %.1f C", (double)mcu_temperature);
+    } else if (temperature_err != ESP_OK) {
+        ESP_LOGW(TAG, "MCU temperature unavailable: %s",
+                 esp_err_to_name(temperature_err));
     }
     beacon.downlink_ack_id = downlink_ack_id;
     pb_ostream_t stream = pb_ostream_from_buffer(output, capacity);

@@ -13,11 +13,12 @@ const MOBILE_DEVICE_TABLE_ID = process.env.OFFGRID_TRACKER_MOBILE_DEVICE_TABLE_I
 const MESSAGE_TABLE_ID = process.env.OFFGRID_TRACKER_MESSAGE_TABLE_ID || "messages";
 const SENSOR_SAMPLE_TABLE_ID = process.env.OFFGRID_TRACKER_SENSOR_SAMPLE_TABLE_ID || "sensor-samples";
 const SENSOR_BATTERY_VOLTAGE = 12;
+const SENSOR_MCU_TEMPERATURE = 13;
 const SENSOR_LATITUDE = 3;
 const SENSOR_LONGITUDE = 4;
 const SENSOR_ACCELEROMETER = [6, 7, 8];
 const SENSOR_GYROSCOPE = [9, 10, 11];
-const SENSOR_TYPE_MAX = 12;
+const SENSOR_TYPE_MAX = 13;
 const SENSOR_FIELD_NAMES = new Map([
   [1, "temperature"],
   [2, "humidity"],
@@ -29,6 +30,7 @@ const SENSOR_FIELD_NAMES = new Map([
   [10, "gyro_y"],
   [11, "gyro_z"],
   [12, "battery_voltage"],
+  [13, "mcu_temperature"],
 ]);
 const OTA_STATUSES = new Set(["pending", "succeeded", "failed", "busy"]);
 const DOWNLINK_STATUSES = new Set(["cached", "transmitting", "applied", "failed", "expired"]);
@@ -644,7 +646,7 @@ export default async function main({ req, res, error, log = () => {} }) {
     // Persist application fields only, even if an older sensor publisher includes system fields.
     for (const field of ["status", "halowMac", "topology", "halowRf", "gateway_status", "wifi_enabled"]) delete entry[field];
     if (!entry.ota) delete entry.firmwareVersion;
-    if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 12 || entry.sensors.some((sensor) =>
+    if (entry.sensors !== undefined && (!Array.isArray(entry.sensors) || entry.sensors.length > 13 || entry.sensors.some((sensor) =>
         !sensor || typeof sensor !== "object" || !Number.isInteger(sensor.type) || sensor.type < 1 || sensor.type > SENSOR_TYPE_MAX ||
         typeof sensor.value !== "number" || !Number.isFinite(sensor.value)))) {
       return json(res, { error: "Telemetry sensors must contain supported numeric type and value fields" }, 400);
@@ -665,6 +667,10 @@ export default async function main({ req, res, error, log = () => {} }) {
     if ((route.channel === "sensors" || route.channel === "battery") && batteryVoltage !== null &&
         (batteryVoltage < 0 || batteryVoltage > 10.0)) {
       return json(res, { error: "Battery sensor voltage must be between 0 and 10.0 volts" }, 400);
+    }
+    const mcuTemperature = sensorValue(entry, SENSOR_MCU_TEMPERATURE);
+    if (mcuTemperature !== null && (mcuTemperature < -40 || mcuTemperature > 125)) {
+      return json(res, { error: "MCU temperature must be between -40 and 125 degrees Celsius" }, 400);
     }
     const latitude = sensorValue(entry, SENSOR_LATITUDE);
     const longitude = sensorValue(entry, SENSOR_LONGITUDE);

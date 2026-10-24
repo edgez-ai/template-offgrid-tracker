@@ -82,6 +82,14 @@ export type PreparedDeviceCredential = {
   channel: string;
 };
 
+export type CloudDeviceUpdate = {
+  name: string;
+  markerType: string;
+  markerColor: string;
+  latitude: number | null;
+  longitude: number | null;
+};
+
 export type CloudTokenRequest = {
   userId: string;
   phrase: string;
@@ -188,6 +196,8 @@ export async function prepareDeviceCredential(
   name: string,
   firmwareTarget: string,
   mqttGateway: boolean,
+  markerType: string,
+  markerColor: string,
 ): Promise<PreparedDeviceCredential> {
   const normalizedSerial = serial.trim().toUpperCase();
   if (!normalizedSerial) throw new Error("The device did not advertise a serial number.");
@@ -206,6 +216,17 @@ export async function prepareDeviceCredential(
         enabled: true,
         permissions: rowPermissions(profileId),
         metadata: { profileId, firmwareTarget, mqttGateway },
+        markerType,
+        markerColor,
+      }),
+    });
+  } else {
+    device = await devicesRequest<NativeDevice>(`/${encodeURIComponent(device.$id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        name: name.trim() || normalizedSerial,
+        markerType,
+        markerColor,
       }),
     });
   }
@@ -288,11 +309,13 @@ function cloudDeviceBelongsToProfile(
 export async function acceptCloudProvisioningRequest(
   deviceId: string,
   packet: Uint8Array,
+  markerType: string,
+  markerColor: string,
 ): Promise<void> {
   if (!deviceId) throw new Error("The cloud discovery record is missing.");
   await devicesRequest(`/${encodeURIComponent(deviceId)}/discovery`, {
     method: "PATCH",
-    body: JSON.stringify({ payload: fromByteArray(packet) }),
+    body: JSON.stringify({ payload: fromByteArray(packet), markerType, markerColor }),
   });
 }
 
@@ -432,4 +455,19 @@ export async function listCloudOnlineData(profileId: string): Promise<CloudOnlin
 
 export async function deleteCloudDevice(deviceId: string): Promise<void> {
   await devicesRequest(`/${encodeURIComponent(deviceId)}`, { method: "DELETE" });
+}
+
+export async function updateCloudDevice(deviceId: string, update: CloudDeviceUpdate): Promise<void> {
+  if (!deviceId) throw new Error("The cloud device record is missing.");
+  await devicesRequest(`/${encodeURIComponent(deviceId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: update.name,
+      markerType: update.markerType,
+      markerColor: update.markerColor,
+      location: update.latitude === null || update.longitude === null
+        ? null
+        : [update.longitude, update.latitude],
+    }),
+  });
 }

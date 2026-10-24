@@ -1,30 +1,92 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
+import MaterialCommunityIcons from "@expo/vector-icons/MaterialCommunityIcons";
 import { edgezNodeOpensConversation } from "@edgez/react-native-sdk";
 import type { EdgezMeshNode } from "@edgez/react-native-sdk";
-import React, { useRef } from "react";
-import { Animated, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useRef, useState } from "react";
+import { ActivityIndicator, Animated, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { StoredDevice } from "./profile-store";
+import type { CloudDeviceUpdate } from "./cloud-auth";
+import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes } from "./beacon-options";
+import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
+import { coordinatesFromLocation } from "./mesh-utils";
+import { ProfileLocationPicker } from "./ProfileScreens";
 
 const swipeActionWidth = 92;
+const deviceMarkerStyles = ["gateway", "sensor", "tracker", "beacon", "relay", ...beaconIconTypes] as const;
 
 export function DeviceDetail({
   device,
   liveNode,
+  country,
+  editable = false,
   allowMessaging = true,
   onClose,
   onMessage,
+  onUpdate,
 }: {
   device: StoredDevice | null;
   liveNode: EdgezMeshNode | null;
+  country: string;
+  editable?: boolean;
   allowMessaging?: boolean;
   onClose: () => void;
   onMessage: (device: StoredDevice) => void;
+  onUpdate: (device: StoredDevice, update: CloudDeviceUpdate) => Promise<void>;
 }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState("");
+  const [markerType, setMarkerType] = useState("sensor");
+  const [markerColor, setMarkerColor] = useState<BeaconIconColor>("blue");
+  const [location, setLocation] = useState("");
+  const [locationPickerOpen, setLocationPickerOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    setEditing(false);
+    setName(device?.name ?? "");
+    setMarkerType(device?.iconStyle || (device?.kind === "h7608" ? "gateway" : "sensor"));
+    const color = device?.marker as BeaconIconColor | undefined;
+    setMarkerColor(color && beaconIconColors.includes(color) ? color : "blue");
+    setLocation(device?.latitude !== null && device?.latitude !== undefined && device?.longitude !== null && device?.longitude !== undefined
+      ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "");
+    setLocationPickerOpen(false);
+    setError("");
+  }, [device]);
+
   if (!device) return null;
   const canMessage = liveNode
     ? edgezNodeOpensConversation(liveNode)
     : ["", "unspecified", "user", "device_type_user"].includes(device.deviceType.trim().toLowerCase());
+  const save = async () => {
+    const nextName = name.trim();
+    if (!nextName || nextName.length > 128) {
+      setError("Enter a device name up to 128 characters.");
+      return;
+    }
+    const coordinates = location.trim() ? coordinatesFromLocation(location) : null;
+    if (location.trim() && !coordinates) {
+      setError("Enter a valid latitude and longitude.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await onUpdate(device, {
+        name: nextName,
+        markerType,
+        markerColor,
+        latitude: coordinates?.latitude ?? null,
+        longitude: coordinates?.longitude ?? null,
+      });
+      setEditing(false);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not update the device.");
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.page}>
@@ -46,8 +108,36 @@ export function DeviceDetail({
             <DetailRow label="LAST SEEN" value={device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : "Unknown"} />
             <DetailRow label="LOCATION" value={device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "Not shared"} />
           </View>
+          {editable && !editing ? <Pressable style={styles.outline} onPress={() => setEditing(true)} accessibilityRole="button"><Text style={styles.outlineText}>EDIT DEVICE</Text></Pressable> : null}
+          {editable && editing ? <View style={styles.editCard}>
+            <Text style={styles.editLabel}>NAME</Text>
+            <TextInput style={styles.editInput} value={name} onChangeText={setName} maxLength={128} placeholder="Device name" placeholderTextColor="#829693" />
+            <Text style={styles.editLabel}>MARKER STYLE</Text>
+            <View style={styles.markerStyles} accessibilityRole="radiogroup">
+              {deviceMarkerStyles.map((style) => {
+                const selected = markerType === style;
+                const visual = beaconIconTypes.includes(style as BeaconIconType);
+                return <Pressable key={style} style={[styles.markerStyle, selected && styles.markerStyleSelected]} onPress={() => setMarkerType(style)} accessibilityRole="radio" accessibilityState={{ selected }} accessibilityLabel={`${style} marker`}>
+                  {visual ? <MaterialCommunityIcons name={beaconIconNames[style as BeaconIconType]} size={19} color={selected ? "white" : "#0a8c87"} /> : <Ionicons name={style === "gateway" ? "git-network-outline" : style === "relay" ? "git-branch-outline" : "radio-outline"} size={19} color={selected ? "white" : "#0a8c87"} />}
+                  <Text style={[styles.markerStyleText, selected && styles.markerStyleTextSelected]}>{style.toUpperCase()}</Text>
+                </Pressable>;
+              })}
+            </View>
+            <Text style={styles.editLabel}>MARKER COLOR</Text>
+            <View style={styles.markerColors} accessibilityRole="radiogroup">
+              {beaconIconColors.map((color) => <Pressable key={color} style={[styles.markerColor, markerColor === color && styles.markerColorSelected]} onPress={() => setMarkerColor(color)} accessibilityRole="radio" accessibilityState={{ selected: markerColor === color }} accessibilityLabel={`${color} marker color`}><View style={[styles.markerSwatch, { backgroundColor: beaconColorValues[color] }]} /></Pressable>)}
+            </View>
+            <Text style={styles.editLabel}>LOCATION</Text>
+            <TextInput style={styles.editInput} value={location} onChangeText={setLocation} placeholder="Latitude, longitude" placeholderTextColor="#829693" autoCapitalize="none" autoCorrect={false} />
+            <View style={styles.editActions}><Pressable style={styles.smallOutline} onPress={() => setLocationPickerOpen(true)}><Text style={styles.outlineText}>CHOOSE ON MAP</Text></Pressable><Pressable style={styles.smallOutline} onPress={() => setLocation("")}><Text style={styles.outlineText}>CLEAR</Text></Pressable></View>
+            {error ? <Text style={styles.editError}>{error}</Text> : null}
+            <View style={styles.editActions}><Pressable style={styles.smallOutline} onPress={() => setEditing(false)} disabled={saving}><Text style={styles.outlineText}>CANCEL</Text></Pressable><Pressable style={styles.smallPrimary} onPress={() => void save()} disabled={saving}>{saving ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.primaryText}>SAVE</Text>}</Pressable></View>
+          </View> : null}
           {allowMessaging && canMessage ? <Pressable style={styles.primary} onPress={() => onMessage(device)} accessibilityRole="button"><Text style={styles.primaryText}>START NEW CONVERSATION</Text></Pressable> : null}
         </ScrollView>
+        <Modal visible={locationPickerOpen} animationType="slide" onRequestClose={() => setLocationPickerOpen(false)}>
+          <ProfileLocationPicker subject="device" location={location} country={country} onCancel={() => setLocationPickerOpen(false)} onSelect={(value) => { setLocation(value); setLocationPickerOpen(false); }} />
+        </Modal>
       </SafeAreaView>
     </Modal>
   );
@@ -161,6 +251,24 @@ const styles = StyleSheet.create({
   detailValue: { flex: 1, color: "#0a3037", fontSize: 12, fontWeight: "700", textAlign: "right" },
   primary: { minHeight: 52, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
   primaryText: { color: "white", fontSize: 10, fontWeight: "900", letterSpacing: 0.8 },
+  outline: { minHeight: 48, borderWidth: 1, borderColor: "#0a8c87", borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  outlineText: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },
+  editCard: { padding: 15, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 9 },
+  editLabel: { color: "#59716f", fontSize: 9, fontWeight: "900", letterSpacing: 0.8, marginTop: 4 },
+  editInput: { minHeight: 50, paddingHorizontal: 14, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 11, color: "#0a3037", backgroundColor: "#f7faf9", fontSize: 13 },
+  markerStyles: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
+  markerStyle: { minWidth: "30%", minHeight: 48, paddingHorizontal: 9, borderWidth: 1, borderColor: "#cedbdc", borderRadius: 11, alignItems: "center", justifyContent: "center", gap: 3, backgroundColor: "#f7faf9" },
+  markerStyleSelected: { borderColor: "#0a8c87", backgroundColor: "#0a8c87" },
+  markerStyleText: { color: "#385753", fontSize: 7, fontWeight: "900", letterSpacing: 0.4 },
+  markerStyleTextSelected: { color: "white" },
+  markerColors: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
+  markerColor: { width: 40, height: 40, borderWidth: 2, borderColor: "transparent", borderRadius: 20, alignItems: "center", justifyContent: "center" },
+  markerColorSelected: { borderColor: "#0a8c87", backgroundColor: "#e9f7f5" },
+  markerSwatch: { width: 25, height: 25, borderRadius: 13 },
+  editActions: { flexDirection: "row", gap: 8 },
+  smallOutline: { flex: 1, minHeight: 45, borderWidth: 1, borderColor: "#0a8c87", borderRadius: 10, alignItems: "center", justifyContent: "center" },
+  smallPrimary: { flex: 1, minHeight: 45, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
+  editError: { color: "#b9472f", fontSize: 11, lineHeight: 16 },
   swipeContainer: { borderRadius: 14, overflow: "hidden", backgroundColor: "#b9472f" },
   removeAction: { position: "absolute", top: 0, right: 0, bottom: 0, width: swipeActionWidth, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: "#b9472f" },
   removeText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },

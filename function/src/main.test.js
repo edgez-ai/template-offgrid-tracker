@@ -392,15 +392,31 @@ test("sensor indexes become named fields and GPS remains numeric", async () => {
     { type: 6, value: 0.1 }, { type: 7, value: 0.2 }, { type: 8, value: 9.8 },
     { type: 9, value: 0.01 }, { type: 10, value: 0.02 }, { type: 11, value: 0.03 },
     { type: 12, value: 3.8 },
+    { type: 13, value: 48.25 },
   ] });
   assert.equal(result.status, 201);
   const line = timeseriesWrites[0].data;
   for (const field of ["temperature", "humidity", "length", "accel_x", "accel_y", "accel_z",
-    "gyro_x", "gyro_y", "gyro_z", "battery_voltage"]) {
+    "gyro_x", "gyro_y", "gyro_z", "battery_voltage", "mcu_temperature"]) {
     assert.match(line, new RegExp(`sensor_${field}=`));
   }
   assert.match(line, /lat=59\.3293,lon=18\.0686/);
   assert.doesNotMatch(line, /sensor_\d+=|sensor_gps=/);
+});
+
+test("MCU temperature accepts the supported ESP32-S3 range", async () => {
+  let result = await publish({ sensors: [{ type: 13, value: -40 }] });
+  assert.equal(result.status, 201);
+  result = await publish({ sensors: [{ type: 13, value: 125 }] });
+  assert.equal(result.status, 201);
+  assert.match(timeseriesWrites.at(-1).data, /sensor_mcu_temperature=125/);
+});
+
+test("MCU temperature rejects values outside the supported range", async () => {
+  let result = await publish({ sensors: [{ type: 13, value: -40.01 }] });
+  assert.equal(result.status, 400);
+  result = await publish({ sensors: [{ type: 13, value: 125.01 }] });
+  assert.equal(result.status, 400);
 });
 
 
