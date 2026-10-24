@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
           targets='[
-            {"environment":"heltec-hc33","label":"HT-HC33","artifact":"ht-hc33","image":"firmware.factory.bin","output":"offgrid-tracker-ht-hc33.bin"},
+            {"environment":"ht-hc33-sensor","label":"HT-HC33 sensor","artifact":"ht-hc33","image":"firmware.factory.bin","output":"offgrid-tracker-ht-hc33.bin"},
             {"environment":"edgez-nrf54l15-fgh200m-companion","label":"nRF54L15 companion","artifact":"nrf54l15-companion","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-companion.hex"},
             {"environment":"edgez-nrf54l15-fgh200m-sensor","label":"nRF54L15 sensor","artifact":"nrf54l15-sensor","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-sensor.hex"}
           ]'
