@@ -10,6 +10,7 @@
 #include "edgez_rf_api.h"
 #include "edgez_umac.h"
 #include "esp_err.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
@@ -38,6 +39,8 @@
 #define SENSOR_NVS_NAMESPACE "edgez_sensor"
 #define SENSOR_NVS_PROFILE_KEY "profile_v1"
 #define SENSOR_NVS_DOWNLINK_ACK_KEY "dl_ack_v1"
+#define SENSOR_RTC_CACHE_MAGIC UINT32_C(0x455a5254)
+#define SENSOR_RTC_CACHE_VERSION 1U
 #define DOWNLINK_HEADER_LENGTH 12U
 #define PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define PROVISIONING_NONCE_LEN 12U
@@ -66,6 +69,16 @@ typedef struct {
 } sensor_profile_t;
 
 typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t length;
+    bool has_profile;
+    sensor_profile_t profile;
+    uint32_t downlink_ack_id;
+    uint32_t crc32;
+} sensor_rtc_cache_t;
+
+typedef struct {
     size_t length;
     uint8_t payload[SENSOR_PACKET_MAX];
 } acceptance_item_t;
@@ -92,6 +105,8 @@ static bool radio_running;
 static uint8_t active_bandwidth_mhz = 1U;
 static bool response_downlink_pending;
 static uint32_t downlink_ack_id;
+static bool nvs_ready;
+static RTC_DATA_ATTR sensor_rtc_cache_t rtc_cache;
 
 __attribute__((weak)) esp_err_t edgez_sensor_handle_downlink(
     const char *command, const uint8_t *payload, size_t payload_length)
@@ -147,10 +162,49 @@ static bool profile_valid(const sensor_profile_t *candidate)
             offsetof(sensor_profile_t, crc32));
 }
 
+static esp_err_t ensure_nvs_ready(void)
+{
+    if (nvs_ready) return ESP_OK;
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    nvs_ready = err == ESP_OK;
+    return err;
+}
+
+static bool rtc_cache_valid(void)
+{
+    return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER &&
+        rtc_cache.magic == SENSOR_RTC_CACHE_MAGIC &&
+        rtc_cache.version == SENSOR_RTC_CACHE_VERSION &&
+        rtc_cache.length == sizeof(rtc_cache) &&
+        (!rtc_cache.has_profile || profile_valid(&rtc_cache.profile)) &&
+        rtc_cache.crc32 == ieee_crc32(&rtc_cache,
+                                      offsetof(sensor_rtc_cache_t, crc32));
+}
+
+static void update_rtc_cache(bool has_profile)
+{
+    memset(&rtc_cache, 0, sizeof(rtc_cache));
+    rtc_cache.magic = SENSOR_RTC_CACHE_MAGIC;
+    rtc_cache.version = SENSOR_RTC_CACHE_VERSION;
+    rtc_cache.length = sizeof(rtc_cache);
+    rtc_cache.has_profile = has_profile;
+    if (has_profile) rtc_cache.profile = profile;
+    rtc_cache.downlink_ack_id = downlink_ack_id;
+    rtc_cache.crc32 = ieee_crc32(&rtc_cache,
+                                 offsetof(sensor_rtc_cache_t, crc32));
+}
+
 static esp_err_t load_profile(void)
 {
+    esp_err_t err = ensure_nvs_ready();
+    if (err != ESP_OK) return err;
     nvs_handle_t handle;
-    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READONLY, &handle);
+    err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) return err;
     size_t length = sizeof(profile);
     err = nvs_get_blob(handle, SENSOR_NVS_PROFILE_KEY, &profile, &length);
@@ -169,17 +223,24 @@ static esp_err_t save_profile(sensor_profile_t *candidate)
     candidate->length = sizeof(*candidate);
     candidate->crc32 = ieee_crc32(candidate, offsetof(sensor_profile_t, crc32));
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = ensure_nvs_ready();
+    if (err == ESP_OK) {
+        err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    }
     if (err == ESP_OK) err = nvs_set_blob(handle, SENSOR_NVS_PROFILE_KEY,
                                            candidate, sizeof(*candidate));
     if (err == ESP_OK) err = nvs_commit(handle);
     if (handle != 0) nvs_close(handle);
-    if (err == ESP_OK) profile = *candidate;
+    if (err == ESP_OK) {
+        profile = *candidate;
+        update_rtc_cache(true);
+    }
     return err;
 }
 
 static void load_downlink_ack(void)
 {
+    if (ensure_nvs_ready() != ESP_OK) return;
     nvs_handle_t handle;
     if (nvs_open(SENSOR_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
         (void)nvs_get_u32(handle, SENSOR_NVS_DOWNLINK_ACK_KEY,
@@ -191,7 +252,10 @@ static void load_downlink_ack(void)
 static esp_err_t save_downlink_ack(uint32_t message_id)
 {
     nvs_handle_t handle = 0;
-    esp_err_t err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    esp_err_t err = ensure_nvs_ready();
+    if (err == ESP_OK) {
+        err = nvs_open(SENSOR_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    }
     if (err == ESP_OK) {
         err = message_id == 0U
             ? nvs_erase_key(handle, SENSOR_NVS_DOWNLINK_ACK_KEY)
@@ -203,6 +267,7 @@ static esp_err_t save_downlink_ack(uint32_t message_id)
     if (handle != 0) nvs_close(handle);
     if (err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND) {
         downlink_ack_id = message_id;
+        update_rtc_cache(profile_valid(&profile));
         return ESP_OK;
     }
     return err;
@@ -872,19 +937,24 @@ static void sensor_task(void *arg)
 
 void app_main(void)
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
-        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
-    load_downlink_ack();
     ESP_ERROR_CHECK(edgez_esp_factory_data_init());
     ESP_ERROR_CHECK(edgez_esp_factory_data_get(&factory_identity));
     ESP_ERROR_CHECK(edgez_rf_platform_init() == 0 ? ESP_OK : ESP_FAIL);
-    esp_err_t profile_err = load_factory_profile();
-    if (profile_err != ESP_OK) profile_err = load_profile();
+    esp_err_t profile_err = ESP_ERR_NOT_FOUND;
+    if (rtc_cache_valid()) {
+        downlink_ack_id = rtc_cache.downlink_ack_id;
+        if (rtc_cache.has_profile) {
+            profile = rtc_cache.profile;
+            profile_err = ESP_OK;
+        }
+        ESP_LOGI(TAG, "restored sensor state from RTC; NVS read skipped");
+    } else {
+        ESP_ERROR_CHECK(ensure_nvs_ready());
+        load_downlink_ack();
+        profile_err = load_factory_profile();
+        if (profile_err != ESP_OK) profile_err = load_profile();
+        update_rtc_cache(profile_err == ESP_OK);
+    }
     ESP_LOGI(TAG, "HT-HC33 sensor boot factory=%s profile=%s",
              factory_identity.serial,
              profile_err == ESP_OK ? "provisioned" : "discover");
