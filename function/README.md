@@ -27,7 +27,8 @@ latest-telemetry row. This releases the unique HaLow MAC mapping before a device
 with the same serial and radio is recreated; deleting an already-absent row is
 treated as success.
 
-System status, topology, and HaLow RF metrics are handled by Appwrite's Devices
-service and never enter this Function. Clients request topology explicitly with
+System status, discovery, topology, and HaLow RF metrics are handled by Appwrite's Devices
+service and never enter this Function. Gateways publish application sensor readings
+separately on `telemetry/sensors`. Clients request topology explicitly with
 `includeTopology=true` and fetch RF history separately from
 `/devices/{deviceId}/halow-metrics`.

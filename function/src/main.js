@@ -413,15 +413,6 @@ export default async function main({ req, res, error, log = () => {} }) {
   }
 
   const deviceId = eventDeviceId(req);
-  let loggedPayload = body.payload ?? null;
-  if (typeof loggedPayload === "string") {
-    try { loggedPayload = JSON.parse(loggedPayload); } catch { /* Log the invalid string below. */ }
-  }
-  log(JSON.stringify({
-    mqttDeviceId: deviceId,
-    topic: typeof body.topic === "string" ? body.topic : "",
-    payload: loggedPayload,
-  }));
   if (!deviceId || body.event !== "message.publish") {
     return json(res, { accepted: false, reason: "not_mqtt_publish_event" }, 202);
   }
@@ -430,6 +421,11 @@ export default async function main({ req, res, error, log = () => {} }) {
   if (topic.includes("/system/") || topic.endsWith("/telemetry/status")) {
     return json(res, { accepted: false, reason: "system_status_owned_by_devices" }, 202);
   }
+  let loggedPayload = body.payload ?? null;
+  if (typeof loggedPayload === "string") {
+    try { loggedPayload = JSON.parse(loggedPayload); } catch { /* Log the invalid string below. */ }
+  }
+  log(JSON.stringify({ mqttDeviceId: deviceId, topic, payload: loggedPayload }));
   const route = topicParts(topic);
   if (!route || route.projectId !== process.env.APPWRITE_FUNCTION_PROJECT_ID) {
     return json(res, { error: "MQTT topic does not match this Appwrite project" }, 400);

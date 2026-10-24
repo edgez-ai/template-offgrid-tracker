@@ -68,6 +68,6 @@ method settings. Do not execute it unless the user explicitly requests cleanup.
 
 ## Native device state
 
-Device status, firmware version, HaLow identity, and transport gateway come from the Devices API. Topology is projected from Appwrite's `deviceTopologyLinks` collection; RF history is available at `/devices/{deviceId}/halow-metrics`. The Function must not write system status or topology. It receives `{clientId, sensors}` projections of combined system reports on the logical `telemetry/sensors` event topic.
+Device status, firmware version, HaLow identity, and transport gateway come from the Devices API. Topology is projected from Appwrite's `deviceTopologyLinks` collection; RF history is available at `/devices/{deviceId}/halow-metrics`. The Function must not receive or write system topics, status, or topology. Gateways publish `{clientId, sensors}` application telemetry separately on `telemetry/sensors`.
 
 Map settings use native `markerType`, `markerColor`, and `location` ([longitude, latitude]) fields. Application GPS measurements remain in sensor telemetry. Do not restore metadata-based marker settings or the application topology table.

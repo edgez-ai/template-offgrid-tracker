@@ -17,6 +17,23 @@ menu "HaLow initialization"
         range 5 3600
         default 15
 
+    config OFFGRID_HT_HC33_FACTORY_RESET_BUTTON
+        bool "Wake and erase NVS after a long button hold"
+        depends on OFFGRID_HT_HC33_SENSOR
+        default y
+
+    config OFFGRID_HT_HC33_FACTORY_RESET_GPIO
+        int "HT-HC33 factory-reset wake GPIO"
+        depends on OFFGRID_HT_HC33_FACTORY_RESET_BUTTON
+        range 0 21
+        default 0
+
+    config OFFGRID_HT_HC33_FACTORY_RESET_HOLD_MS
+        int "HT-HC33 factory-reset hold after wake (ms)"
+        depends on OFFGRID_HT_HC33_FACTORY_RESET_BUTTON
+        range 1000 30000
+        default 5000
+
     config DAB_RAW_RF_TEST
         bool "Build the isolated EdgeZ raw-RF test image"
         default n

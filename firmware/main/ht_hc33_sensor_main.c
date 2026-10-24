@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "driver/temperature_sensor.h"
 #include "edgez_esp_factory_data.h"
 #include "edgez_pawr_protocol.h"
@@ -14,6 +15,7 @@
 #include "esp_attr.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -30,7 +32,7 @@
 #endif
 
 #define SENSOR_PROFILE_MAGIC UINT32_C(0x455a5331)
-#define SENSOR_PROFILE_VERSION 1U
+#define SENSOR_PROFILE_VERSION 2U
 #define SENSOR_PACKET_MAX 512U
 #define SENSOR_ACCEPT_QUEUE_DEPTH 2U
 #define SENSOR_RESPONSE_TIMEOUT_MS 100U
@@ -41,7 +43,7 @@
 #define SENSOR_NVS_PROFILE_KEY "profile_v1"
 #define SENSOR_NVS_DOWNLINK_ACK_KEY "dl_ack_v1"
 #define SENSOR_RTC_CACHE_MAGIC UINT32_C(0x455a5254)
-#define SENSOR_RTC_CACHE_VERSION 1U
+#define SENSOR_RTC_CACHE_VERSION 2U
 #define DOWNLINK_HEADER_LENGTH 12U
 #define PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define PROVISIONING_NONCE_LEN 12U
@@ -62,6 +64,7 @@ typedef struct {
     uint32_t beacon_interval_seconds;
     uint8_t bandwidth_mhz;
     uint8_t marker;
+    bool cloud_accepted;
     bool share_location;
     float latitude;
     float longitude;
@@ -108,6 +111,77 @@ static bool response_downlink_pending;
 static uint32_t downlink_ack_id;
 static bool nvs_ready;
 static RTC_DATA_ATTR sensor_rtc_cache_t rtc_cache;
+static esp_err_t ensure_nvs_ready(void);
+
+#if CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_BUTTON
+static bool factory_reset_button_pressed(void)
+{
+    return gpio_get_level((gpio_num_t)
+        CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_GPIO) == 0;
+}
+
+static esp_err_t configure_factory_reset_button(void)
+{
+    const gpio_config_t config = {
+        .pin_bit_mask = UINT64_C(1) <<
+            CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    return gpio_config(&config);
+}
+
+static void handle_factory_reset_wakeup(void)
+{
+    ESP_ERROR_CHECK(configure_factory_reset_button());
+    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT1 ||
+        !factory_reset_button_pressed()) {
+        return;
+    }
+
+    const TickType_t started = xTaskGetTickCount();
+    const TickType_t required = pdMS_TO_TICKS(
+        CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_HOLD_MS);
+    ESP_LOGI(TAG, "Reset button woke sensor; hold for %u ms to erase NVS",
+             CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_HOLD_MS);
+    while (factory_reset_button_pressed()) {
+        if (xTaskGetTickCount() - started >= required) {
+            ESP_LOGW(TAG, "Factory reset armed; release button to continue");
+            while (factory_reset_button_pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(25));
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ESP_ERROR_CHECK(ensure_nvs_ready());
+            ESP_ERROR_CHECK(nvs_flash_erase());
+            nvs_ready = false;
+            memset(&profile, 0, sizeof(profile));
+            memset(&rtc_cache, 0, sizeof(rtc_cache));
+            downlink_ack_id = 0U;
+            ESP_LOGW(TAG, "NVS erased; factory_data preserved; restarting");
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(25));
+    }
+    ESP_LOGI(TAG, "Factory reset cancelled before hold threshold");
+}
+
+static void enable_factory_reset_wakeup(void)
+{
+    const gpio_num_t gpio = (gpio_num_t)
+        CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_GPIO;
+    ESP_ERROR_CHECK(configure_factory_reset_button());
+    ESP_ERROR_CHECK(rtc_gpio_pullup_en(gpio));
+    ESP_ERROR_CHECK(rtc_gpio_pulldown_dis(gpio));
+    ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup_io(
+        UINT64_C(1) << CONFIG_OFFGRID_HT_HC33_FACTORY_RESET_GPIO,
+        ESP_EXT1_WAKEUP_ANY_LOW));
+}
+#else
+static void handle_factory_reset_wakeup(void) {}
+static void enable_factory_reset_wakeup(void) {}
+#endif
 
 static esp_err_t read_mcu_temperature(float *celsius)
 {
@@ -319,6 +393,7 @@ static esp_err_t load_factory_profile(void)
            sizeof(profile.user_id_low));
     profile.frequency_khz = frequency_khz;
     profile.bandwidth_mhz = bandwidth_mhz;
+    profile.cloud_accepted = false;
     profile.beacon_interval_seconds =
         CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
     strlcpy(profile.icon_style, "sensor", sizeof(profile.icon_style));
@@ -610,6 +685,7 @@ static esp_err_t apply_acceptance(const uint8_t *payload, size_t length)
     if (accepted.icon_style[0] == '\0') {
         strlcpy(accepted.icon_style, "sensor", sizeof(accepted.icon_style));
     }
+    accepted.cloud_accepted = true;
     memset(plaintext, 0, sizeof(plaintext));
     if (strlen(accepted.country) != 2U || accepted.mesh_id[0] == '\0' ||
         accepted.frequency_khz == 0U || accepted.bandwidth_mhz == 0U) {
@@ -739,6 +815,7 @@ static void sensor_sleep(uint32_t interval_ms)
     ESP_ERROR_CHECK(gpio_set_level((gpio_num_t)CONFIG_MM_RESET_N, 0));
     ESP_ERROR_CHECK(gpio_hold_en((gpio_num_t)CONFIG_MM_RESET_N));
     gpio_deep_sleep_hold_en();
+    enable_factory_reset_wakeup();
     ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(
         (uint64_t)interval_ms * UINT64_C(1000)));
     ESP_LOGI(TAG, "sensor cycle complete; deep sleep for %lu ms",
@@ -833,7 +910,7 @@ static bool apply_downlink(const uint8_t *payload, size_t length)
     return true;
 }
 
-static bool receive_downlink(void)
+static bool receive_pending_packet(void)
 {
     acceptance_item_t item;
     const TickType_t deadline = xTaskGetTickCount() +
@@ -844,6 +921,15 @@ static bool receive_downlink(void)
         const TickType_t remaining = deadline > now ? deadline - now : 0;
         if (xQueueReceive(acceptance_queue, &item, remaining) != pdTRUE)
             break;
+        /* A sensor bootstrapped from factory HaLow settings already emits
+         * beacons, so its cloud acceptance arrives through the same pending
+         * packet window as ordinary downlinks.  Apply the encrypted profile
+         * first: it carries the Appwrite Device UUID that must replace the
+         * temporary public-key-derived beacon identity. */
+        if (apply_acceptance(item.payload, item.length) == ESP_OK) {
+            ESP_LOGI(TAG, "cloud identity accepted from beacon downlink window");
+            return true;
+        }
         if (apply_downlink(item.payload, item.length))
             return true;
     } while (xTaskGetTickCount() < deadline);
@@ -883,7 +969,8 @@ static bool advance_bootstrap_channel(const char *country, uint8_t *channel)
 static void sensor_task(void *arg)
 {
     (void)arg;
-    bool provisioned = profile_valid(&profile);
+    const bool has_network_profile = profile_valid(&profile);
+    const bool provisioned = has_network_profile && profile.cloud_accepted;
     uint8_t bootstrap_channel = factory_identity.channel;
     const uint32_t interval_ms =
         CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS * 1000U;
@@ -900,7 +987,7 @@ static void sensor_task(void *arg)
             err = send_request(payload, payload_length, interval_ms);
         }
 		if (err == ESP_OK && response_downlink_pending &&
-		    !receive_downlink()) {
+		    !receive_pending_packet()) {
 			ESP_LOGW(TAG, "gateway advertised a downlink but none was received");
 		}
         ESP_LOGI(TAG, "Beacon PAwR request %s bytes=%u",
@@ -911,6 +998,29 @@ static void sensor_task(void *arg)
             profile.beacon_interval_seconds :
             CONFIG_OFFGRID_HT_HC33_SENSOR_INTERVAL_SECONDS;
         sensor_sleep(report_seconds * 1000U);
+    }
+
+    /* Factory data is a zero-touch network bootstrap, not a cloud identity.
+     * Use its exact regulatory/channel/mesh settings to advertise discovery;
+     * the encrypted acceptance supplies and durably stores the Appwrite UUID. */
+    if (has_network_profile) {
+        uint8_t payload[SENSOR_PACKET_MAX];
+        size_t payload_length = 0U;
+        esp_err_t err = start_radio(profile.country, profile.frequency_khz,
+                                    profile.bandwidth_mhz, profile.mesh_id);
+        if (err == ESP_OK) {
+            err = build_discovery(payload, sizeof(payload), &payload_length);
+        }
+        if (err == ESP_OK) {
+            err = send_request(payload, payload_length, interval_ms);
+        }
+        bool accepted = err == ESP_OK && try_acceptance();
+        ESP_LOGI(TAG,
+                 "factory-network discover PAwR request %s accepted=%u bytes=%u",
+                 err == ESP_OK ? "acknowledged" : "unacknowledged",
+                 accepted, (unsigned)payload_length);
+        stop_radio();
+        sensor_sleep(interval_ms);
     }
 
     uint32_t factory_frequency_khz = 0U;
@@ -974,6 +1084,7 @@ void app_main(void)
 {
     ESP_ERROR_CHECK(edgez_esp_factory_data_init());
     ESP_ERROR_CHECK(edgez_esp_factory_data_get(&factory_identity));
+    handle_factory_reset_wakeup();
     ESP_ERROR_CHECK(edgez_rf_platform_init() == 0 ? ESP_OK : ESP_FAIL);
     esp_err_t profile_err = ESP_ERR_NOT_FOUND;
     if (rtc_cache_valid()) {
@@ -986,8 +1097,12 @@ void app_main(void)
     } else {
         ESP_ERROR_CHECK(ensure_nvs_ready());
         load_downlink_ack();
-        profile_err = load_factory_profile();
-        if (profile_err != ESP_OK) profile_err = load_profile();
+        /* A cloud acceptance contains the authoritative Device UUID.  Keep
+         * the factory profile as the zero-touch fallback only; otherwise a
+         * valid factory mesh profile would overwrite the accepted identity on
+         * every cold boot and H7608 would reconstruct a stale clientId. */
+        profile_err = load_profile();
+        if (profile_err != ESP_OK) profile_err = load_factory_profile();
         update_rtc_cache(profile_err == ESP_OK);
     }
     ESP_LOGI(TAG, "HT-HC33 sensor boot factory=%s profile=%s",
