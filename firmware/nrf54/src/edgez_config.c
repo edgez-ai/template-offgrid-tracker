@@ -28,6 +28,7 @@ LOG_MODULE_REGISTER(edgez_config, LOG_LEVEL_INF);
 #define EDGEZ_DEFAULT_INTERVAL_SECONDS 30
 #define EDGEZ_PROFILE_SETTINGS_KEY "edgez/profile/v1"
 #define EDGEZ_COUNTRY_SETTINGS_KEY "edgez/country/v1"
+#define EDGEZ_GATEWAY_SETTINGS_KEY "edgez/gateway/v1"
 #define EDGEZ_PROFILE_MAGIC 0x455A5031U
 #define EDGEZ_PROFILE_VERSION 1U
 #define EDGEZ_PROVISIONING_COMMIT_GRACE_MS 5000
@@ -69,6 +70,7 @@ static uint32_t config_generation = 1;
 static bool halow_initialized;
 static bool halow_link_up;
 static uint8_t halow_mac[6];
+static uint8_t gateway_mac[6];
 static int64_t runtime_start_not_before_ms;
 static atomic_t halow_beacon_build_count;
 static atomic_t halow_beacon_last_ies_len;
@@ -640,12 +642,22 @@ void edgez_config_init(const char *mesh_id, const char *passphrase)
 	halow_initialized = false;
 	halow_link_up = false;
 	memset(halow_mac, 0, sizeof(halow_mac));
+	memset(gateway_mac, 0, sizeof(gateway_mac));
 	config_generation = 1;
 	runtime_start_not_before_ms = 0;
 	atomic_set(&halow_beacon_build_count, 0);
 	atomic_set(&halow_beacon_last_ies_len, 0);
 	if (settings_rc == 0 || settings_rc == -EALREADY) {
 		load_rc = load_persisted_profile_locked();
+		if (load_rc == 0) {
+			ssize_t gateway_len = settings_load_one(
+				EDGEZ_GATEWAY_SETTINGS_KEY, gateway_mac,
+				sizeof(gateway_mac));
+			if (gateway_len != sizeof(gateway_mac) ||
+			    (gateway_mac[0] & 0x01U) != 0U) {
+				memset(gateway_mac, 0, sizeof(gateway_mac));
+			}
+		}
 		if (load_rc != 0 && load_rc != -ENOENT) {
 			LOG_WRN("Persistent HaLow profile ignored: %d", load_rc);
 		} else if (load_rc == -ENOENT) {
@@ -703,7 +715,28 @@ void edgez_config_get_profile(struct edgez_halow_profile *profile)
 	profile->device_type = (uint32_t)settings.device_type;
 	profile->sleep_mode_enabled = settings.sleep_mode_enabled;
 	profile->device_gps_enabled = settings.device_gps_enabled;
+	memcpy(profile->gateway_mac, gateway_mac, sizeof(profile->gateway_mac));
 	k_mutex_unlock(&config_lock);
+}
+
+int edgez_config_set_gateway_mac(const uint8_t mac[6])
+{
+	static const uint8_t zero[6];
+	int rc;
+
+	if (!mac || (mac[0] & 0x01U) != 0U ||
+	    memcmp(mac, zero, sizeof(zero)) == 0) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&config_lock, K_FOREVER);
+	rc = settings_save_one(EDGEZ_GATEWAY_SETTINGS_KEY, mac,
+			       sizeof(gateway_mac));
+	if (rc == 0) {
+		memcpy(gateway_mac, mac, sizeof(gateway_mac));
+		config_generation++;
+	}
+	k_mutex_unlock(&config_lock);
+	return rc;
 }
 
 int edgez_config_apply_provisioning(const char *mesh_id, const char *passphrase,
@@ -803,7 +836,10 @@ bool edgez_config_should_autostart(void)
 	k_mutex_lock(&config_lock, K_FOREVER);
 	ready = persistent_device_mode(settings.device_type) &&
 		settings.mesh_id[0] != '\0' &&
-		mesh_frequency_khz > 0 && mesh_bandwidth_mhz > 0;
+		mesh_frequency_khz > 0 && mesh_bandwidth_mhz > 0 &&
+		(!IS_ENABLED(CONFIG_OFFGRID_NRF54_ROLE_SENSOR) ||
+		 ((gateway_mac[0] & 0x01U) == 0U &&
+		  memcmp(gateway_mac, (const uint8_t[6]){0}, 6U) != 0));
 	k_mutex_unlock(&config_lock);
 	return ready;
 }

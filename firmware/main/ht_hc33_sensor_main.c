@@ -7,6 +7,9 @@
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "driver/temperature_sensor.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 #include "cJSON.h"
 #include "edgez_esp_factory_data.h"
 #include "edgez_pawr_bulk.h"
@@ -37,7 +40,7 @@
 #endif
 
 #define SENSOR_PROFILE_MAGIC UINT32_C(0x455a5331)
-#define SENSOR_PROFILE_VERSION 2U
+#define SENSOR_PROFILE_VERSION 3U
 #define SENSOR_PACKET_MAX 512U
 #define SENSOR_ACCEPT_QUEUE_DEPTH 2U
 #define SENSOR_RESPONSE_TIMEOUT_MS 100U
@@ -47,15 +50,17 @@
 #define SENSOR_NVS_NAMESPACE "edgez_sensor"
 #define SENSOR_NVS_PROFILE_KEY "profile_v1"
 #define SENSOR_NVS_DOWNLINK_ACK_KEY "dl_ack_v1"
-#define SENSOR_NVS_SETTINGS_KEY "settings_v1"
+#define SENSOR_NVS_SETTINGS_KEY "settings_v2"
 #define SENSOR_RTC_CACHE_MAGIC UINT32_C(0x455a5254)
-#define SENSOR_RTC_CACHE_VERSION 3U
+#define SENSOR_RTC_CACHE_VERSION 4U
 #define SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
 #define SENSOR_BULK_ACK_ATTEMPTS 4U
 #define DOWNLINK_HEADER_LENGTH 12U
 #define PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define PROVISIONING_NONCE_LEN 12U
 #define PROVISIONING_TAG_LEN 16U
+#define BATTERY_ENABLE_GPIO GPIO_NUM_20
+#define BATTERY_ADC_CHANNEL ADC_CHANNEL_0
 
 typedef struct {
     uint32_t magic;
@@ -77,6 +82,7 @@ typedef struct {
     float latitude;
     float longitude;
     char icon_style[17];
+    uint8_t gateway_mac[6];
     uint32_t crc32;
 } sensor_profile_t;
 
@@ -98,12 +104,13 @@ typedef struct {
     uint32_t downlink_ack_id;
     uint32_t block_sequence;
     uint8_t sample_count;
-    float temperature_samples[EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK];
+    float voltage_samples[EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK];
     uint32_t crc32;
 } sensor_rtc_cache_t;
 
 typedef struct {
     size_t length;
+    uint8_t source[6];
     uint8_t payload[SENSOR_PACKET_MAX];
 } acceptance_item_t;
 
@@ -113,6 +120,7 @@ static const uint8_t conversation_label[] = "EdgeZ conversation v1";
 static const uint8_t broadcast_mac[6] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 };
+static const uint8_t zero_mac[6];
 static struct edgez_umac sensor_umac;
 static struct edgez_umac_radio_info radio_info;
 static sensor_profile_t profile;
@@ -121,6 +129,7 @@ static SemaphoreHandle_t response_sem;
 static QueueHandle_t acceptance_queue;
 static uint32_t expected_hash;
 static uint32_t active_compressed_ssid;
+static char active_mesh_id[33];
 static uint16_t sequence_number;
 static uintptr_t tx_token;
 static uint32_t request_id;
@@ -131,8 +140,11 @@ static bool response_downlink_pending;
 static uint32_t downlink_ack_id;
 static sensor_settings_record_t sensor_settings;
 static uint32_t block_sequence;
-static uint8_t temperature_sample_count;
-static float temperature_samples[EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK];
+static uint8_t voltage_sample_count;
+static float voltage_samples[EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK];
+static adc_oneshot_unit_handle_t battery_adc;
+static adc_cali_handle_t battery_calibration;
+static bool battery_ready;
 static SemaphoreHandle_t bulk_ack_sem;
 static uint8_t bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
 static size_t bulk_ack_length;
@@ -142,6 +154,68 @@ static esp_err_t ensure_nvs_ready(void);
 static uint32_t ieee_crc32(const void *data, size_t length);
 static bool profile_valid(const sensor_profile_t *candidate);
 static void update_rtc_cache(bool has_profile);
+
+static esp_err_t battery_init(void)
+{
+    const gpio_config_t enable = {
+        .pin_bit_mask = UINT64_C(1) << BATTERY_ENABLE_GPIO,
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    esp_err_t err = gpio_config(&enable);
+    if (err == ESP_OK) err = gpio_set_level(BATTERY_ENABLE_GPIO, 0);
+    const adc_oneshot_unit_init_cfg_t unit_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    if (err == ESP_OK) err = adc_oneshot_new_unit(&unit_config, &battery_adc);
+    const adc_oneshot_chan_cfg_t channel_config = {
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    if (err == ESP_OK) {
+        err = adc_oneshot_config_channel(battery_adc, BATTERY_ADC_CHANNEL,
+                                         &channel_config);
+    }
+    const adc_cali_curve_fitting_config_t calibration_config = {
+        .unit_id = ADC_UNIT_1,
+        .chan = BATTERY_ADC_CHANNEL,
+        .atten = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    if (err == ESP_OK) {
+        err = adc_cali_create_scheme_curve_fitting(&calibration_config,
+                                                    &battery_calibration);
+    }
+    battery_ready = err == ESP_OK;
+    return err;
+}
+
+static esp_err_t battery_read(float *volts)
+{
+    if (!battery_ready || volts == NULL) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = gpio_set_level(BATTERY_ENABLE_GPIO, 1);
+    if (err != ESP_OK) return err;
+    vTaskDelay(pdMS_TO_TICKS(10));
+    int millivolts = 0;
+    for (unsigned sample = 0U; sample < 16U && err == ESP_OK; ++sample) {
+        int raw = 0;
+        int sample_mv = 0;
+        err = adc_oneshot_read(battery_adc, BATTERY_ADC_CHANNEL, &raw);
+        if (err == ESP_OK) {
+            err = adc_cali_raw_to_voltage(
+                battery_calibration, raw, &sample_mv);
+        }
+        if (err == ESP_OK) millivolts += sample_mv;
+    }
+    (void)gpio_set_level(BATTERY_ENABLE_GPIO, 0);
+    if (err == ESP_OK) {
+        const int battery_mv = (millivolts / 16) * 2;
+        if (battery_mv < 2500 || battery_mv > 5000) {
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+        *volts = battery_mv / 1000.0f;
+    }
+    return err;
+}
 extern enum mmwlan_status mmdrv_set_duty_cycle(
     uint32_t duty_cycle, bool duty_cycle_omit_ctrl_resp,
     enum mmwlan_duty_cycle_mode mode);
@@ -267,8 +341,8 @@ static void sensor_settings_default(uint32_t interval_ms)
     sensor_settings.version = EDGEZ_SENSOR_SETTINGS_VERSION;
     sensor_settings.length = sizeof(sensor_settings);
     sensor_settings.value.sampling_interval_ms = interval_ms;
-    sensor_settings.value.samples_per_block = 8U;
-    sensor_settings.value.send_blocks = false;
+    sensor_settings.value.block_sampling_count = 0U;
+    voltage_sample_count = 0U;
     sensor_settings.crc32 = ieee_crc32(&sensor_settings,
         offsetof(sensor_settings_record_t, crc32));
 }
@@ -299,7 +373,7 @@ static esp_err_t save_sensor_settings(
     if (handle != 0) nvs_close(handle);
     if (err == ESP_OK) {
         sensor_settings = updated;
-        temperature_sample_count = 0U;
+        voltage_sample_count = 0U;
         update_rtc_cache(profile_valid(&profile));
     }
     return err;
@@ -323,25 +397,22 @@ esp_err_t edgez_sensor_handle_downlink(
     if (root == NULL) return ESP_ERR_INVALID_ARG;
     const cJSON *interval = cJSON_GetObjectItemCaseSensitive(
         root, "samplingIntervalMs");
-    const cJSON *send_blocks = cJSON_GetObjectItemCaseSensitive(
-        root, "sendBlocks");
     const cJSON *samples = cJSON_GetObjectItemCaseSensitive(
-        root, "samplesPerBlock");
+        root, "blockSamplingCount");
     struct edgez_sensor_settings updated = {0};
-    bool parsed = cJSON_IsNumber(interval) && cJSON_IsBool(send_blocks) &&
-        cJSON_IsNumber(samples) &&
+    bool parsed = cJSON_IsNumber(interval) && cJSON_IsNumber(samples) &&
         interval->valuedouble >= EDGEZ_SENSOR_SETTINGS_MIN_INTERVAL_MS &&
         interval->valuedouble <= EDGEZ_SENSOR_SETTINGS_MAX_INTERVAL_MS &&
-        samples->valuedouble >= 1.0 &&
+        samples->valuedouble >= 0.0 &&
         samples->valuedouble <=
             EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK;
     if (parsed) {
         updated.sampling_interval_ms = (uint32_t)interval->valuedouble;
-        updated.send_blocks = cJSON_IsTrue(send_blocks);
-        updated.samples_per_block = (uint16_t)samples->valuedouble;
+        updated.block_sampling_count = (uint16_t)samples->valuedouble;
         parsed = interval->valuedouble ==
             (double)updated.sampling_interval_ms &&
-            samples->valuedouble == (double)updated.samples_per_block &&
+            samples->valuedouble ==
+                (double)updated.block_sampling_count &&
             edgez_sensor_settings_valid(&updated);
     }
     cJSON_Delete(root);
@@ -352,9 +423,9 @@ esp_err_t edgez_sensor_handle_downlink(
     esp_err_t err = save_sensor_settings(&updated);
     if (err == ESP_OK) {
         ESP_LOGI(TAG,
-                 "sensor settings saved interval=%lu ms blocks=%u samples=%u",
+                 "sensor settings saved interval=%lu ms block_samples=%u",
                  (unsigned long)updated.sampling_interval_ms,
-                 updated.send_blocks, (unsigned)updated.samples_per_block);
+                 (unsigned)updated.block_sampling_count);
     }
     return err;
 }
@@ -386,6 +457,9 @@ static bool profile_valid(const sensor_profile_t *candidate)
         candidate->length == sizeof(*candidate) &&
         strlen(candidate->country) == 2U && candidate->mesh_id[0] != '\0' &&
         candidate->frequency_khz != 0U && candidate->bandwidth_mhz != 0U &&
+        (!candidate->cloud_accepted ||
+            ((candidate->gateway_mac[0] & 0x01U) == 0U &&
+             memcmp(candidate->gateway_mac, zero_mac, sizeof(zero_mac)) != 0)) &&
         candidate->crc32 == ieee_crc32(candidate,
             offsetof(sensor_profile_t, crc32));
 }
@@ -413,6 +487,8 @@ static bool rtc_cache_valid(void)
         sensor_settings_record_valid(&rtc_cache.settings) &&
         rtc_cache.sample_count <=
             EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK &&
+        (rtc_cache.settings.value.block_sampling_count > 0U ||
+            rtc_cache.sample_count == 0U) &&
         rtc_cache.crc32 == ieee_crc32(&rtc_cache,
                                       offsetof(sensor_rtc_cache_t, crc32));
 }
@@ -428,9 +504,9 @@ static void update_rtc_cache(bool has_profile)
     rtc_cache.settings = sensor_settings;
     rtc_cache.downlink_ack_id = downlink_ack_id;
     rtc_cache.block_sequence = block_sequence;
-    rtc_cache.sample_count = temperature_sample_count;
-    memcpy(rtc_cache.temperature_samples, temperature_samples,
-           sizeof(temperature_samples));
+    rtc_cache.sample_count = voltage_sample_count;
+    memcpy(rtc_cache.voltage_samples, voltage_samples,
+           sizeof(voltage_samples));
     rtc_cache.crc32 = ieee_crc32(&rtc_cache,
                                  offsetof(sensor_rtc_cache_t, crc32));
 }
@@ -595,8 +671,8 @@ static esp_err_t build_discovery(uint8_t *output, size_t capacity,
 }
 
 static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length,
-                              float *sample_temperature,
-                              bool *sample_temperature_valid)
+                              float mcu_temperature,
+                              bool temperature_valid)
 {
     ai_edgez_halow_Beacon beacon = ai_edgez_halow_Beacon_init_zero;
     beacon.user_id_high = profile.user_id_high;
@@ -612,15 +688,7 @@ static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length,
         beacon.latitude = profile.latitude;
         beacon.longitude = profile.longitude;
     }
-    float mcu_temperature = 0.0f;
-    const esp_err_t temperature_err = read_mcu_temperature(&mcu_temperature);
-    if (sample_temperature_valid != NULL) {
-        *sample_temperature_valid = temperature_err == ESP_OK;
-    }
-    if (temperature_err == ESP_OK && sample_temperature != NULL) {
-        *sample_temperature = mcu_temperature;
-    }
-    if (temperature_err == ESP_OK &&
+    if (temperature_valid &&
         beacon.sensor_data_count <
             sizeof(beacon.sensor_data) / sizeof(beacon.sensor_data[0])) {
         ai_edgez_halow_SensorData *temperature =
@@ -631,9 +699,8 @@ static esp_err_t build_beacon(uint8_t *output, size_t capacity, size_t *length,
             ai_edgez_halow_SensorData_float_value_tag;
         temperature->value.float_value = mcu_temperature;
         ESP_LOGI(TAG, "MCU temperature %.1f C", (double)mcu_temperature);
-    } else if (temperature_err != ESP_OK) {
-        ESP_LOGW(TAG, "MCU temperature unavailable: %s",
-                 esp_err_to_name(temperature_err));
+    } else if (!temperature_valid) {
+        ESP_LOGW(TAG, "MCU temperature unavailable");
     }
     beacon.downlink_ack_id = downlink_ack_id;
     pb_ostream_t stream = pb_ostream_from_buffer(output, capacity);
@@ -749,7 +816,8 @@ fail:
     return ESP_ERR_INVALID_CRC;
 }
 
-static esp_err_t apply_acceptance(const uint8_t *payload, size_t length)
+static esp_err_t apply_acceptance(const uint8_t *payload, size_t length,
+                                  const uint8_t acceptance_source[6])
 {
     ai_edgez_halow_NetworkPacket outer =
         ai_edgez_halow_NetworkPacket_init_zero;
@@ -847,6 +915,13 @@ static esp_err_t apply_acceptance(const uint8_t *payload, size_t length)
         strlcpy(accepted.icon_style, "sensor", sizeof(accepted.icon_style));
     }
     accepted.cloud_accepted = true;
+    if (acceptance_source == NULL ||
+        (acceptance_source[0] & 0x01U) != 0U) {
+        memset(plaintext, 0, sizeof(plaintext));
+        return ESP_ERR_INVALID_ARG;
+    }
+    memcpy(accepted.gateway_mac, acceptance_source,
+           sizeof(accepted.gateway_mac));
     memset(plaintext, 0, sizeof(plaintext));
     if (strlen(accepted.country) != 2U || accepted.mesh_id[0] == '\0' ||
         accepted.frequency_khz == 0U || accepted.bandwidth_mhz == 0U) {
@@ -902,6 +977,7 @@ static void receive_frame(void *ctx, const struct edgez_umac_rx_frame *radio)
         request.compressed_ssid == active_compressed_ssid &&
         request.payload_length <= SENSOR_PACKET_MAX) {
         acceptance_item_t item = {.length = request.payload_length};
+        memcpy(item.source, action.source, sizeof(item.source));
         memcpy(item.payload, request.payload, request.payload_length);
         (void)xQueueSend(acceptance_queue, &item, 0);
     }
@@ -935,6 +1011,7 @@ static esp_err_t start_radio(const char country[3], uint32_t frequency_khz,
     if (rc == EDGEZ_UMAC_OK) rc = edgez_rf_bind_umac(&sensor_umac);
     active_compressed_ssid = edgez_pawr_compress_ssid(
         (const uint8_t *)mesh_id, strlen(mesh_id));
+    strlcpy(active_mesh_id, mesh_id, sizeof(active_mesh_id));
     const struct edgez_umac_config config = {
         .country_code = {country[0], country[1], '\0'},
         .channel = {
@@ -957,7 +1034,8 @@ static esp_err_t start_radio(const char country[3], uint32_t frequency_khz,
     if (rc == EDGEZ_UMAC_OK) {
         rc = edgez_umac_start(&sensor_umac, &config, &radio_info);
     }
-    if (rc == EDGEZ_UMAC_OK && sensor_settings.value.send_blocks) {
+    if (rc == EDGEZ_UMAC_OK &&
+        sensor_settings.value.block_sampling_count > 0U) {
         struct edgez_rf_regulatory_channel policy = {0};
         if (!edgez_rf_resolve_regulatory_channel(
                 country, frequency_khz * 1000U, bandwidth_mhz, &policy) ||
@@ -1011,28 +1089,60 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
                               uint32_t interval_ms)
 {
     uint8_t packet[EDGEZ_PAWR_HEADER_LENGTH + SENSOR_PACKET_MAX];
-    uint8_t action[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
+    uint8_t frame[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
     size_t packet_length = 0U;
-    size_t action_length = 0U;
+    size_t frame_length = 0U;
     const uint32_t hash = edgez_pawr_payload_hash(payload, payload_length);
+    const bool discovery = !profile.cloud_accepted;
     if (!edgez_pawr_encode_typed_request(packet, sizeof(packet),
             EDGEZ_PAWR_REQUEST_BEACON, ++request_id, interval_ms,
-            active_compressed_ssid, payload, payload_length, &packet_length) ||
-        !edgez_pawr_encode_action_frame(action, sizeof(action),
-            sequence_number++, radio_info.mac_addr, broadcast_mac,
-            packet, packet_length, &action_length)) {
+            active_compressed_ssid, payload, payload_length, &packet_length)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    if (discovery) {
+        const size_t mesh_id_length = strlen(active_mesh_id);
+        const size_t vendor_length = 3U + packet_length;
+        const size_t required = 24U + 2U + 2U + mesh_id_length +
+            2U + vendor_length;
+        if (mesh_id_length == 0U || mesh_id_length > 32U ||
+            vendor_length > UINT8_MAX || required > sizeof(frame)) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        memset(frame, 0, required);
+        frame[0] = 0x40U; /* Probe Request. */
+        memcpy(frame + 4U, broadcast_mac, 6U);
+        memcpy(frame + 10U, radio_info.mac_addr, 6U);
+        memcpy(frame + 16U, broadcast_mac, 6U);
+        frame[22U] = (uint8_t)(sequence_number << 4U);
+        frame[23U] = (uint8_t)(sequence_number >> 4U);
+        sequence_number++;
+        size_t offset = 24U;
+        frame[offset++] = 0U; /* Wildcard SSID IE. */
+        frame[offset++] = 0U;
+        frame[offset++] = 114U; /* Mesh ID IE. */
+        frame[offset++] = (uint8_t)mesh_id_length;
+        memcpy(frame + offset, active_mesh_id, mesh_id_length);
+        offset += mesh_id_length;
+        frame[offset++] = 221U; /* EdgeZ vendor IE. */
+        frame[offset++] = (uint8_t)vendor_length;
+        memcpy(frame + offset, "Edg", 3U);
+        memcpy(frame + offset + 3U, packet, packet_length);
+        frame_length = required;
+    } else if (!edgez_pawr_encode_action_frame(
+            frame, sizeof(frame), sequence_number++, radio_info.mac_addr,
+            profile.gateway_mac, packet, packet_length, &frame_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
     const struct edgez_umac_tx_request request = {
         .token = ++tx_token,
-        .frame = action,
-        .frame_length = action_length,
+        .frame = frame,
+        .frame_length = frame_length,
         .frame_type = EDGEZ_UMAC_TX_MANAGEMENT,
         .tid = 8U,
         .mcs = SENSOR_MCS,
         .attempts = SENSOR_ATTEMPTS,
         .bandwidth_mhz = active_bandwidth_mhz,
-        .no_ack = true,
+        .no_ack = discovery,
         .immediate_status = true,
     };
     xSemaphoreTake(response_sem, 0);
@@ -1127,7 +1237,7 @@ static esp_err_t send_sensor_block(const uint8_t *data, size_t length,
                 encoded, encoded_length, &packet_length) ||
             !edgez_pawr_encode_action_frame(
                 action, sizeof(action), sequence_number++,
-                radio_info.mac_addr, broadcast_mac,
+                radio_info.mac_addr, profile.gateway_mac,
                 packet, packet_length, &action_length)) {
             return ESP_ERR_INVALID_SIZE;
         }
@@ -1140,7 +1250,7 @@ static esp_err_t send_sensor_block(const uint8_t *data, size_t length,
             .mcs = SENSOR_MCS,
             .attempts = 1U,
             .bandwidth_mhz = active_bandwidth_mhz,
-            .no_ack = true,
+            .no_ack = false,
             .immediate_status = true,
         };
         xSemaphoreTake(bulk_ack_sem, 0);
@@ -1167,27 +1277,26 @@ static esp_err_t send_sensor_block(const uint8_t *data, size_t length,
     return ESP_ERR_TIMEOUT;
 }
 
-static esp_err_t send_temperature_block(uint32_t interval_ms)
+static esp_err_t send_voltage_block(uint32_t interval_ms)
 {
-    const uint8_t count = temperature_sample_count;
-    if (!sensor_settings.value.send_blocks || count == 0U ||
-        count < sensor_settings.value.samples_per_block) {
+    const uint8_t count = voltage_sample_count;
+    if (sensor_settings.value.block_sampling_count == 0U || count == 0U) {
         return ESP_ERR_NOT_FINISHED;
     }
     uint8_t block[EDGEZ_SENSOR_BLOCK_HEADER_SIZE +
                   EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK * sizeof(float)];
     size_t offset = edgez_sensor_block_encode_header(
-        block, sizeof(block), EDGEZ_SENSOR_BLOCK_KIND_MCU_TEMPERATURE,
+        block, sizeof(block), EDGEZ_SENSOR_BLOCK_KIND_BATTERY_VOLTAGE,
         sizeof(float), count, block_sequence, &sensor_settings.value);
     if (offset == 0U) return ESP_ERR_INVALID_STATE;
     for (uint8_t i = 0U; i < count; ++i) {
-        edgez_sensor_put_float_le(block + offset, temperature_samples[i]);
+        edgez_sensor_put_float_le(block + offset, voltage_samples[i]);
         offset += sizeof(float);
     }
     esp_err_t err = send_sensor_block(
-        block, offset, EDGEZ_SENSOR_BLOCK_KIND_MCU_TEMPERATURE, interval_ms);
+        block, offset, EDGEZ_SENSOR_BLOCK_KIND_BATTERY_VOLTAGE, interval_ms);
     if (err == ESP_OK) {
-        temperature_sample_count = 0U;
+        voltage_sample_count = 0U;
         ++block_sequence;
         update_rtc_cache(profile_valid(&profile));
     }
@@ -1252,7 +1361,7 @@ static bool receive_pending_packet(void)
          * packet window as ordinary downlinks.  Apply the encrypted profile
          * first: it carries the Appwrite Device UUID that must replace the
          * temporary public-key-derived beacon identity. */
-        if (apply_acceptance(item.payload, item.length) == ESP_OK) {
+        if (apply_acceptance(item.payload, item.length, item.source) == ESP_OK) {
             ESP_LOGI(TAG, "cloud identity accepted from beacon downlink window");
             return true;
         }
@@ -1271,7 +1380,8 @@ static bool try_acceptance(void)
         const TickType_t now = xTaskGetTickCount();
         const TickType_t remaining = deadline > now ? deadline - now : 0;
         if (xQueueReceive(acceptance_queue, &item, remaining) != pdTRUE) break;
-        if (apply_acceptance(item.payload, item.length) == ESP_OK) return true;
+        if (apply_acceptance(item.payload, item.length, item.source) == ESP_OK)
+            return true;
     } while (xTaskGetTickCount() < deadline);
     return false;
 }
@@ -1304,12 +1414,48 @@ static void sensor_task(void *arg)
         uint8_t payload[SENSOR_PACKET_MAX];
         size_t payload_length = 0U;
         float temperature = 0.0f;
-        bool temperature_valid = false;
+        const esp_err_t temperature_err = read_mcu_temperature(&temperature);
+        const bool temperature_valid = temperature_err == ESP_OK;
+
+        /* Voltage sampling belongs to the low-power phase, before MM6108
+         * startup. blockSamplingCount is a per-cycle cap; zero disables ADC
+         * block sampling. Preserve unsent samples and fill only free slots. */
+        const uint16_t requested_samples =
+            sensor_settings.value.block_sampling_count;
+        if (requested_samples == 0U && voltage_sample_count != 0U) {
+            voltage_sample_count = 0U;
+            update_rtc_cache(true);
+        } else if (requested_samples > 0U) {
+            while (voltage_sample_count < requested_samples) {
+                float voltage = 0.0f;
+                const esp_err_t voltage_err = battery_read(&voltage);
+                if (voltage_err != ESP_OK) {
+                    ESP_LOGW(TAG,
+                             "battery voltage sample stopped at %u/%u: %s",
+                             (unsigned)voltage_sample_count,
+                             (unsigned)requested_samples,
+                             esp_err_to_name(voltage_err));
+                    break;
+                }
+                voltage_samples[voltage_sample_count++] = voltage;
+            }
+            update_rtc_cache(true);
+        }
+        if (!temperature_valid) {
+            ESP_LOGW(TAG, "MCU temperature sample failed before HaLow: %s",
+                     esp_err_to_name(temperature_err));
+        }
+        if (requested_samples > 0U) {
+            ESP_LOGI(TAG, "battery voltage samples cached=%u requested=%u",
+                     (unsigned)voltage_sample_count,
+                     (unsigned)requested_samples);
+        }
+
         esp_err_t err = start_radio(profile.country, profile.frequency_khz,
                                     profile.bandwidth_mhz, profile.mesh_id);
         if (err == ESP_OK) {
             err = build_beacon(payload, sizeof(payload), &payload_length,
-                               &temperature, &temperature_valid);
+                               temperature, temperature_valid);
         }
         if (err == ESP_OK) {
             err = send_request(payload, payload_length, interval_ms);
@@ -1319,20 +1465,10 @@ static void sensor_task(void *arg)
 			ESP_LOGW(TAG, "gateway advertised a downlink but none was received");
 		}
         interval_ms = sensor_settings.value.sampling_interval_ms;
-        if (sensor_settings.value.send_blocks && temperature_valid &&
-            temperature_sample_count <
-                EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK) {
-            temperature_samples[temperature_sample_count++] = temperature;
-            update_rtc_cache(true);
-        } else if (!sensor_settings.value.send_blocks &&
-                   temperature_sample_count != 0U) {
-            temperature_sample_count = 0U;
-            update_rtc_cache(true);
-        }
-        if (err == ESP_OK && sensor_settings.value.send_blocks &&
-            temperature_sample_count >=
-                sensor_settings.value.samples_per_block) {
-            esp_err_t block_err = send_temperature_block(interval_ms);
+        if (err == ESP_OK &&
+            sensor_settings.value.block_sampling_count > 0U &&
+            voltage_sample_count > 0U) {
+            esp_err_t block_err = send_voltage_block(interval_ms);
             if (block_err != ESP_OK) {
                 ESP_LOGW(TAG, "sensor block retained for retry: %s",
                          esp_err_to_name(block_err));
@@ -1435,9 +1571,9 @@ void app_main(void)
         downlink_ack_id = rtc_cache.downlink_ack_id;
         sensor_settings = rtc_cache.settings;
         block_sequence = rtc_cache.block_sequence;
-        temperature_sample_count = rtc_cache.sample_count;
-        memcpy(temperature_samples, rtc_cache.temperature_samples,
-               sizeof(temperature_samples));
+        voltage_sample_count = rtc_cache.sample_count;
+        memcpy(voltage_samples, rtc_cache.voltage_samples,
+               sizeof(voltage_samples));
         if (rtc_cache.has_profile) {
             profile = rtc_cache.profile;
             profile_err = ESP_OK;
@@ -1455,6 +1591,11 @@ void app_main(void)
     ESP_LOGI(TAG, "HT-HC33 sensor boot factory=%s profile=%s",
              factory_identity.serial,
              profile_err == ESP_OK ? "provisioned" : "discover");
+    const esp_err_t battery_err = battery_init();
+    if (battery_err != ESP_OK) {
+        ESP_LOGW(TAG, "battery voltage sampling unavailable: %s",
+                 esp_err_to_name(battery_err));
+    }
     response_sem = xSemaphoreCreateBinary();
     bulk_ack_sem = xSemaphoreCreateBinary();
     acceptance_queue = xQueueCreate(SENSOR_ACCEPT_QUEUE_DEPTH,

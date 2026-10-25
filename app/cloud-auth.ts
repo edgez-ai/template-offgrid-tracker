@@ -184,9 +184,73 @@ async function devicesRequest<T>(path = "", init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
-  const payload = await response.json() as T & { message?: string };
-  if (!response.ok) throw new Error(payload.message || "Appwrite Devices request failed.");
-  return payload;
+  const body = await response.text();
+  const payload = body ? JSON.parse(body) as T & { message?: string } : undefined;
+  if (!response.ok) {
+    throw new Error(payload?.message || "Appwrite Devices request failed.");
+  }
+  return payload as T;
+}
+
+export type CloudSensorSettings = {
+  samplingIntervalMs: number;
+  blockSamplingCount: number;
+};
+
+export type CloudSensorSettingsState = {
+  settings: CloudSensorSettings;
+  status: string;
+  retryCount: number;
+  updatedAt: string;
+} | null;
+
+type NativeDeviceDownlink = {
+  $updatedAt?: string;
+  command: string;
+  payload?: unknown;
+  status: string;
+  retryCount?: number;
+};
+
+function validCloudSensorSettings(value: unknown): value is CloudSensorSettings {
+  const settings = value as Partial<CloudSensorSettings> | null;
+  return Boolean(settings &&
+    Number.isInteger(settings.samplingIntervalMs) &&
+    Number(settings.samplingIntervalMs) >= 1_000 &&
+    Number(settings.samplingIntervalMs) <= 3_600_000 &&
+    Number.isInteger(settings.blockSamplingCount) &&
+    Number(settings.blockSamplingCount) >= 0 &&
+    Number(settings.blockSamplingCount) <= 32);
+}
+
+/** Read the newest requested sensor behavior from the reliable downlink log. */
+export async function getCloudSensorSettings(deviceId: string): Promise<CloudSensorSettingsState> {
+  const result = await devicesRequest<{ downlinks?: NativeDeviceDownlink[] }>(
+    `/${encodeURIComponent(deviceId)}/downlinks?limit=50`,
+  );
+  const downlink = result.downlinks?.find((candidate) =>
+    candidate.command === "sensor.settings" && validCloudSensorSettings(candidate.payload));
+  if (!downlink || !validCloudSensorSettings(downlink.payload)) return null;
+  return {
+    settings: downlink.payload,
+    status: downlink.status,
+    retryCount: downlink.retryCount ?? 0,
+    updatedAt: downlink.$updatedAt ?? "",
+  };
+}
+
+/** Queue reliable settings for delivery through the sensor's assigned gateway. */
+export async function updateCloudSensorSettings(
+  deviceId: string,
+  settings: CloudSensorSettings,
+): Promise<void> {
+  if (!validCloudSensorSettings(settings)) {
+    throw new Error("Sampling interval must be 1-3600 seconds and block sampling count must be 0-32.");
+  }
+  await devicesRequest<void>(`/${encodeURIComponent(deviceId)}/commands`, {
+    method: "POST",
+    body: JSON.stringify({ command: "sensor.settings", payload: settings }),
+  });
 }
 
 /**

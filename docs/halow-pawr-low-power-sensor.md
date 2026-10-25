@@ -48,15 +48,18 @@ settings document:
 ```json
 {
   "samplingIntervalMs": 15000,
-  "sendBlocks": true,
-  "samplesPerBlock": 8
+  "blockSamplingCount": 8
 }
 ```
 
 `samplingIntervalMs` is valid from 1,000 through 3,600,000 ms and controls the
-sensor wake/sample interval. `samplesPerBlock` is valid from 1 through 32. A
-normal beacon is still sent every interval when `sendBlocks` is false; sample
-block accumulation and transmission are disabled. Send this document through
+sensor wake/sample interval. `blockSamplingCount` is valid from 0 through 32;
+zero disables block sampling and is the default. A positive value caps how many
+samples are collected into the retained buffer before HaLow starts. The block
+contains however many valid samples were actually available, and its encoded
+length follows that actual count rather than requiring a fixed record count.
+A normal beacon and its downlink
+ACK exchange still run when block sampling is disabled. Send this document through
 `POST /devices/{deviceId}/commands` as the `payload` with `command` set to
 `sensor.settings`.
 
@@ -67,11 +70,13 @@ incomplete block so one block never mixes samples collected under different
 settings.
 
 Every block begins with a 24-byte `EZSB` version 1 header. The header records
-the sample kind, block sequence, record size and count, plus the exact
-`samplingIntervalMs`, `sendBlocks`, and `samplesPerBlock` snapshot that produced
-the block. HT-HC33 records contain MCU temperature floats. nRF54L15 records
-retain three acceleration axes, three gyroscope axes, and a gyroscope-valid
-flag. A block remains buffered until H7608 returns the PAwR bulk ACK.
+the sample kind, block sequence, record size and actual count, plus the exact
+`samplingIntervalMs` and `blockSamplingCount` snapshot that produced
+the block. HT-HC33 block records contain calibrated battery-voltage floats;
+its normal beacon continues to report MCU temperature. nRF54L15 records retain
+three acceleration axes, three gyroscope axes, and a gyroscope-valid flag. Both
+targets sample and cache the block record before starting HaLow. A block remains
+buffered until H7608 returns the PAwR bulk ACK.
 
 HT-HC33 stores its active settings and pending samples in RTC memory during
 timer deep sleep; it reads NVS only on a cold/non-timer start or an invalid RTC

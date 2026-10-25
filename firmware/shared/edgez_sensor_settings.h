@@ -11,22 +11,22 @@
 #include <string.h>
 
 #define EDGEZ_SENSOR_SETTINGS_COMMAND "sensor.settings"
-#define EDGEZ_SENSOR_SETTINGS_VERSION 1U
+#define EDGEZ_SENSOR_SETTINGS_VERSION 2U
 #define EDGEZ_SENSOR_SETTINGS_MIN_INTERVAL_MS 1000U
 #define EDGEZ_SENSOR_SETTINGS_MAX_INTERVAL_MS 3600000U
 #define EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK 32U
 
 #define EDGEZ_SENSOR_BLOCK_VERSION 1U
 #define EDGEZ_SENSOR_BLOCK_HEADER_SIZE 24U
-#define EDGEZ_SENSOR_BLOCK_FLAG_SEND_BLOCKS 0x01U
+#define EDGEZ_SENSOR_BLOCK_FLAG_SAMPLING_ENABLED 0x01U
 #define EDGEZ_SENSOR_BLOCK_KIND_MCU_TEMPERATURE 1U
 #define EDGEZ_SENSOR_BLOCK_KIND_IMU 2U
+#define EDGEZ_SENSOR_BLOCK_KIND_BATTERY_VOLTAGE 3U
 #define EDGEZ_SENSOR_BLOCK_IMU_RECORD_SIZE 25U
 
 struct edgez_sensor_settings {
     uint32_t sampling_interval_ms;
-    uint16_t samples_per_block;
-    bool send_blocks;
+    uint16_t block_sampling_count;
 };
 
 static inline bool edgez_sensor_settings_valid(
@@ -37,8 +37,7 @@ static inline bool edgez_sensor_settings_valid(
             EDGEZ_SENSOR_SETTINGS_MIN_INTERVAL_MS &&
         settings->sampling_interval_ms <=
             EDGEZ_SENSOR_SETTINGS_MAX_INTERVAL_MS &&
-        settings->samples_per_block >= 1U &&
-        settings->samples_per_block <=
+        settings->block_sampling_count <=
             EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK;
 }
 
@@ -80,11 +79,11 @@ static inline size_t edgez_sensor_block_encode_header(
     memcpy(output, "EZSB", 4U);
     output[4] = EDGEZ_SENSOR_BLOCK_VERSION;
     output[5] = sample_kind;
-    output[6] = settings->send_blocks ?
-        EDGEZ_SENSOR_BLOCK_FLAG_SEND_BLOCKS : 0U;
+    output[6] = settings->block_sampling_count > 0U ?
+        EDGEZ_SENSOR_BLOCK_FLAG_SAMPLING_ENABLED : 0U;
     output[7] = EDGEZ_SENSOR_BLOCK_HEADER_SIZE;
     edgez_sensor_put_le32(output + 8U, settings->sampling_interval_ms);
-    edgez_sensor_put_le16(output + 12U, settings->samples_per_block);
+    edgez_sensor_put_le16(output + 12U, settings->block_sampling_count);
     edgez_sensor_put_le16(output + 14U, sample_count);
     edgez_sensor_put_le32(output + 16U, block_sequence);
     edgez_sensor_put_le16(output + 20U, record_size);

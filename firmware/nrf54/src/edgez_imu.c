@@ -493,13 +493,19 @@ bool edgez_imu_is_ready(void)
 	return imu_ready;
 }
 
-int edgez_imu_drain_fifo(void)
+int edgez_imu_drain_fifo_samples(struct edgez_imu_sample *samples,
+				 size_t capacity, size_t *sample_count)
 {
 #if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)
 	struct edgez_imu_sample next_sample = {0};
 	bool captured_sample = false;
+	size_t stored_samples = 0U;
 	int result;
 
+	if (!sample_count || (capacity > 0U && !samples)) {
+		return -EINVAL;
+	}
+	*sample_count = 0U;
 	if (!imu_ready) {
 		return -ENODEV;
 	}
@@ -545,15 +551,24 @@ int edgez_imu_drain_fifo(void)
 			int16_t value =
 				(int16_t)sys_get_le16(&fifo_raw[i * sizeof(uint16_t)]);
 
+			if (accel_valid == 0U && pattern != 0U) {
+				continue;
+			}
 			accel_raw[pattern] = value;
 			accel_valid |= BIT(pattern);
-		}
-		if (accel_valid == 0x07U) {
-			for (size_t i = 0U; i < 3U; ++i) {
-				next_sample.accel_m_s2[i] =
-					(float)accel_raw[i] * EDGEZ_IMU_ACCEL_M_S2_PER_LSB;
+			if (accel_valid == 0x07U) {
+				memset(&next_sample, 0, sizeof(next_sample));
+				for (size_t axis = 0U; axis < 3U; ++axis) {
+					next_sample.accel_m_s2[axis] =
+						(float)accel_raw[axis] *
+						EDGEZ_IMU_ACCEL_M_S2_PER_LSB;
+				}
+				if (stored_samples < capacity) {
+					samples[stored_samples++] = next_sample;
+				}
+				captured_sample = true;
+				accel_valid = 0U;
 			}
-			captured_sample = true;
 		}
 		if (available_words - words_to_read <
 		    EDGEZ_IMU_FIFO_WORDS_PER_SAMPLE) {
@@ -569,6 +584,7 @@ int edgez_imu_drain_fifo(void)
 	latest_sample = next_sample;
 	imu_sample_valid = true;
 	k_mutex_unlock(&imu_lock);
+	*sample_count = stored_samples;
 	result = 0;
 
 suspend_bus:
@@ -581,8 +597,18 @@ suspend_bus:
 	}
 	return result;
 #else
+	ARG_UNUSED(samples);
+	ARG_UNUSED(capacity);
+	ARG_UNUSED(sample_count);
 	return -ENOTSUP;
 #endif
+}
+
+int edgez_imu_drain_fifo(void)
+{
+	size_t ignored = 0U;
+
+	return edgez_imu_drain_fifo_samples(NULL, 0U, &ignored);
 }
 
 int edgez_imu_read(struct edgez_imu_sample *sample)

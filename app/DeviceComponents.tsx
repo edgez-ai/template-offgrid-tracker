@@ -6,6 +6,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Animated, Modal, PanResponder, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import type { StoredDevice } from "./profile-store";
+import { getCloudSensorSettings, updateCloudSensorSettings } from "./cloud-auth";
 import type { CloudDeviceUpdate } from "./cloud-auth";
 import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes } from "./beacon-options";
 import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
@@ -42,6 +43,12 @@ export function DeviceDetail({
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [samplingIntervalSeconds, setSamplingIntervalSeconds] = useState("15");
+  const [blockSamplingCount, setBlockSamplingCount] = useState("0");
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsSaving, setSettingsSaving] = useState(false);
+  const [settingsStatus, setSettingsStatus] = useState("");
+  const [settingsError, setSettingsError] = useState("");
 
   useEffect(() => {
     setEditing(false);
@@ -54,6 +61,32 @@ export function DeviceDetail({
     setLocationPickerOpen(false);
     setError("");
   }, [device]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSamplingIntervalSeconds("15");
+    setBlockSamplingCount("0");
+    setSettingsStatus("");
+    setSettingsError("");
+    if (!device || !editable || device.kind === "h7608") return () => { cancelled = true; };
+    setSettingsLoading(true);
+    void getCloudSensorSettings(device.id).then((state) => {
+      if (cancelled) return;
+      if (state) {
+        setSamplingIntervalSeconds(String(state.settings.samplingIntervalMs / 1000));
+        setBlockSamplingCount(String(state.settings.blockSamplingCount));
+        const updated = state.updatedAt ? ` · ${new Date(state.updatedAt).toLocaleString()}` : "";
+        setSettingsStatus(`${state.status.toUpperCase()} · ${state.retryCount} RETRIES${updated}`);
+      } else {
+        setSettingsStatus("DEVICE DEFAULTS");
+      }
+    }).catch((caught) => {
+      if (!cancelled) setSettingsError(caught instanceof Error ? caught.message : "Could not load sensor settings.");
+    }).finally(() => {
+      if (!cancelled) setSettingsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [device, editable]);
 
   if (!device) return null;
   const canMessage = liveNode
@@ -87,6 +120,28 @@ export function DeviceDetail({
       setSaving(false);
     }
   };
+  const saveSensorSettings = async () => {
+    const seconds = Number(samplingIntervalSeconds);
+    const samples = Number(blockSamplingCount);
+    if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600 ||
+        !Number.isInteger(samples) || samples < 0 || samples > 32) {
+      setSettingsError("Use a 1-3600 second interval and a block sampling count from 0 to 32.");
+      return;
+    }
+    setSettingsSaving(true);
+    setSettingsError("");
+    try {
+      await updateCloudSensorSettings(device.id, {
+        samplingIntervalMs: seconds * 1000,
+        blockSamplingCount: samples,
+      });
+      setSettingsStatus("QUEUED · APPLIES ON NEXT BEACON");
+    } catch (caught) {
+      setSettingsError(caught instanceof Error ? caught.message : "Could not update sensor settings.");
+    } finally {
+      setSettingsSaving(false);
+    }
+  };
   return (
     <Modal visible animationType="slide" onRequestClose={onClose}>
       <SafeAreaView style={styles.page}>
@@ -108,6 +163,22 @@ export function DeviceDetail({
             <DetailRow label="LAST SEEN" value={device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : "Unknown"} />
             <DetailRow label="LOCATION" value={device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "Not shared"} />
           </View>
+          {editable && device.kind !== "h7608" ? <View style={styles.settingsCard}>
+            <View style={styles.settingsHeader}>
+              <View><Text style={styles.settingsTitle}>SENSOR SETTINGS</Text><Text style={styles.settingsHint}>Delivered reliably after the next beacon</Text></View>
+              {settingsLoading ? <ActivityIndicator size="small" color="#0a8c87" /> : null}
+            </View>
+            <Text style={styles.editLabel}>SAMPLING INTERVAL · SECONDS</Text>
+            <TextInput style={styles.editInput} value={samplingIntervalSeconds} onChangeText={setSamplingIntervalSeconds} keyboardType="number-pad" maxLength={4} placeholder="15" placeholderTextColor="#829693" />
+            <Text style={styles.editLabel}>BLOCK SAMPLING COUNT</Text>
+            <TextInput style={styles.editInput} value={blockSamplingCount} onChangeText={setBlockSamplingCount} keyboardType="number-pad" maxLength={2} placeholder="0" placeholderTextColor="#829693" />
+            <Text style={styles.settingsHint}>0 disables block sampling. A positive value caps samples collected before HaLow starts; upload chunks follow the actual encoded data size. Beacon and downlink ACK remain enabled.</Text>
+            {settingsStatus ? <Text style={styles.settingsStatus}>{settingsStatus}</Text> : null}
+            {settingsError ? <Text style={styles.editError}>{settingsError}</Text> : null}
+            <Pressable style={[styles.primary, (settingsSaving || settingsLoading) && styles.buttonDisabled]} onPress={() => void saveSensorSettings()} disabled={settingsSaving || settingsLoading} accessibilityRole="button">
+              {settingsSaving ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.primaryText}>UPDATE SENSOR</Text>}
+            </Pressable>
+          </View> : null}
           {editable && !editing ? <Pressable style={styles.outline} onPress={() => setEditing(true)} accessibilityRole="button"><Text style={styles.outlineText}>EDIT DEVICE</Text></Pressable> : null}
           {editable && editing ? <View style={styles.editCard}>
             <Text style={styles.editLabel}>NAME</Text>
@@ -269,6 +340,12 @@ const styles = StyleSheet.create({
   smallOutline: { flex: 1, minHeight: 45, borderWidth: 1, borderColor: "#0a8c87", borderRadius: 10, alignItems: "center", justifyContent: "center" },
   smallPrimary: { flex: 1, minHeight: 45, borderRadius: 10, alignItems: "center", justifyContent: "center", backgroundColor: "#0a8c87" },
   editError: { color: "#b9472f", fontSize: 11, lineHeight: 16 },
+  settingsCard: { padding: 15, borderWidth: 1, borderColor: "#dce6e5", borderRadius: 14, backgroundColor: "white", gap: 9 },
+  settingsHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  settingsTitle: { color: "#0a3037", fontSize: 13, fontWeight: "900", letterSpacing: 0.7 },
+  settingsHint: { color: "#718783", fontSize: 9, lineHeight: 14, marginTop: 2 },
+  settingsStatus: { color: "#0a8c87", fontSize: 9, fontWeight: "900", letterSpacing: 0.5 },
+  buttonDisabled: { opacity: 0.55 },
   swipeContainer: { borderRadius: 14, overflow: "hidden", backgroundColor: "#b9472f" },
   removeAction: { position: "absolute", top: 0, right: 0, bottom: 0, width: swipeActionWidth, alignItems: "center", justifyContent: "center", gap: 4, backgroundColor: "#b9472f" },
   removeText: { color: "white", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 },

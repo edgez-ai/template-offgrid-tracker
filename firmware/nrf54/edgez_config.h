@@ -17,6 +17,7 @@ struct edgez_halow_profile {
 	uint32_t device_type;
 	bool sleep_mode_enabled;
 	bool device_gps_enabled;
+	uint8_t gateway_mac[6];
 };
 
 void edgez_config_init(const char *mesh_id, const char *passphrase);
@@ -32,6 +33,7 @@ uint32_t edgez_config_generation(void);
 void edgez_config_set_halow_ready(bool ready);
 void edgez_config_set_halow_link(bool link_up);
 void edgez_config_set_halow_mac(const uint8_t mac[6]);
+int edgez_config_set_gateway_mac(const uint8_t mac[6]);
 bool edgez_config_halow_beacon_started(void);
 uint32_t edgez_config_halow_beacon_build_count(void);
 size_t edgez_config_halow_beacon_last_ies_len(void);
