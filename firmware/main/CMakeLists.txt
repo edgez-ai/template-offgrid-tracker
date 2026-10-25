@@ -62,6 +62,7 @@ else()
         list(APPEND component_private_dependencies
             esp_hw_support
             esp_driver_tsens
+            json
             mbedtls
             nvs_flash
             spi_flash)

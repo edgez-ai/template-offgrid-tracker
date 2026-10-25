@@ -14,6 +14,7 @@ button { cursor: pointer; }
 .profile-selector { display: flex; align-items: center; gap: 7px; margin: 0 2px 0 8px; }
 .profile-selector span { color: #718783; font-size: 8px; font-weight: 900; letter-spacing: .7px; text-transform: uppercase; }
 .profile-selector select { max-width: 190px; min-height: 38px; padding: 0 30px 0 10px; border: 1px solid #c6d6d3; border-radius: 10px; color: #173f42; background: white; font-size: 11px; font-weight: 800; }
+.delete-profile { min-height: 38px; padding: 0 11px; border: 1px solid #e2a89c; border-radius: 10px; color: #b9472f; background: #fff3f0; font-size: 9px; font-weight: 900; text-transform: uppercase; }
 .auth-grid { min-height: calc(100vh - 72px); display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 70px; }
 .eyebrow { margin: 0 0 10px; color: #0a8c87; font-size: 10px; font-weight: 900; letter-spacing: 1.4px; text-transform: uppercase; }
 h1 { margin: 0; font-size: clamp(44px, 6vw, 72px); line-height: 1; letter-spacing: -3px; }

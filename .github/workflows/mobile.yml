@@ -15,9 +15,9 @@ on:
         default: main
         type: string
       build_apk:
-        description: Also build and attach signed and unsigned APKs
+        description: Build and attach signed and unsigned APKs
         required: true
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -109,11 +109,11 @@ jobs:
           ANDROID_SIGNING_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
         run: bash app/scripts/sign-app-bundle-manifest.sh
       - name: Build unsigned APK
-        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
+        if: github.event_name != 'workflow_dispatch' || inputs.build_apk
         working-directory: app/android
         run: ./gradlew assembleRelease --no-daemon
       - name: Sign release APK
-        if: github.event_name == 'workflow_dispatch' && inputs.build_apk
+        if: github.event_name != 'workflow_dispatch' || inputs.build_apk
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}

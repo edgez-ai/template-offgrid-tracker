@@ -73,6 +73,11 @@ type NativeDevice = {
   };
 };
 
+type CloudProfile = Models.Row & {
+  name: string;
+  teamId?: string;
+};
+
 export type PreparedDeviceCredential = {
   deviceId: string;
   clientId: string;
@@ -319,47 +324,63 @@ export async function acceptCloudProvisioningRequest(
   });
 }
 
-export async function ensureCloudProfile(profile: StoredProfile) {
+export async function ensureCloudProfile(profile: StoredProfile): Promise<string> {
   if (!account || !teams || !tables) throw new Error("Cloud access is not configured in this app build.");
   const user = await account.get();
 
+  const normalizedName = profile.name.trim();
+  const matching = await tables.listRows<CloudProfile>({
+    databaseId,
+    tableId: profileTableId,
+    queries: [Query.equal("name", [normalizedName]), Query.limit(100)],
+  });
+  const existingByName = matching.rows
+    .filter((candidate) => candidate.name.trim() === normalizedName)
+    .sort((left, right) => left.$createdAt.localeCompare(right.$createdAt))[0];
+  const cloudProfileId = existingByName?.$id || profile.id;
+  const cloudTeamId = existingByName?.teamId || cloudProfileId;
+
   try {
-    await teams.get({ teamId: profile.id });
+    await teams.get({ teamId: cloudTeamId });
   } catch (error) {
     if (!isCloudNotFound(error)) throw error;
-    await teams.create({ teamId: profile.id, name: profile.name });
+    if (existingByName) {
+      throw new Error("The matching cloud profile has no accessible team.");
+    }
+    await teams.create({ teamId: cloudTeamId, name: normalizedName });
   }
 
   const data = {
-    name: profile.name,
+    name: normalizedName,
     identityId: profile.identityId,
     country: profile.country,
     location: profile.location,
     halowChannel: profile.halowChannel,
     meshId: profile.meshId,
     meshPassphrase: profile.meshPassphrase,
-    teamId: profile.id,
+    teamId: cloudTeamId,
     ownerId: user.$id,
   };
   try {
-    await tables.getRow({ databaseId, tableId: profileTableId, rowId: profile.id });
-    await tables.updateRow({ databaseId, tableId: profileTableId, rowId: profile.id, data });
+    await tables.getRow({ databaseId, tableId: profileTableId, rowId: cloudProfileId });
+    await tables.updateRow({ databaseId, tableId: profileTableId, rowId: cloudProfileId, data });
   } catch (error) {
     if (!isCloudNotFound(error)) throw error;
     await tables.createRow({
       databaseId,
       tableId: profileTableId,
-      rowId: profile.id,
+      rowId: cloudProfileId,
       data,
       permissions: [
-        Permission.read(Role.team(profile.id)),
-        Permission.update(Role.team(profile.id, "owner")),
-        Permission.delete(Role.team(profile.id, "owner")),
+        Permission.read(Role.team(cloudTeamId)),
+        Permission.update(Role.team(cloudTeamId, "owner")),
+        Permission.delete(Role.team(cloudTeamId, "owner")),
       ],
     });
   }
 
-  await account.updatePrefs({ prefs: { ...user.prefs, currentProfileId: profile.id } });
+  await account.updatePrefs({ prefs: { ...user.prefs, currentProfileId: cloudProfileId } });
+  return cloudProfileId;
 }
 
 type CloudTelemetryRow = Models.Row & {

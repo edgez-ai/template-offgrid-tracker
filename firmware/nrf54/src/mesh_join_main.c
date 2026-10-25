@@ -12,12 +12,14 @@
 #include <string.h>
 
 #include <zephyr/kernel.h>
+#include <zephyr/data/json.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/random/random.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/storage/flash_map.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/sys/reboot.h>
 #include <helpers/nrfx_ram_ctrl.h>
 #include <soc.h>
@@ -39,6 +41,7 @@
 #include "edgez_mesh_relay.h"
 #include "edgez_mesh_zephyr.h"
 #include "edgez_pawr_protocol.h"
+#include "edgez_sensor_settings.h"
 #include "edgez_mesh_sae_provider.h"
 #include "edgez_rf_api.h"
 #include "edgez_umac_mesh_runtime.h"
@@ -56,14 +59,14 @@
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST) || \
 	defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE) || \
-	defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+	defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 #include "mmwlan.h"
 
 extern enum mmwlan_status mmdrv_set_wake_enabled(bool enabled);
 extern enum mmwlan_status mmdrv_set_chip_power_save_enabled(uint16_t vif_id,
 							     bool enabled);
 extern enum mmwlan_status mmdrv_set_dynamic_ps_timeout(uint32_t timeout_ms);
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 extern enum mmwlan_status mmdrv_set_duty_cycle(
 	uint32_t duty_cycle, bool duty_cycle_omit_ctrl_resp,
 	enum mmwlan_duty_cycle_mode mode);
@@ -72,7 +75,7 @@ extern enum mmwlan_status mmdrv_get_duty_cycle(
 #endif
 #endif
 
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 #include "edgez_pawr_bulk.h"
 #include "mmregdb.h"
 #endif
@@ -91,6 +94,9 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_PENDING_QUEUE_DEPTH 2U
 #define EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH 12U
 #define EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY "edgez/downlink_ack/v1"
+#define EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY "edgez/sensor_settings/v1"
+#define EDGEZ_SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
+#define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 4U
 #define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
 #define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
@@ -133,14 +139,29 @@ static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
 static bool sensor_pawr_downlink_pending;
 static uint32_t sensor_downlink_ack_id;
+struct sensor_settings_record {
+	uint32_t magic;
+	uint16_t version;
+	uint16_t length;
+	struct edgez_sensor_settings value;
+};
+static struct sensor_settings_record sensor_settings;
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+static struct edgez_imu_sample sensor_block_samples[
+	EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK];
+static uint8_t sensor_block_sample_count;
+static uint32_t sensor_block_sequence;
+#endif
 struct sensor_pending_packet {
 	uint16_t length;
 	uint8_t payload[EDGEZ_SENSOR_PENDING_PACKET_MAX];
 };
 K_MSGQ_DEFINE(sensor_pending_packet_queue, sizeof(struct sensor_pending_packet),
 	      EDGEZ_SENSOR_PENDING_QUEUE_DEPTH, 4);
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 static struct edgez_pawr_bulk_sender sensor_bulk_sender;
+#endif
 static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
 static size_t sensor_bulk_ack_length;
 K_SEM_DEFINE(sensor_bulk_ack_sem, 0, 1);
@@ -174,11 +195,119 @@ static uint64_t mac_to_u64(const uint8_t mac[6])
 	return value;
 }
 
-__attribute__((weak)) int edgez_sensor_handle_downlink(
+struct sensor_settings_json {
+	int32_t sampling_interval_ms;
+	bool send_blocks;
+	int32_t samples_per_block;
+};
+
+static const struct json_obj_descr sensor_settings_json_descr[] = {
+	JSON_OBJ_DESCR_PRIM_NAMED(struct sensor_settings_json,
+		"samplingIntervalMs", sampling_interval_ms, JSON_TOK_NUMBER),
+	JSON_OBJ_DESCR_PRIM_NAMED(struct sensor_settings_json,
+		"sendBlocks", send_blocks, JSON_TOK_TRUE),
+	JSON_OBJ_DESCR_PRIM_NAMED(struct sensor_settings_json,
+		"samplesPerBlock", samples_per_block, JSON_TOK_NUMBER),
+};
+
+static bool sensor_settings_record_valid(
+	const struct sensor_settings_record *record)
+{
+	return record != NULL && record->magic == EDGEZ_SENSOR_SETTINGS_MAGIC &&
+		record->version == EDGEZ_SENSOR_SETTINGS_VERSION &&
+		record->length == sizeof(*record) &&
+		edgez_sensor_settings_valid(&record->value);
+}
+
+static void sensor_settings_set_default(uint32_t interval_ms)
+{
+	sensor_settings = (struct sensor_settings_record) {
+		.magic = EDGEZ_SENSOR_SETTINGS_MAGIC,
+		.version = EDGEZ_SENSOR_SETTINGS_VERSION,
+		.length = sizeof(sensor_settings),
+		.value = {
+			.sampling_interval_ms = interval_ms,
+			.samples_per_block = 8U,
+			.send_blocks = false,
+		},
+	};
+}
+
+static void sensor_settings_load(void)
+{
+	struct sensor_settings_record loaded = {0};
+	struct edgez_halow_profile profile = {0};
+	edgez_config_get_profile(&profile);
+	uint32_t default_interval_ms = profile.beacon_interval_seconds != 0U ?
+		profile.beacon_interval_seconds * 1000U :
+		EDGEZ_SENSOR_UPDATE_INTERVAL_MS;
+	ssize_t length = settings_load_one(EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY,
+		&loaded, sizeof(loaded));
+
+	if (length == sizeof(loaded) && sensor_settings_record_valid(&loaded)) {
+		sensor_settings = loaded;
+		LOG_INF("sensor settings loaded interval=%u ms blocks=%u samples=%u",
+			sensor_settings.value.sampling_interval_ms,
+			sensor_settings.value.send_blocks,
+			sensor_settings.value.samples_per_block);
+		return;
+	}
+	sensor_settings_set_default(default_interval_ms);
+	LOG_INF("sensor settings default interval=%u ms blocks=0 samples=%u",
+		default_interval_ms, sensor_settings.value.samples_per_block);
+}
+
+int edgez_sensor_handle_downlink(
 	const char *command, const uint8_t *payload, size_t payload_length)
 {
-	LOG_INF("downlink command=%s bytes=%u", command, (unsigned)payload_length);
-	ARG_UNUSED(payload);
+	if (!command || strcmp(command, EDGEZ_SENSOR_SETTINGS_COMMAND) != 0) {
+		LOG_WRN("unsupported downlink command=%s",
+			command ? command : "(null)");
+		return -ENOTSUP;
+	}
+	if (!payload || payload_length == 0U || payload_length > 256U) {
+		return -EMSGSIZE;
+	}
+	char json[257];
+	memcpy(json, payload, payload_length);
+	json[payload_length] = '\0';
+	struct sensor_settings_json request = {0};
+	int64_t fields = json_obj_parse(json, payload_length,
+		sensor_settings_json_descr,
+		ARRAY_SIZE(sensor_settings_json_descr), &request);
+	if (fields != BIT_MASK(ARRAY_SIZE(sensor_settings_json_descr)) ||
+		request.sampling_interval_ms < 0 ||
+		request.samples_per_block < 0) {
+		return -EINVAL;
+	}
+	struct sensor_settings_record updated = {
+		.magic = EDGEZ_SENSOR_SETTINGS_MAGIC,
+		.version = EDGEZ_SENSOR_SETTINGS_VERSION,
+		.length = sizeof(updated),
+		.value = {
+			.sampling_interval_ms =
+				(uint32_t)request.sampling_interval_ms,
+			.samples_per_block =
+				(uint16_t)request.samples_per_block,
+			.send_blocks = request.send_blocks,
+		},
+	};
+	if (!edgez_sensor_settings_valid(&updated.value)) {
+		return -ERANGE;
+	}
+	int rc = settings_save_one(EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY,
+		&updated, sizeof(updated));
+	if (rc != 0) {
+		return rc;
+	}
+	sensor_settings = updated;
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+	sensor_block_sample_count = 0U;
+#endif
+	LOG_INF("sensor settings saved interval=%u ms blocks=%u samples=%u",
+		sensor_settings.value.sampling_interval_ms,
+		sensor_settings.value.send_blocks,
+		sensor_settings.value.samples_per_block);
 	return 0;
 }
 
@@ -650,7 +779,7 @@ static int join_ignore_unsupported(void *ctx,
 	uint32_t response_hash;
 	uint32_t response_ssid;
 	bool decoded_request;
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 	struct edgez_pawr_bulk_control bulk_control;
 #endif
 
@@ -705,7 +834,7 @@ static int join_ignore_unsupported(void *ctx,
 		}
 		return EDGEZ_UMAC_OK;
 	}
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 	if (edgez_pawr_bulk_control_decode(action.payload, action.payload_length,
 					    &bulk_control) &&
 	    bulk_control.compressed_ssid == mesh_runtime.config.compressed_ssid &&
@@ -972,7 +1101,8 @@ static bool same_radio_profile(const struct edgez_halow_profile *a,
 
 static uint32_t sensor_update_interval_ms(void)
 {
-	return edgez_config_should_autostart() ? EDGEZ_SENSOR_UPDATE_INTERVAL_MS :
+	return edgez_config_should_autostart() ?
+		sensor_settings.value.sampling_interval_ms :
 		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS * 1000U;
 }
 
@@ -1215,9 +1345,9 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	return -ETIMEDOUT;
 }
 
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
-#define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 8U
+#if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 static int sensor_pawr_bulk_profile(struct edgez_halow_profile *profile)
 {
 	uint32_t frequency_khz = 0U;
@@ -1244,6 +1374,7 @@ static int sensor_pawr_bulk_profile(struct edgez_halow_profile *profile)
 		(unsigned)frequency_khz, (unsigned)bandwidth_mhz);
 	return 0;
 }
+#endif
 
 static int sensor_pawr_enable_bulk_burst_mode(void)
 {
@@ -1388,6 +1519,143 @@ static int sensor_pawr_queue_bulk_chunk(const uint8_t *payload,
 	edgez_imu_note_halow_tx();
 	return 0;
 }
+
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+static uint32_t sensor_fnv1a32(const uint8_t *data, size_t length)
+{
+	uint32_t digest = UINT32_C(2166136261);
+
+	for (size_t i = 0U; i < length; ++i) {
+		digest ^= data[i];
+		digest *= UINT32_C(16777619);
+	}
+	return digest;
+}
+
+static int sensor_pawr_send_block(const uint8_t *data, size_t length,
+				  uint8_t sample_kind,
+				  uint32_t wake_interval_ms)
+{
+	if (!data || length == 0U || length > EDGEZ_PAWR_BULK_MAX_CHUNK_DATA) {
+		return -EMSGSIZE;
+	}
+	int rc = sensor_pawr_enable_bulk_burst_mode();
+	if (rc != 0) {
+		return rc;
+	}
+	uint32_t session_id = sys_rand32_get();
+	if (session_id == 0U) {
+		session_id = 1U;
+	}
+	const struct edgez_pawr_bulk_regulatory regulatory =
+		sensor_pawr_bulk_regulatory();
+	const struct edgez_pawr_bulk_chunk chunk = {
+		.compressed_ssid = mesh_runtime.config.compressed_ssid,
+		.session_id = session_id,
+		.total_length = (uint32_t)length,
+		.offset = 0U,
+		.expected_digest = sensor_fnv1a32(data, length),
+		.chunk_index = 0U,
+		.chunk_count = 1U,
+		.data_length = (uint16_t)length,
+		.window_id = 0U,
+		.window_base_chunk = 0U,
+		.window_count = 1U,
+		.test_index = sample_kind,
+		.flags = EDGEZ_PAWR_BULK_FLAG_FIRST |
+			 EDGEZ_PAWR_BULK_FLAG_LAST |
+			 EDGEZ_PAWR_BULK_FLAG_ACK_REQUEST,
+		.regulatory = regulatory,
+		.data = data,
+	};
+	uint8_t encoded[EDGEZ_PAWR_BULK_HEADER_SIZE +
+			EDGEZ_PAWR_BULK_MAX_CHUNK_DATA];
+	size_t encoded_length = edgez_pawr_bulk_encode(
+		encoded, sizeof(encoded), &chunk);
+	if (encoded_length == 0U) {
+		return -EMSGSIZE;
+	}
+
+	for (unsigned attempt = 0U; attempt < EDGEZ_SENSOR_BULK_ACK_ATTEMPTS;
+	     ++attempt) {
+		k_sem_reset(&sensor_bulk_ack_sem);
+		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+		sensor_bulk_ack_length = 0U;
+		k_spin_unlock(&sensor_pawr_lock, key);
+		rc = sensor_pawr_queue_bulk_chunk(encoded, encoded_length,
+			wake_interval_ms);
+		if (rc != 0) {
+			continue;
+		}
+		uint32_t timeout_ms = edgez_pawr_bulk_ack_timeout_ms(
+			(uint16_t)length, 1U);
+		if (k_sem_take(&sensor_bulk_ack_sem, K_MSEC(timeout_ms)) != 0) {
+			continue;
+		}
+		uint8_t ack[EDGEZ_PAWR_BULK_CONTROL_SIZE];
+		key = k_spin_lock(&sensor_pawr_lock);
+		size_t ack_length = sensor_bulk_ack_length;
+		if (ack_length == sizeof(ack)) {
+			memcpy(ack, sensor_bulk_ack_payload, sizeof(ack));
+		}
+		k_spin_unlock(&sensor_pawr_lock, key);
+		struct edgez_pawr_bulk_control control;
+		if (ack_length == sizeof(ack) &&
+		    edgez_pawr_bulk_control_decode(ack, ack_length, &control) &&
+		    edgez_pawr_bulk_control_matches(
+			&control, mesh_runtime.config.compressed_ssid,
+			session_id, sample_kind, 0U, 0U, 1U)) {
+			LOG_INF("sensor block delivered sequence=%u bytes=%u",
+				sensor_block_sequence, (unsigned)length);
+			return 0;
+		}
+	}
+	return -ETIMEDOUT;
+}
+
+static int sensor_send_imu_block(uint32_t wake_interval_ms)
+{
+	uint8_t count = sensor_block_sample_count;
+	if (!sensor_settings.value.send_blocks || count == 0U ||
+	    count < sensor_settings.value.samples_per_block) {
+		return -EAGAIN;
+	}
+	uint8_t block[EDGEZ_SENSOR_BLOCK_HEADER_SIZE +
+		EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK *
+		EDGEZ_SENSOR_BLOCK_IMU_RECORD_SIZE];
+	size_t offset = edgez_sensor_block_encode_header(
+		block, sizeof(block), EDGEZ_SENSOR_BLOCK_KIND_IMU,
+		EDGEZ_SENSOR_BLOCK_IMU_RECORD_SIZE, count,
+		sensor_block_sequence, &sensor_settings.value);
+	if (offset == 0U) {
+		return -EINVAL;
+	}
+	for (uint8_t sample_index = 0U; sample_index < count; ++sample_index) {
+		const struct edgez_imu_sample *sample =
+			&sensor_block_samples[sample_index];
+		for (size_t axis = 0U; axis < 3U; ++axis) {
+			edgez_sensor_put_float_le(block + offset,
+				sample->accel_m_s2[axis]);
+			offset += sizeof(float);
+		}
+		for (size_t axis = 0U; axis < 3U; ++axis) {
+			edgez_sensor_put_float_le(block + offset,
+				sample->gyro_rad_s[axis]);
+			offset += sizeof(float);
+		}
+		block[offset++] = sample->gyro_valid ? 1U : 0U;
+	}
+	int rc = sensor_pawr_send_block(block, offset,
+		EDGEZ_SENSOR_BLOCK_KIND_IMU, wake_interval_ms);
+	if (rc == 0) {
+		sensor_block_sample_count = 0U;
+		++sensor_block_sequence;
+	}
+	return rc;
+}
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 
 struct sensor_bulk_test_source {
 	uint8_t test_index;
@@ -1571,6 +1839,7 @@ static int sensor_pawr_run_bulk_test(uint32_t wake_interval_ms)
 	return 0;
 }
 #endif
+#endif /* CONFIG_OFFGRID_NRF54_ROLE_SENSOR */
 
 #if defined(CONFIG_OFFGRID_NRF54_MESH_PS_TEST)
 static bool set_mesh_power_save(bool enabled)
@@ -2262,6 +2531,8 @@ static inline void sensor_force_cpu_low_power(void)
 static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			      uint32_t now)
 {
+	struct edgez_imu_sample cycle_sample = {0};
+	bool cycle_sample_valid = false;
 	if (sensor_power.phase == SENSOR_POWER_INACTIVE) {
 		sensor_enter(profile, now);
 	}
@@ -2345,6 +2616,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	if (imu_rc != 0 && imu_rc != -ENOTSUP && imu_rc != -EAGAIN) {
 		LOG_WRN("sensor timer-wake IMU FIFO drain failed rc=%d", imu_rc);
 	}
+	if (imu_rc == 0 && edgez_imu_read(&cycle_sample) == 0) {
+		cycle_sample_valid = true;
+	}
 
 	int rc = 0;
 	bool radio_cold_started = false;
@@ -2410,6 +2684,28 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			}
 #else
 			rc = sensor_pawr_send_once(sensor_update_interval_ms());
+#endif
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+			if (!provisioning_cycle && rc == 0) {
+				if (!sensor_settings.value.send_blocks) {
+					sensor_block_sample_count = 0U;
+				} else if (cycle_sample_valid &&
+					   sensor_block_sample_count <
+						EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK) {
+					sensor_block_samples[sensor_block_sample_count++] =
+						cycle_sample;
+				}
+				if (sensor_settings.value.send_blocks &&
+				    sensor_block_sample_count >=
+					sensor_settings.value.samples_per_block) {
+					int block_rc = sensor_send_imu_block(
+						sensor_update_interval_ms());
+					if (block_rc != 0) {
+						LOG_WRN("sensor block retained for retry rc=%d",
+							block_rc);
+					}
+				}
+			}
 #endif
 			/* A provisioning acceptance is returned as a direct PAwR mesh
 			 * packet. Drain it before changing channel or sleeping. */
@@ -2502,6 +2798,7 @@ int main(void)
 	}
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	if (sensor_role) {
+		sensor_settings_load();
 		sensor_downlink_load_ack();
 	}
 	livestock_config_init();

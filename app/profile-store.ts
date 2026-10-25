@@ -662,6 +662,65 @@ export async function setActiveProfile(id: string): Promise<void> {
   );
 }
 
+/** Replace a phone-local profile id with the authoritative cloud profile id.
+ * Child rows are moved in the same transaction so switching an existing
+ * profile to cloud mode does not discard any offline history. */
+export async function adoptCloudProfileId(
+  currentId: string,
+  cloudId: string,
+): Promise<StoredProfile> {
+  const db = await database();
+  if (currentId === cloudId) {
+    const current = await db.getFirstAsync<ProfileRow>(
+      "SELECT * FROM profiles WHERE id = ?",
+      currentId,
+    );
+    if (!current) throw new Error("Profile no longer exists.");
+    return profileFromRow(current);
+  }
+
+  const existing = await db.getFirstAsync<ProfileRow>(
+    "SELECT * FROM profiles WHERE id = ?",
+    cloudId,
+  );
+  if (existing) {
+    await setActiveProfile(cloudId);
+    return profileFromRow(existing);
+  }
+
+  await db.withTransactionAsync(async () => {
+    const result = await db.runAsync(
+      `INSERT INTO profiles
+        (id, name, identity_name, identity_id, identity_private_key, identity_public_key,
+         country, location, halow_channel, mesh_id, mesh_passphrase, connect_to_cloud,
+         ble_device_id, ble_device_name, created_at, updated_at)
+       SELECT ?, name, identity_name, identity_id, identity_private_key, identity_public_key,
+         country, location, halow_channel, mesh_id, mesh_passphrase, connect_to_cloud,
+         ble_device_id, ble_device_name, created_at, updated_at
+       FROM profiles WHERE id = ?`,
+      cloudId,
+      currentId,
+    );
+    if (!result.changes) throw new Error("Profile no longer exists.");
+    for (const table of ["devices", "messages", "sensor_samples", "provisioning_requests"]) {
+      await db.runAsync(`UPDATE ${table} SET profile_id = ? WHERE profile_id = ?`, cloudId, currentId);
+    }
+    await db.runAsync(
+      "UPDATE app_state SET value = ? WHERE key = 'active_profile_id' AND value = ?",
+      cloudId,
+      currentId,
+    );
+    await db.runAsync("DELETE FROM profiles WHERE id = ?", currentId);
+  });
+
+  const adopted = await db.getFirstAsync<ProfileRow>(
+    "SELECT * FROM profiles WHERE id = ?",
+    cloudId,
+  );
+  if (!adopted) throw new Error("Could not adopt the cloud profile id.");
+  return profileFromRow(adopted);
+}
+
 export async function deleteProfile(id: string): Promise<StoredProfile | null> {
   const db = await database();
   await db.withTransactionAsync(async () => {

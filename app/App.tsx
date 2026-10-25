@@ -11,6 +11,7 @@ import { ActivityIndicator, Alert, Modal } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import {
   activeProfile,
+  adoptCloudProfileId,
   createProfileIdentity,
   createProfile,
   deleteProfileDevice,
@@ -200,8 +201,14 @@ export default function App() {
     if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || network.isInternetReachable !== true) return;
     let active = true;
     void ensureCloudProfile(runtimeProfile)
-      .then(() => {
-        if (active) setCloudProfileReady(true);
+      .then(async (cloudProfileId) => {
+        if (!active) return;
+        if (cloudProfileId !== runtimeProfile.id) {
+          await adoptCloudProfileId(runtimeProfile.id, cloudProfileId);
+          if (active) await refreshProfiles();
+          return;
+        }
+        setCloudProfileReady(true);
       })
       .catch((caught) => {
         if (!active) return;

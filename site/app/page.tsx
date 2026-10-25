@@ -1,6 +1,6 @@
 "use client";
 
-import { Account, Client, ID, Models, Query, TablesDB } from "appwrite";
+import { Account, Client, ID, Models, Query, TablesDB, Teams } from "appwrite";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "./ProfileSelector";
@@ -8,7 +8,7 @@ import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "
 import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../lib/device-status";
 
 type Device = DeviceSystemState & { $id: string; $permissions?: string[]; serial: string; name: string; status: string; enabled: boolean; metadata?: { profileId?: string; firmwareTarget?: string; [key: string]: unknown } };
-type Profile = Models.Row & { name: string; identityId?: string };
+type Profile = Models.Row & { name: string; identityId?: string; teamId?: string };
 type Telemetry = Models.Row & { deviceId: string; gatewayDeviceId?: string | null; halowMac?: string | null; serial: string; channel: string; topic: string; payload: string; location?: [number, number] | null; icon?: string | null; markerColor?: string | null; receivedAt: string };
 type OtaUpdate = Models.Row & { deviceId: string; serial: string; requestId: string; status: "pending" | "succeeded" | "failed" | "busy"; detail?: string; firmwareVersion?: string; targetFirmwareVersion?: string; reportedAt: string; completedAt?: string | null };
 type HistoryRange = "30m" | "1h" | "6h" | "24h";
@@ -26,6 +26,7 @@ const client = new Client()
   .setProject(process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!);
 const account = new Account(client);
 const tables = new TablesDB(client);
+const teams = new Teams(client);
 const databaseId = process.env.NEXT_PUBLIC_DATABASE_ID!;
 const profileTableId = "profiles";
 const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
@@ -357,6 +358,7 @@ export default function Home() {
   const [historyError, setHistoryError] = useState("");
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [deletingProfile, setDeletingProfile] = useState(false);
   const [otaDeviceId, setOtaDeviceId] = useState("");
   const [otaMessage, setOtaMessage] = useState("");
   const [scriptDeviceId, setScriptDeviceId] = useState("");
@@ -486,6 +488,32 @@ export default function Home() {
     finally { setDeleting(false); }
   }
 
+  async function removeCurrentProfile() {
+    if (!currentProfile || !user) return;
+    if (profileDevices.length) {
+      setError("Delete the devices in this profile before deleting the profile.");
+      return;
+    }
+    if (!window.confirm(`Delete the profile “${currentProfile.name}”? This cannot be undone.`)) return;
+    setDeletingProfile(true); setError("");
+    const deletedProfileId = currentProfile.$id;
+    const teamId = currentProfile.teamId || deletedProfileId;
+    try {
+      await tables.deleteRow({ databaseId, tableId: profileTableId, rowId: deletedProfileId });
+      try {
+        await teams.delete({ teamId });
+      } catch (caught) {
+        setError(`Profile deleted, but its empty access team could not be removed: ${errorMessage(caught)}`);
+      }
+      window.localStorage.removeItem(selectedProfileStorageKey(user.$id));
+      setCurrentProfileId("");
+      setSelectedDeviceId("");
+      setMobileDetailOpen(false);
+      await refresh();
+    } catch (caught) { setError(errorMessage(caught)); }
+    finally { setDeletingProfile(false); }
+  }
+
   async function updateSelectedDevice() {
     if (!selectedDevice) return;
     if (selectedFirmwareCurrent) {
@@ -586,7 +614,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && currentProfile && <button className="delete-profile" onClick={() => void removeCurrentProfile()} disabled={deletingProfile}>{deletingProfile ? "Deleting…" : "Delete profile"}</button>}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read device state and mobile-synced sensor history.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void (otpUserId ? verifyOtp() : requestOtp()); }}>

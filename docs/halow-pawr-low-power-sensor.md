@@ -38,3 +38,45 @@ this approach attractive when a long-range sensor occasionally needs to send
 more data than a conventional low-rate LPWAN node. Actual energy per kilobyte
 still depends on wake overhead, RF conditions, data rate, payload size, and the
 receiver topology.
+
+## Reliable sensor settings downlink
+
+Provisioned HT-HC33 and nRF54L15 sensor images accept the existing reliable
+downlink command `sensor.settings`. The command body is a complete, atomic
+settings document:
+
+```json
+{
+  "samplingIntervalMs": 15000,
+  "sendBlocks": true,
+  "samplesPerBlock": 8
+}
+```
+
+`samplingIntervalMs` is valid from 1,000 through 3,600,000 ms and controls the
+sensor wake/sample interval. `samplesPerBlock` is valid from 1 through 32. A
+normal beacon is still sent every interval when `sendBlocks` is false; sample
+block accumulation and transmission are disabled. Send this document through
+`POST /devices/{deviceId}/commands` as the `payload` with `command` set to
+`sensor.settings`.
+
+The sensor writes the new settings to persistent storage before acknowledging
+the downlink message ID. Invalid documents are not acknowledged and therefore
+follow the normal server retry/failure policy. Changing settings discards an
+incomplete block so one block never mixes samples collected under different
+settings.
+
+Every block begins with a 24-byte `EZSB` version 1 header. The header records
+the sample kind, block sequence, record size and count, plus the exact
+`samplingIntervalMs`, `sendBlocks`, and `samplesPerBlock` snapshot that produced
+the block. HT-HC33 records contain MCU temperature floats. nRF54L15 records
+retain three acceleration axes, three gyroscope axes, and a gyroscope-valid
+flag. A block remains buffered until H7608 returns the PAwR bulk ACK.
+
+HT-HC33 stores its active settings and pending samples in RTC memory during
+timer deep sleep; it reads NVS only on a cold/non-timer start or an invalid RTC
+cache. nRF54L15 uses System-ON sleep, so settings are loaded once during
+application startup and the pending sample block remains in retained RAM. On
+both targets the existing button behavior remains authoritative: a button wake
+starts a fresh five-second hold timer, and completing the hold erases the
+persistent settings along with the provisioning state.
