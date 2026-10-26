@@ -117,7 +117,12 @@ typedef struct {
 static const char *TAG = "hc33_sensor";
 static const uint8_t envelope_magic[] = {'E', 'Z', 'P', 1};
 static const uint8_t conversation_label[] = "EdgeZ conversation v1";
-static const uint8_t broadcast_mac[6] = {
+/* Group-addressed discovery lets a mesh gateway opt into receiving EdgeZ
+ * Public Action frames without putting the Morse radio into monitor mode. */
+static const uint8_t discovery_multicast_mac[6] = {
+    0x03, 0x45, 0x64, 0x67, 0x5a, 0x01,
+};
+static const uint8_t wildcard_bssid[6] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 };
 static const uint8_t zero_mac[6];
@@ -1101,10 +1106,15 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
     }
     if (!edgez_pawr_encode_action_frame(
             frame, sizeof(frame), sequence_number++, radio_info.mac_addr,
-            discovery ? broadcast_mac : profile.gateway_mac,
+            discovery ? discovery_multicast_mac : profile.gateway_mac,
             packet, packet_length, &frame_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
+    /* The common encoder uses the transmitter as address 3, which is correct
+     * for gateway responses.  A sensor request is outside an associated BSS:
+     * use wildcard BSSID for discovery and the accepted gateway for unicast. */
+    memcpy(frame + 16U,
+           discovery ? wildcard_bssid : profile.gateway_mac, 6U);
     const struct edgez_umac_tx_request request = {
         .token = ++tx_token,
         .frame = frame,
