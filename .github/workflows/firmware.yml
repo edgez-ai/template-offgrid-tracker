@@ -10,7 +10,7 @@ on:
         type: choice
         options:
           - all
-          - heltec-hc33
+          - ht-hc33-sensor
           - edgez-nrf54l15-fgh200m-companion
           - edgez-nrf54l15-fgh200m-sensor
 
