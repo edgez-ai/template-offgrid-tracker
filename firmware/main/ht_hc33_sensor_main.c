@@ -1100,12 +1100,9 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
         return ESP_ERR_INVALID_SIZE;
     }
     if (discovery) {
-        const size_t mesh_id_length = strlen(active_mesh_id);
         const size_t vendor_length = 3U + packet_length;
-        const size_t required = 24U + 2U + 2U + mesh_id_length +
-            2U + vendor_length;
-        if (mesh_id_length == 0U || mesh_id_length > 32U ||
-            vendor_length > UINT8_MAX || required > sizeof(frame)) {
+        const size_t required = 24U + 2U + 2U + vendor_length;
+        if (vendor_length > UINT8_MAX || required > sizeof(frame)) {
             return ESP_ERR_INVALID_SIZE;
         }
         memset(frame, 0, required);
@@ -1119,10 +1116,6 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
         size_t offset = 24U;
         frame[offset++] = 0U; /* Wildcard SSID IE. */
         frame[offset++] = 0U;
-        frame[offset++] = 114U; /* Mesh ID IE. */
-        frame[offset++] = (uint8_t)mesh_id_length;
-        memcpy(frame + offset, active_mesh_id, mesh_id_length);
-        offset += mesh_id_length;
         frame[offset++] = 221U; /* EdgeZ vendor IE. */
         frame[offset++] = (uint8_t)vendor_length;
         memcpy(frame + offset, "Edg", 3U);

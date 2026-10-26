@@ -1292,14 +1292,11 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		return -EMSGSIZE;
 	}
 	if (provisioning) {
-		const size_t mesh_id_len = mesh_runtime.config.mesh_id_length;
 		const size_t vendor_len = 3U + packet_len;
-		const size_t required = 24U + 2U + 2U + mesh_id_len +
-			2U + vendor_len;
+		const size_t required = 24U + 2U + 2U + vendor_len;
 		size_t offset;
 
-		if (mesh_id_len == 0U || mesh_id_len > 32U ||
-		    vendor_len > UINT8_MAX || required > sizeof(frame)) {
+		if (vendor_len > UINT8_MAX || required > sizeof(frame)) {
 			return -EMSGSIZE;
 		}
 		memset(frame, 0, required);
@@ -1313,10 +1310,6 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		offset = 24U;
 		frame[offset++] = 0U;
 		frame[offset++] = 0U;
-		frame[offset++] = 114U;
-		frame[offset++] = (uint8_t)mesh_id_len;
-		memcpy(frame + offset, mesh_runtime.config.mesh_id, mesh_id_len);
-		offset += mesh_id_len;
 		frame[offset++] = 221U;
 		frame[offset++] = (uint8_t)vendor_len;
 		memcpy(frame + offset, "Edg", 3U);
