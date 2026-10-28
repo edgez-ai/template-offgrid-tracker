@@ -1292,12 +1292,36 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		return -EMSGSIZE;
 	}
 	if (provisioning) {
-		if (!edgez_pawr_encode_action_frame(
-			frame, sizeof(frame), pawr_sequence_number++,
-			mesh_runtime.radio_info.mac_addr, broadcast,
-			packet, packet_len, &frame_len)) {
+		const size_t mesh_id_len = mesh_runtime.config.mesh_id_length;
+		const size_t vendor_len = 3U + packet_len;
+		const size_t required = 24U + 2U + 2U + mesh_id_len +
+			2U + vendor_len;
+		size_t offset;
+
+		if (mesh_id_len == 0U || mesh_id_len > 32U ||
+		    vendor_len > UINT8_MAX || required > sizeof(frame)) {
 			return -EMSGSIZE;
 		}
+		memset(frame, 0, required);
+		frame[0] = 0x40U;
+		memcpy(frame + 4U, broadcast, 6U);
+		memcpy(frame + 10U, mesh_runtime.radio_info.mac_addr, 6U);
+		memcpy(frame + 16U, broadcast, 6U);
+		frame[22U] = (uint8_t)(pawr_sequence_number << 4U);
+		frame[23U] = (uint8_t)(pawr_sequence_number >> 4U);
+		pawr_sequence_number++;
+		offset = 24U;
+		frame[offset++] = 0U;
+		frame[offset++] = 0U;
+		frame[offset++] = 114U;
+		frame[offset++] = (uint8_t)mesh_id_len;
+		memcpy(frame + offset, mesh_runtime.config.mesh_id, mesh_id_len);
+		offset += mesh_id_len;
+		frame[offset++] = 221U;
+		frame[offset++] = (uint8_t)vendor_len;
+		memcpy(frame + offset, "Edg", 3U);
+		memcpy(frame + offset + 3U, packet, packet_len);
+		frame_len = required;
 	} else if (!edgez_pawr_encode_action_frame(
 			frame, sizeof(frame), pawr_sequence_number++,
 			mesh_runtime.radio_info.mac_addr,
