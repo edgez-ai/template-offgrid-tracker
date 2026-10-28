@@ -1099,38 +1099,11 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
             active_compressed_ssid, payload, payload_length, &packet_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
-    if (discovery) {
-        const size_t mesh_id_length = strlen(active_mesh_id);
-        const size_t vendor_length = 3U + packet_length;
-        const size_t required = 24U + 2U + 2U + mesh_id_length +
-            2U + vendor_length;
-        if (mesh_id_length == 0U || mesh_id_length > 32U ||
-            vendor_length > UINT8_MAX || required > sizeof(frame)) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        memset(frame, 0, required);
-        frame[0] = 0x40U; /* Probe Request. */
-        memcpy(frame + 4U, broadcast_mac, 6U);
-        memcpy(frame + 10U, radio_info.mac_addr, 6U);
-        memcpy(frame + 16U, broadcast_mac, 6U);
-        frame[22U] = (uint8_t)(sequence_number << 4U);
-        frame[23U] = (uint8_t)(sequence_number >> 4U);
-        sequence_number++;
-        size_t offset = 24U;
-        frame[offset++] = 0U; /* Wildcard SSID IE. */
-        frame[offset++] = 0U;
-        frame[offset++] = 114U; /* Mesh ID IE. */
-        frame[offset++] = (uint8_t)mesh_id_length;
-        memcpy(frame + offset, active_mesh_id, mesh_id_length);
-        offset += mesh_id_length;
-        frame[offset++] = 221U; /* EdgeZ vendor IE. */
-        frame[offset++] = (uint8_t)vendor_length;
-        memcpy(frame + offset, "Edg", 3U);
-        memcpy(frame + offset + 3U, packet, packet_length);
-        frame_length = required;
-    } else if (!edgez_pawr_encode_action_frame(
+    const uint8_t *destination = discovery ? broadcast_mac :
+        profile.gateway_mac;
+    if (!edgez_pawr_encode_action_frame(
             frame, sizeof(frame), sequence_number++, radio_info.mac_addr,
-            profile.gateway_mac, packet, packet_length, &frame_length)) {
+            destination, packet, packet_length, &frame_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
     const struct edgez_umac_tx_request request = {
