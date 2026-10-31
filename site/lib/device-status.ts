@@ -13,12 +13,12 @@ export type DeviceSystemState = {
 };
 
 export type TopologyLink = {
-  $id: string; profileId: string; gatewayDeviceId: string; gatewaySerial: string;
-  peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null;
+  $id: string; profileId: string; gatewayDeviceId: string; gatewayName: string; gatewaySerial: string;
+  peerDeviceId: string; peerName: string; peerSerial: string; peerRadioMac: string; rssi?: number | null;
   kind: "mesh" | "pawr"; active: boolean; lastSeenAt: string; reportedAt: string;
 };
 
-type DeviceIdentity = DeviceSystemState & { $id: string; serial: string; metadata?: { profileId?: string } };
+type DeviceIdentity = DeviceSystemState & { $id: string; name?: string; serial: string; metadata?: { profileId?: string } };
 
 // Resolve only identities visible through the Devices API. Unknown radios retain their MAC identity.
 export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
@@ -33,8 +33,8 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
       const peer = byMac.get(mac);
       return {
         $id: `${device.$id}:${mac}`, profileId: device.metadata?.profileId || "",
-        gatewayDeviceId: device.$id, gatewaySerial: device.serial,
-        peerDeviceId: peer?.$id || `radio:${mac}`, peerSerial: peer?.serial || mac,
+        gatewayDeviceId: device.$id, gatewayName: device.name || device.serial, gatewaySerial: device.serial,
+        peerDeviceId: peer?.$id || `radio:${mac}`, peerName: peer?.name || peer?.serial || mac, peerSerial: peer?.serial || mac,
         peerRadioMac: mac, rssi: link.rssi, kind: "mesh" as const, active: true,
         lastSeenAt: new Date(Date.parse(reportedAt) - link.ageMs).toISOString(),
         reportedAt,
@@ -50,8 +50,10 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
       $id: `${gateway.$id}:pawr:${device.$id}`,
       profileId: device.metadata?.profileId || gateway.metadata?.profileId || "",
       gatewayDeviceId: gateway.$id,
+      gatewayName: gateway.name || gateway.serial,
       gatewaySerial: gateway.serial,
       peerDeviceId: device.$id,
+      peerName: device.name || device.serial,
       peerSerial: device.serial,
       peerRadioMac: device.halowMac?.toUpperCase() || "",
       kind: "pawr",

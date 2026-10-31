@@ -249,7 +249,7 @@ function SensorChart({ series, duration }: { series: SensorSeries[]; duration: n
 function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[] }) {
   const neighbors = links.map((link) => ({
     id: link.gatewayDeviceId === device.$id ? link.peerDeviceId : link.gatewayDeviceId,
-    serial: link.gatewayDeviceId === device.$id ? link.peerSerial : link.gatewaySerial,
+    serial: link.gatewayDeviceId === device.$id ? link.peerName : link.gatewayName,
     rssi: link.rssi,
     kind: link.kind,
     lastSeenAt: link.lastSeenAt,
