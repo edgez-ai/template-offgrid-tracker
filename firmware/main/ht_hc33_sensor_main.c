@@ -55,6 +55,7 @@
 #define SENSOR_RTC_CACHE_VERSION 4U
 #define SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
 #define SENSOR_BULK_ACK_ATTEMPTS 4U
+#define IEEE80211_MGMT_BSSID_OFFSET 16U
 #define DOWNLINK_HEADER_LENGTH 12U
 #define PROVISIONING_ENVELOPE_HEADER_LEN 48U
 #define PROVISIONING_NONCE_LEN 12U
@@ -1106,6 +1107,15 @@ static esp_err_t send_request(const uint8_t *payload, size_t payload_length,
             destination, packet, packet_length, &frame_length)) {
         return ESP_ERR_INVALID_SIZE;
     }
+    if (!discovery) {
+        /* A provisioned sensor sends a directed Public Action frame through
+         * the gateway's active mesh BSS.  Keep addr3 aligned with that BSS;
+         * using the sensor's own MAC here makes MM6108 classify the otherwise
+         * valid unicast frame as belonging to another BSS before the host
+         * PAwR handler can inspect its CSSID. */
+        memcpy(frame + IEEE80211_MGMT_BSSID_OFFSET, profile.gateway_mac,
+               sizeof(profile.gateway_mac));
+    }
     const struct edgez_umac_tx_request request = {
         .token = ++tx_token,
         .frame = frame,
@@ -1214,6 +1224,9 @@ static esp_err_t send_sensor_block(const uint8_t *data, size_t length,
                 packet, packet_length, &action_length)) {
             return ESP_ERR_INVALID_SIZE;
         }
+        /* Blocks use the same directed management path as the normal beacon. */
+        memcpy(action + IEEE80211_MGMT_BSSID_OFFSET, profile.gateway_mac,
+               sizeof(profile.gateway_mac));
         const struct edgez_umac_tx_request request = {
             .token = ++tx_token,
             .frame = action,
