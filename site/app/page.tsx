@@ -16,10 +16,6 @@ type SensorPoint = { timestamp: number; value: number };
 type SensorSeries = { field: string; label: string; color: string; points: SensorPoint[] };
 type TimeseriesRow = { _time?: unknown; _field?: unknown; _value?: unknown; channel?: unknown };
 type HistoryReading = { timestamp: number; channel: string; payload: string };
-type SensorPayload = {
-  batteryVoltageMv?: unknown;
-  sensors?: { type?: unknown; value?: unknown }[];
-};
 
 const client = new Client()
   .setEndpoint(process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!)
@@ -115,51 +111,6 @@ function timeseriesReadings(rows: TimeseriesRow[]): HistoryReading[] {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
-}
-
-const batteryVoltageSensorType = 12;
-const temperatureSensorType = 1;
-const mcuTemperatureSensorType = 13;
-const randomTemperatureIntervalSeconds = 30;
-const randomTemperatureScript = `math.randomseed((os.time() % 100000) + math.floor((os.clock() or 0) * 1000))
-
-local value = math.random(180, 320) / 10
-
-return {
-  {
-    type = 1,
-    float_value = value,
-  },
-}`;
-
-function voltageOf(row: Telemetry) {
-  try {
-    if (row.channel !== "status" && row.channel !== "battery") return null;
-    const payload = JSON.parse(row.payload) as SensorPayload;
-    const sensorValue = payload.sensors?.find((sensor) => sensor?.type === batteryVoltageSensorType)?.value;
-    if (typeof sensorValue === "number" && Number.isFinite(sensorValue) && sensorValue >= 0 && sensorValue <= 10.0) {
-      return sensorValue;
-    }
-    const legacyMillivolts = Number(payload.batteryVoltageMv);
-    return Number.isInteger(legacyMillivolts) && legacyMillivolts >= 0 && legacyMillivolts <= 10000
-      ? legacyMillivolts / 1000 : null;
-  } catch { return null; }
-}
-
-function temperatureOf(row: Telemetry) {
-  try {
-    const payload = JSON.parse(row.payload) as SensorPayload;
-    const value = payload.sensors?.find((sensor) => sensor?.type === temperatureSensorType)?.value;
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  } catch { return null; }
-}
-
-function mcuTemperatureOf(row: Telemetry) {
-  try {
-    const payload = JSON.parse(row.payload) as SensorPayload;
-    const value = payload.sensors?.find((sensor) => sensor?.type === mcuTemperatureSensorType)?.value;
-    return typeof value === "number" && Number.isFinite(value) ? value : null;
-  } catch { return null; }
 }
 
 function firmwareVersionOf(device?: Device | null) {
@@ -320,27 +271,6 @@ async function sendOtaCommand(deviceId: string) {
   }
 }
 
-async function sendRandomTemperatureScript(deviceId: string, requestId: string) {
-  const jwt = await account.createJWT();
-  const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
-    body: JSON.stringify({
-      command: "script",
-      payload: {
-        action: "download",
-        requestId,
-        intervalSeconds: randomTemperatureIntervalSeconds,
-        script: randomTemperatureScript,
-      },
-    }),
-  });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({})) as { message?: string };
-    throw new Error(payload.message || "Could not deploy the sensor script.");
-  }
-}
-
 export default function Home() {
   const [user, setUser] = useState<Models.User<Models.Preferences> | null>(null);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -362,8 +292,6 @@ export default function Home() {
   const [deletingProfile, setDeletingProfile] = useState(false);
   const [otaDeviceId, setOtaDeviceId] = useState("");
   const [otaMessage, setOtaMessage] = useState("");
-  const [scriptDeviceId, setScriptDeviceId] = useState("");
-  const [scriptMessage, setScriptMessage] = useState("");
   const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
   const [email, setEmail] = useState("");
   const [otpUserId, setOtpUserId] = useState("");
@@ -534,47 +462,9 @@ export default function Home() {
     finally { setOtaDeviceId(""); }
   }
 
-  async function deployRandomTemperatureSensor() {
-    if (!selectedDevice) return;
-    if (!window.confirm(`Replace the active sensor script on ${selectedDevice.name} with the random temperature sample?`)) return;
-    setScriptDeviceId(selectedDevice.$id); setScriptMessage(""); setError("");
-    try {
-      await sendRandomTemperatureScript(selectedDevice.$id, ID.unique());
-      setScriptMessage(`Command sent. The first random temperature reading should arrive now, then every ${randomTemperatureIntervalSeconds} seconds.`);
-    } catch (caught) { setError(errorMessage(caught)); }
-    finally { setScriptDeviceId(""); }
-  }
-
-  const latestVoltageByDevice = useMemo(() => {
-    const latest = new Map<string, { row: Telemetry; value: number }>();
-    for (const row of telemetry) {
-      if (latest.has(row.deviceId)) continue;
-      const value = voltageOf(row);
-      if (value !== null) latest.set(row.deviceId, { row, value });
-    }
-    return latest;
-  }, [telemetry]);
   const latestTelemetryByDevice = useMemo(() => {
     const latest = new Map<string, Telemetry>();
     for (const row of telemetry) if (!latest.has(row.deviceId)) latest.set(row.deviceId, row);
-    return latest;
-  }, [telemetry]);
-  const latestTemperatureByDevice = useMemo(() => {
-    const latest = new Map<string, { row: Telemetry; value: number }>();
-    for (const row of telemetry) {
-      if (latest.has(row.deviceId)) continue;
-      const value = temperatureOf(row);
-      if (value !== null) latest.set(row.deviceId, { row, value });
-    }
-    return latest;
-  }, [telemetry]);
-  const latestMcuTemperatureByDevice = useMemo(() => {
-    const latest = new Map<string, { row: Telemetry; value: number }>();
-    for (const row of telemetry) {
-      if (latest.has(row.deviceId)) continue;
-      const value = mcuTemperatureOf(row);
-      if (value !== null) latest.set(row.deviceId, { row, value });
-    }
     return latest;
   }, [telemetry]);
   const selectedDevice = profileDevices.find((device) => device.$id === selectedDeviceId);
@@ -587,9 +477,6 @@ export default function Home() {
   const selectedGatewayAvailable = selectedIsGateway || selectedDevice?.gatewayDeviceId
     ? selectedGatewayStatus === "online" || (selectedGatewayStatus === "unknown" && selectedDevice !== undefined && statusOf(selectedDevice, selectedLatestTelemetry) === "Online")
     : null;
-  const selectedLatest = selectedDevice ? latestVoltageByDevice.get(selectedDevice.$id) : undefined;
-  const selectedTemperature = selectedDevice ? latestTemperatureByDevice.get(selectedDevice.$id) : undefined;
-  const selectedMcuTemperature = selectedDevice ? latestMcuTemperatureByDevice.get(selectedDevice.$id) : undefined;
   const selectedStatus = selectedDevice ? statusOf(selectedDevice, selectedLatestTelemetry) : "";
   const selectedFirmwareVersion = firmwareVersionOf(selectedDevice);
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
@@ -610,7 +497,6 @@ export default function Home() {
     setSelectedDeviceId(device.$id);
     setHistoryRange("1h");
     setDeleteConfirm(false);
-    setScriptMessage("");
     setMobileDetailOpen(true);
   }
 
@@ -636,12 +522,11 @@ export default function Home() {
           <div className="master-heading"><div><p className="eyebrow">{currentProfile?.name || "PROFILE"}</p><h2>Provisioned devices</h2></div><span>{profileDevices.length}</span></div>
           <p className="master-help">Onboard new devices from the mobile app over BLE.</p>
           <div className="device-list">{profileDevices.map((device) => {
-            const latest = latestVoltageByDevice.get(device.$id);
-            const status = statusOf(device, latestTelemetryByDevice.get(device.$id));
+            const latest = latestTelemetryByDevice.get(device.$id);
+            const status = statusOf(device, latest);
             return <button key={device.$id} className={`device-card ${selectedDeviceId === device.$id ? "selected" : ""}`} onClick={() => selectDevice(device)}>
               <span className="device-card-top"><span><strong>{device.name}</strong><code>{device.serial}</code></span><span className={`status ${status === "Online" ? "online" : "offline"}`}><i />{status}</span></span>
-              <span className="device-value"><small>BATTERY VOLTAGE</small><b>{latest ? `${latest.value.toFixed(2)} V` : "—"}</b></span>
-              <span className="device-seen">{latest ? `Updated ${relativeTime(latest.row.receivedAt)}` : "Waiting for telemetry"}<i>›</i></span>
+              <span className="device-seen">{latest ? `Updated ${relativeTime(latest.receivedAt)}` : "Waiting for telemetry"}<i>›</i></span>
             </button>;
           })}</div>
           {!profileDevices.length && <p className="empty">No devices provisioned for {currentProfile?.name || "this profile"}.</p>}
@@ -653,8 +538,6 @@ export default function Home() {
             <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedDevice?.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedDevice?.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
             <div className="gateway-summary"><div><span>DEVICE ROLE</span><strong>{selectedIsGateway ? "Gateway" : "Leaf device"}</strong></div><div><span>GATEWAY AVAILABLE</span><strong className={selectedGatewayAvailable === true ? "available" : selectedGatewayAvailable === false ? "unavailable" : "unknown"}>{selectedGatewayAvailable === true ? "Available" : selectedGatewayAvailable === false ? "Unavailable" : "Not configured"}</strong></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
-            <div className="metric-card"><span>BATTERY VOLTAGE</span><strong>{selectedLatest ? `${selectedLatest.value.toFixed(2)} V` : "—"}</strong><small>{selectedLatest ? `Updated ${relativeTime(selectedLatest.row.receivedAt)}` : "No readings received"}</small></div>
-            <div className="metric-card"><span>MCU TEMPERATURE</span><strong>{selectedMcuTemperature ? `${selectedMcuTemperature.value.toFixed(1)} °C` : "—"}</strong><small>{selectedMcuTemperature ? `Updated ${relativeTime(selectedMcuTemperature.row.receivedAt)}` : "No MCU reading received"}</small></div>
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
             <div className="chart-card"><header><div><h3>Sensor history</h3><p>Mobile sync · {selectedHistorySeries.reduce((total, series) => total + series.points.length, 0)} selected readings</p></div>{historyLoading && <span className="spinner" />}</header>
               <div className="sensor-picker" aria-label="Sensors displayed in the history chart">{historySeries.map((series) => <label key={series.field} className={selectedSensorFields.includes(series.field) ? "selected" : ""}><input type="checkbox" checked={selectedSensorFields.includes(series.field)} onChange={() => toggleSensor(series.field)} /><i style={{ background: series.color }} />{series.label}<small>{series.points.length}</small></label>)}{!historyLoading && !historySeries.length && <span>No sensor fields found.</span>}</div>
@@ -667,7 +550,6 @@ export default function Home() {
               return <div key={series.field}><span><i style={{ background: series.color }} />{series.label}</span><strong>{latest.value.toFixed(2)}</strong><small>min {Math.min(...values).toFixed(2)} · avg {(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2)} · max {Math.max(...values).toFixed(2)}</small></div>;
             })}</div>}
             <div className="topology-card"><header><div><h3>HaLow topology</h3><p>Mesh and PAwR gateway links seen within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
-            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="sensor-script-card"><div><h3>Random temperature sensor</h3><p>Installs a Lua sample derived from the EdgeZ sensor definition. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the currently installed unified sensor script.</p>{selectedTemperature && <small>Latest temperature: {selectedTemperature.value.toFixed(1)} °C · {relativeTime(selectedTemperature.row.receivedAt)}</small>}{scriptMessage && <small>{scriptMessage}</small>}</div><button onClick={() => void deployRandomTemperatureSensor()} disabled={selectedStatus !== "Online" || scriptDeviceId === selectedDevice.$id}>{scriptDeviceId === selectedDevice.$id ? "Deploying…" : "Deploy sensor script"}</button></div>}
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>offgrid-tracker-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent history</h3>{historyReadings.map((reading) => <article key={`${reading.timestamp}-${reading.channel}`}><header><code>{reading.channel}</code><time>{new Date(reading.timestamp).toLocaleString()}</time></header><pre>{prettyPayload(reading.payload)}</pre></article>)}{!historyReadings.length && <p className="empty">No mobile sensor messages in this range.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}

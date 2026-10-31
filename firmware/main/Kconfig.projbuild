@@ -281,7 +281,7 @@ menu "HaLow initialization"
 
     config DAB_FACTORY_RESET_BUTTON
         bool "Enable long-press button factory reset"
-        depends on IDF_TARGET_ESP32P4
+        depends on IDF_TARGET_ESP32P4 || IDF_TARGET_ESP32S3
         default n
         help
             Hold a configured GPIO button, then release it, to restart and

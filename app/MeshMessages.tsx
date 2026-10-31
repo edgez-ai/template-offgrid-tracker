@@ -38,6 +38,7 @@ const sensorFields: ReadonlyArray<{ key: keyof EdgezSensorData; label: string; u
   { key: "gyroX", label: "Gyro X", unit: "", decimals: 2 },
   { key: "gyroY", label: "Gyro Y", unit: "", decimals: 2 },
   { key: "gyroZ", label: "Gyro Z", unit: "", decimals: 2 },
+  { key: "batteryVoltage", label: "Battery Voltage", unit: " V", decimals: 2 },
   { key: "mcuTemperature", label: "MCU Temperature", unit: "°C", decimals: 1 },
   { key: "latitude", label: "Latitude", unit: "°", decimals: 5 },
   { key: "longitude", label: "Longitude", unit: "°", decimals: 5 },
@@ -535,6 +536,7 @@ function lastSeenLabel(value: number, online: boolean) { return value > 0 ? `${o
 function sensorSummary(data: EdgezSensorData) {
   if (typeof data.temperature === "number") return `${data.temperature.toFixed(1)}°C${typeof data.humidity === "number" ? ` · ${data.humidity.toFixed(0)}% RH` : ""}`;
   if (typeof data.mcuTemperature === "number") return `MCU ${data.mcuTemperature.toFixed(1)}°C`;
+  if (typeof data.batteryVoltage === "number") return `Battery ${data.batteryVoltage.toFixed(2)} V`;
   if (typeof data.vibrationAverage === "number") return `Vibration ${data.vibrationAverage.toFixed(2)}`;
   if (typeof data.latitude === "number" && typeof data.longitude === "number") return `${data.latitude.toFixed(5)}, ${data.longitude.toFixed(5)}`;
   return "Sensor sample received";

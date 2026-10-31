@@ -100,10 +100,15 @@ else()
             "../nrf54/src/usb_control.pb.c")
     endif()
 
+    # The provisioning reset button is shared by the ESP32-P4 gateway and the
+    # ESP32-S3/HT-HC33 gateway build.  Keep it outside the P4-only block so a
+    # provisioned HC33 can return to BLE provisioning without reflashing NVS.
+    if(CONFIG_DAB_FACTORY_RESET_BUTTON)
+        list(APPEND component_sources "factory_reset_button.c")
+        list(APPEND component_private_dependencies nvs_flash)
+    endif()
+
     if(IDF_TARGET STREQUAL "esp32p4")
-        if(CONFIG_DAB_FACTORY_RESET_BUTTON)
-            list(APPEND component_sources "factory_reset_button.c")
-        endif()
         list(APPEND component_private_dependencies espressif__esp_hosted)
     endif()
 endif()

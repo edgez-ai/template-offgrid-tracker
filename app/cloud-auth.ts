@@ -496,7 +496,8 @@ function sensorSampleFromCloud(row: CloudTelemetryRow, device: NativeDevice): Ed
   const fields = new Map<number, keyof EdgezSensorSample["data"]>([
     [1, "temperature"], [2, "humidity"], [3, "latitude"], [4, "longitude"],
     [5, "binaryLengthBytes"], [6, "accelX"], [7, "accelY"], [8, "accelZ"],
-    [9, "gyroX"], [10, "gyroY"], [11, "gyroZ"], [13, "mcuTemperature"],
+    [9, "gyroX"], [10, "gyroY"], [11, "gyroZ"], [12, "batteryVoltage"],
+    [13, "mcuTemperature"],
   ]);
   try {
     const payload = JSON.parse(row.payload) as { sensors?: { type?: unknown; value?: unknown }[] };
