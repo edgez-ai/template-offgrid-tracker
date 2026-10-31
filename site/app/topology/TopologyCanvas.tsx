@@ -25,12 +25,14 @@ export type CanvasLink = {
   from: string;
   to: string;
   rssi?: number | null;
+  kind: "mesh" | "pawr";
 };
 
 type GraphNode = CanvasNode;
 type GraphLink = {
   id: string;
   rssi?: number | null;
+  kind: "mesh" | "pawr";
 };
 
 function signalColor(rssi?: number | null) {
@@ -89,7 +91,7 @@ export default function TopologyCanvas({
 
   const graphData = useMemo<GraphData<GraphNode, GraphLink>>(() => ({
     nodes: nodes.map((node) => ({ ...node })),
-    links: links.map((link) => ({ id: link.id, source: link.from, target: link.to, rssi: link.rssi })),
+    links: links.map((link) => ({ id: link.id, source: link.from, target: link.to, rssi: link.rssi, kind: link.kind })),
   }), [links, nodes]);
 
   function paintNode(node: NodeObject<GraphNode>, context: CanvasRenderingContext2D, scale: number) {
@@ -166,7 +168,7 @@ export default function TopologyCanvas({
     const source = typeof link.source === "object" ? link.source : undefined;
     const target = typeof link.target === "object" ? link.target : undefined;
     if (!source || !target || source.x === undefined || source.y === undefined || target.x === undefined || target.y === undefined) return;
-    const label = typeof link.rssi === "number" ? `${link.rssi} dBm` : "HaLow";
+    const label = link.kind === "pawr" ? "PAwR" : typeof link.rssi === "number" ? `${link.rssi} dBm` : "Mesh";
     const x = (source.x + target.x) / 2;
     const y = (source.y + target.y) / 2;
     const fontSize = 9 / scale;
@@ -176,7 +178,7 @@ export default function TopologyCanvas({
     const width = context.measureText(label).width;
     context.fillStyle = "rgba(245, 249, 248, .94)";
     context.fillRect(x - width / 2 - 3 / scale, y - fontSize / 2 - 2 / scale, width + 6 / scale, fontSize + 4 / scale);
-    context.fillStyle = signalColor(link.rssi);
+    context.fillStyle = link.kind === "pawr" ? "#7657c8" : signalColor(link.rssi);
     context.fillText(label, x, y);
   }
 
@@ -190,14 +192,15 @@ export default function TopologyCanvas({
       nodeCanvasObject={paintNode}
       nodePointerAreaPaint={(node, color, context) => { context.beginPath(); context.arc(node.x || 0, node.y || 0, node.kind === "gateway" ? 9 : 7, 0, Math.PI * 2); context.fillStyle = color; context.fill(); }}
       nodeLabel={(node) => `${node.label} · ${node.kind === "gateway" ? "Gateway" : node.online ? "Online" : "Offline"}${node.gatewayStatus ? ` · Gateway ${node.gatewayStatus}` : ""}${node.mqttDirect ? " · MQTT direct" : ""}`}
-      linkColor={(link) => signalColor(link.rssi)}
-      linkWidth={(link) => typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
+      linkColor={(link) => link.kind === "pawr" ? "#7657c8" : signalColor(link.rssi)}
+      linkWidth={(link) => link.kind === "pawr" ? 2 : typeof link.rssi === "number" && link.rssi < -75 ? 1.5 : 2.5}
+      linkLineDash={(link) => link.kind === "pawr" ? [3, 5] : []}
       linkDirectionalArrowLength={4}
       linkDirectionalArrowRelPos={.74}
-      linkDirectionalArrowColor={(link) => signalColor(link.rssi)}
+      linkDirectionalArrowColor={(link) => link.kind === "pawr" ? "#7657c8" : signalColor(link.rssi)}
       linkCanvasObjectMode={() => "after"}
       linkCanvasObject={paintLinkLabel}
-      linkLabel={(link) => typeof link.rssi === "number" ? `RF signal ${link.rssi} dBm` : "RF signal unavailable"}
+      linkLabel={(link) => link.kind === "pawr" ? "PAwR sensor link" : typeof link.rssi === "number" ? `Mesh RF signal ${link.rssi} dBm` : "Mesh RF signal unavailable"}
       minZoom={.15}
       maxZoom={6}
       warmupTicks={80}

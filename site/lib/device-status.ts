@@ -15,7 +15,7 @@ export type DeviceSystemState = {
 export type TopologyLink = {
   $id: string; profileId: string; gatewayDeviceId: string; gatewaySerial: string;
   peerDeviceId: string; peerSerial: string; peerRadioMac: string; rssi?: number | null;
-  active: boolean; lastSeenAt: string; reportedAt: string;
+  kind: "mesh" | "pawr"; active: boolean; lastSeenAt: string; reportedAt: string;
 };
 
 type DeviceIdentity = DeviceSystemState & { $id: string; serial: string; metadata?: { profileId?: string } };
@@ -23,7 +23,8 @@ type DeviceIdentity = DeviceSystemState & { $id: string; serial: string; metadat
 // Resolve only identities visible through the Devices API. Unknown radios retain their MAC identity.
 export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
   const byMac = new Map(devices.filter((device) => device.halowMac).map((device) => [device.halowMac!.toUpperCase(), device]));
-  return devices.flatMap((device) => {
+  const byId = new Map(devices.map((device) => [device.$id, device]));
+  const meshLinks = devices.flatMap((device) => {
     const snapshot = device.topology;
     if (!snapshot?.reportedAt || !Number.isFinite(Date.parse(snapshot.reportedAt))) return [];
     const reportedAt = snapshot.reportedAt;
@@ -34,10 +35,31 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
         $id: `${device.$id}:${mac}`, profileId: device.metadata?.profileId || "",
         gatewayDeviceId: device.$id, gatewaySerial: device.serial,
         peerDeviceId: peer?.$id || `radio:${mac}`, peerSerial: peer?.serial || mac,
-        peerRadioMac: mac, rssi: link.rssi, active: true,
+        peerRadioMac: mac, rssi: link.rssi, kind: "mesh" as const, active: true,
         lastSeenAt: new Date(Date.parse(reportedAt) - link.ageMs).toISOString(),
         reportedAt,
       };
     });
   });
+  const meshPairs = new Set(meshLinks.map((link) => `${link.gatewayDeviceId}:${link.peerDeviceId}`));
+  const pawrLinks = devices.flatMap((device): TopologyLink[] => {
+    if (!device.gatewayDeviceId || !device.lastSeenAt || !Number.isFinite(Date.parse(device.lastSeenAt))) return [];
+    const gateway = byId.get(device.gatewayDeviceId);
+    if (!gateway || meshPairs.has(`${gateway.$id}:${device.$id}`)) return [];
+    return [{
+      $id: `${gateway.$id}:pawr:${device.$id}`,
+      profileId: device.metadata?.profileId || gateway.metadata?.profileId || "",
+      gatewayDeviceId: gateway.$id,
+      gatewaySerial: gateway.serial,
+      peerDeviceId: device.$id,
+      peerSerial: device.serial,
+      peerRadioMac: device.halowMac?.toUpperCase() || "",
+      kind: "pawr",
+      rssi: null,
+      active: true,
+      lastSeenAt: device.lastSeenAt,
+      reportedAt: device.lastSeenAt,
+    }];
+  });
+  return [...meshLinks, ...pawrLinks];
 }

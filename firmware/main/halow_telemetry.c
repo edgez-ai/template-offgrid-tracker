@@ -43,6 +43,9 @@ struct local_report_config {
     uint8_t channel;
     uint32_t frequency_khz;
     uint8_t bandwidth_mhz;
+    bool has_location;
+    double latitude;
+    double longitude;
     bool publish_system_status;
     bool batman_metrics;
     halow_telemetry_publish_fn_t publish_fn;
@@ -417,6 +420,24 @@ static bool protobuf_put_s32(uint8_t *buffer,
     return protobuf_put_u64(buffer, capacity, offset, field, zigzag);
 }
 
+static bool protobuf_put_double(uint8_t *buffer,
+                                size_t capacity,
+                                size_t *offset,
+                                uint32_t field,
+                                double value)
+{
+    uint64_t bits = 0;
+    memcpy(&bits, &value, sizeof(bits));
+    if (!protobuf_put_key(buffer, capacity, offset, field, 1) ||
+        sizeof(bits) > capacity - *offset) {
+        return false;
+    }
+    for (unsigned index = 0; index < sizeof(bits); ++index) {
+        buffer[(*offset)++] = (uint8_t)(bits >> (index * 8U));
+    }
+    return true;
+}
+
 static bool encode_local_topology(uint8_t *output,
                                   size_t capacity,
                                   size_t *output_length,
@@ -573,6 +594,16 @@ static bool encode_local_system_status(uint8_t output[PROTOBUF_BUFFER_SIZE],
 
     uint8_t status[PROTOBUF_BUFFER_SIZE];
     size_t status_length = 0;
+    uint8_t location[24];
+    size_t location_length = 0;
+    if (local_config.has_location) {
+        ok = ok && protobuf_put_double(location, sizeof(location),
+                                       &location_length, 1,
+                                       local_config.latitude) &&
+             protobuf_put_double(location, sizeof(location),
+                                 &location_length, 2,
+                                 local_config.longitude);
+    }
     const esp_app_desc_t *description = esp_app_get_description();
     ok = ok && protobuf_put_bytes(status, sizeof(status), &status_length, 1,
                                   local_config.client_id,
@@ -592,6 +623,10 @@ static bool encode_local_system_status(uint8_t output[PROTOBUF_BUFFER_SIZE],
                                   local_config.ready_fn(local_config.publisher_arg)
                               ? 1 : 2) &&
          protobuf_put_u64(status, sizeof(status), &status_length, 8, 0);
+    if (local_config.has_location) {
+        ok = ok && protobuf_put_bytes(status, sizeof(status), &status_length,
+                                      9, location, location_length);
+    }
     size_t batch_length = 0;
     ok = ok && protobuf_put_bytes(output, PROTOBUF_BUFFER_SIZE, &batch_length,
                                   1, status, status_length);
@@ -770,6 +805,9 @@ esp_err_t halow_telemetry_start_local(const char *client_id,
                                       uint8_t channel,
                                       uint32_t frequency_khz,
                                       uint8_t bandwidth_mhz,
+                                      bool has_location,
+                                      double latitude,
+                                      double longitude,
                                       bool publish_system_status,
                                       bool batman_metrics,
                                       halow_telemetry_publish_fn_t publish_fn,
@@ -781,12 +819,21 @@ esp_err_t halow_telemetry_start_local(const char *client_id,
         halow_mac == NULL || publish_fn == NULL || ready_fn == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (has_location &&
+        (!isfinite(latitude) || !isfinite(longitude) ||
+         latitude < -90.0 || latitude > 90.0 ||
+         longitude < -180.0 || longitude > 180.0)) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (local_report_task_handle != NULL) return ESP_ERR_INVALID_STATE;
     strlcpy(local_config.client_id, client_id, sizeof(local_config.client_id));
     memcpy(local_config.halow_mac, halow_mac, sizeof(local_config.halow_mac));
     local_config.channel = channel;
     local_config.frequency_khz = frequency_khz;
     local_config.bandwidth_mhz = bandwidth_mhz;
+    local_config.has_location = has_location;
+    local_config.latitude = has_location ? latitude : 0.0;
+    local_config.longitude = has_location ? longitude : 0.0;
     local_config.publish_system_status = publish_system_status;
     local_config.batman_metrics = batman_metrics;
     local_config.publish_fn = publish_fn;

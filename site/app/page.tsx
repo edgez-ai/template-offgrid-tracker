@@ -251,6 +251,7 @@ function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[
     id: link.gatewayDeviceId === device.$id ? link.peerDeviceId : link.gatewayDeviceId,
     serial: link.gatewayDeviceId === device.$id ? link.peerSerial : link.gatewaySerial,
     rssi: link.rssi,
+    kind: link.kind,
     lastSeenAt: link.lastSeenAt,
   })).filter((neighbor, index, items) => items.findIndex((item) => item.id === neighbor.id) === index);
   const height = Math.max(220, neighbors.length * 74);
@@ -262,9 +263,9 @@ function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[
         ? centerY
         : 40 + index * ((height - 80) / (neighbors.length - 1));
       return <g key={neighbor.id}>
-        <line className="topology-edge" x1="360" y1={centerY} x2="590" y2={y} />
-        <text className="topology-signal" x="475" y={(centerY + y) / 2 - 7} textAnchor="middle">{typeof neighbor.rssi === "number" ? `${neighbor.rssi} dBm` : "direct"}</text>
-        <circle className="topology-peer" cx="590" cy={y} r="25" />
+        <line className={`topology-edge ${neighbor.kind === "pawr" ? "pawr" : "mesh"}`} x1="360" y1={centerY} x2="590" y2={y} />
+        <text className={`topology-signal ${neighbor.kind === "pawr" ? "pawr" : ""}`} x="475" y={(centerY + y) / 2 - 7} textAnchor="middle">{neighbor.kind === "pawr" ? "PAwR" : typeof neighbor.rssi === "number" ? `${neighbor.rssi} dBm` : "Mesh"}</text>
+        <circle className={`topology-peer ${neighbor.kind === "pawr" ? "pawr" : "mesh"}`} cx="590" cy={y} r="25" />
         <text className="topology-node-label" x="625" y={y - 3}>{neighbor.serial}</text>
         <text className="topology-node-meta" x="625" y={y + 13}>{relativeTime(neighbor.lastSeenAt)}</text>
       </g>;
@@ -665,7 +666,7 @@ export default function Home() {
               const latest = series.points[series.points.length - 1];
               return <div key={series.field}><span><i style={{ background: series.color }} />{series.label}</span><strong>{latest.value.toFixed(2)}</strong><small>min {Math.min(...values).toFixed(2)} · avg {(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2)} · max {Math.max(...values).toFixed(2)}</small></div>;
             })}</div>}
-            <div className="topology-card"><header><div><h3>Mesh topology</h3><p>Direct HaLow links from reports received within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
+            <div className="topology-card"><header><div><h3>HaLow topology</h3><p>Mesh and PAwR gateway links seen within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="sensor-script-card"><div><h3>Random temperature sensor</h3><p>Installs a Lua sample derived from the EdgeZ sensor definition. It publishes sensor type 1 as a random 18.0–32.0 °C reading every {randomTemperatureIntervalSeconds} seconds and replaces the currently installed unified sensor script.</p>{selectedTemperature && <small>Latest temperature: {selectedTemperature.value.toFixed(1)} °C · {relativeTime(selectedTemperature.row.receivedAt)}</small>}{scriptMessage && <small>{scriptMessage}</small>}</div><button onClick={() => void deployRandomTemperatureSensor()} disabled={selectedStatus !== "Online" || scriptDeviceId === selectedDevice.$id}>{scriptDeviceId === selectedDevice.$id ? "Deploying…" : "Deploy sensor script"}</button></div>}
             {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>offgrid-tracker-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent history</h3>{historyReadings.map((reading) => <article key={`${reading.timestamp}-${reading.channel}`}><header><code>{reading.channel}</code><time>{new Date(reading.timestamp).toLocaleString()}</time></header><pre>{prettyPayload(reading.payload)}</pre></article>)}{!historyReadings.length && <p className="empty">No mobile sensor messages in this range.</p>}</div>

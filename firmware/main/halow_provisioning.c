@@ -1,6 +1,7 @@
 #include "halow_provisioning.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,27 @@ static esp_err_t save_config(const halow_provisioning_config_t *config)
     }
     if (err == ESP_OK) {
         err = nvs_set_str(handle, "deviceUuid", config->client_id);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, "hasLocation", config->has_location ? 1U : 0U);
+    }
+    if (err == ESP_OK && config->has_location) {
+        err = nvs_set_blob(handle, "latitude", &config->latitude,
+                           sizeof(config->latitude));
+    }
+    if (err == ESP_OK && config->has_location) {
+        err = nvs_set_blob(handle, "longitude", &config->longitude,
+                           sizeof(config->longitude));
+    }
+    if (err == ESP_OK && !config->has_location) {
+        const esp_err_t latitude_err = nvs_erase_key(handle, "latitude");
+        const esp_err_t longitude_err = nvs_erase_key(handle, "longitude");
+        if (latitude_err != ESP_OK && latitude_err != ESP_ERR_NVS_NOT_FOUND) {
+            err = latitude_err;
+        } else if (longitude_err != ESP_OK &&
+                   longitude_err != ESP_ERR_NVS_NOT_FOUND) {
+            err = longitude_err;
+        }
     }
     if (err == ESP_OK) {
         err = nvs_commit(handle);
@@ -146,6 +168,10 @@ static esp_err_t config_endpoint(uint32_t session_id,
         cJSON_GetObjectItemCaseSensitive(root, "passphrase");
     const cJSON *channel = root == NULL ? NULL :
         cJSON_GetObjectItemCaseSensitive(root, "halowChannel");
+    const cJSON *latitude = root == NULL ? NULL :
+        cJSON_GetObjectItemCaseSensitive(root, "latitude");
+    const cJSON *longitude = root == NULL ? NULL :
+        cJSON_GetObjectItemCaseSensitive(root, "longitude");
     bool valid = root != NULL &&
         copy_json_string(root, "clientId", candidate.client_id, sizeof(candidate.client_id)) &&
         valid_uuid(candidate.client_id) &&
@@ -157,6 +183,21 @@ static esp_err_t config_endpoint(uint32_t session_id,
         strlen(passphrase->valuestring) < sizeof(candidate.passphrase) &&
         cJSON_IsNumber(channel) && channel->valuedouble >= 1 &&
         channel->valuedouble <= UINT8_MAX && channel->valuedouble == channel->valueint;
+
+    const bool has_latitude = cJSON_IsNumber(latitude);
+    const bool has_longitude = cJSON_IsNumber(longitude);
+    if (valid && has_latitude != has_longitude) {
+        valid = false;
+    }
+    if (valid && has_latitude) {
+        candidate.latitude = latitude->valuedouble;
+        candidate.longitude = longitude->valuedouble;
+        candidate.has_location = isfinite(candidate.latitude) &&
+            isfinite(candidate.longitude) &&
+            candidate.latitude >= -90.0 && candidate.latitude <= 90.0 &&
+            candidate.longitude >= -180.0 && candidate.longitude <= 180.0;
+        valid = candidate.has_location;
+    }
 
     uint32_t frequency_khz = 0;
     uint8_t bandwidth_mhz = 0;
@@ -175,9 +216,10 @@ static esp_err_t config_endpoint(uint32_t session_id,
     }
     if (err == ESP_OK) {
         ESP_LOGI(TAG,
-                 "Accepted mesh '%s', country %s, channel %u (%" PRIu32 " kHz/%u MHz)",
+                 "Accepted mesh '%s', country %s, channel %u (%" PRIu32 " kHz/%u MHz), location=%u",
                  candidate.mesh_id, candidate.country, candidate.channel,
-                 frequency_khz, bandwidth_mhz);
+                 frequency_khz, bandwidth_mhz,
+                 candidate.has_location ? 1U : 0U);
         restart_after_stop = true;
         if (xTaskCreate(stop_and_restart_task, "prov_stop", 3072, NULL, 5, NULL) != pdPASS) {
             err = ESP_ERR_NO_MEM;
@@ -260,6 +302,22 @@ esp_err_t halow_provisioning_init(halow_provisioning_config_t *config,
         nvs_get_u8(handle, "channel", &config->channel) == ESP_OK &&
         load_string(handle, "deviceUuid", config->client_id,
                     sizeof(config->client_id)) && valid_uuid(config->client_id);
+    uint8_t has_location = 0U;
+    if (nvs_get_u8(handle, "hasLocation", &has_location) == ESP_OK &&
+        has_location != 0U) {
+        size_t latitude_size = sizeof(config->latitude);
+        size_t longitude_size = sizeof(config->longitude);
+        config->has_location =
+            nvs_get_blob(handle, "latitude", &config->latitude,
+                         &latitude_size) == ESP_OK &&
+            latitude_size == sizeof(config->latitude) &&
+            nvs_get_blob(handle, "longitude", &config->longitude,
+                         &longitude_size) == ESP_OK &&
+            longitude_size == sizeof(config->longitude) &&
+            isfinite(config->latitude) && isfinite(config->longitude) &&
+            config->latitude >= -90.0 && config->latitude <= 90.0 &&
+            config->longitude >= -180.0 && config->longitude <= 180.0;
+    }
     nvs_close(handle);
 
     uint32_t frequency_khz;

@@ -16,6 +16,9 @@ typedef struct {
     char passphrase[64];
     char country[3];
     uint8_t channel;
+    bool has_location;
+    double latitude;
+    double longitude;
 } halow_provisioning_config_t;
 
 /** Initialize NVS, loading the saved HaLow profile when one exists. */

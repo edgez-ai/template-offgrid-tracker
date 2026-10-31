@@ -135,8 +135,11 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-wrap { margin-top: 12px; overflow-x: auto; border-radius: 14px; background: #f3f8f6; }
 .topology-graph { display: block; width: 100%; min-width: 620px; max-height: 520px; }
 .topology-edge { stroke: #8fcac4; stroke-width: 3; }
+.topology-edge.pawr { stroke: #7657c8; stroke-width: 2.5; stroke-dasharray: 5 7; }
 .topology-signal { fill: #59716f; font-size: 10px; font-weight: 800; }
+.topology-signal.pawr { fill: #6545b8; }
 .topology-peer { fill: #e9f7f5; stroke: #0a8c87; stroke-width: 3; }
+.topology-peer.pawr { fill: #f0ebff; stroke: #7657c8; }
 .topology-gateway { fill: #0a3037; stroke: #69cfc7; stroke-width: 4; }
 .topology-center-label { fill: white; font-size: 9px; font-weight: 900; }
 .topology-node-label { fill: #0a3037; font-size: 11px; font-weight: 900; }
@@ -220,6 +223,8 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-legend i.gateway-status.offline { background: #8b9f9c; box-shadow: inset 0 0 0 2px #d8e0de; }
 .topology-legend i.mqtt { background: #7849a8; box-shadow: inset 0 0 0 2px #e1d0f2; }
 .topology-legend b.signal { width: 18px; height: 3px; border-radius: 3px; }
+.topology-legend b.link { width: 18px; height: 0; border-top: 3px solid #8fcac4; }
+.topology-legend b.link.pawr { border-top-color: #7657c8; border-top-style: dashed; }
 .topology-legend b.excellent { background: #0a9b7d; }
 .topology-legend b.good { background: #d68a24; }
 .topology-legend b.weak { background: #d05b47; }
@@ -256,6 +261,8 @@ input { width: 100%; padding: 14px 15px; border: 1px solid #cbd8de; border-radiu
 .topology-table-card th { padding: 10px 16px; color: #718783; background: #f3f8f6; font-size: 8px; letter-spacing: .7px; text-align: left; }
 .topology-table-card td { padding: 12px 16px; border-top: 1px solid #e3ebe9; color: #173f42; white-space: nowrap; }
 .topology-table-card td code { color: #0a8c87; font-size: 9px; }
+.link-kind { display: inline-flex; padding: 4px 7px; border-radius: 999px; color: #176d68; background: #dff2ef; font-size: 8px; font-weight: 900; text-transform: uppercase; }
+.link-kind.pawr { color: #6545b8; background: #eee8ff; }
 .signal-pill { display: inline-flex; padding: 4px 7px; border-radius: 999px; color: #59716f; background: #e5ecea; font-size: 8px; font-weight: 900; }
 .signal-pill.excellent { color: #08745e; background: #d9f1eb; }
 .signal-pill.good { color: #936019; background: #faedce; }
