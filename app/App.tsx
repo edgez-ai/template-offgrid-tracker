@@ -96,13 +96,17 @@ export default function App() {
     [profile, sharedSettings],
   );
   const currentMeshLink = runtimeProfile && meshLink?.profileId === runtimeProfile.id ? meshLink : null;
+  // Android's NET_CAPABILITY_VALIDATED can remain false on otherwise usable
+  // networks when the OS connectivity check is blocked (notably in China).
+  // Treat only an explicit link disconnection as offline and let the Appwrite
+  // requests below determine whether cloud service is actually reachable.
+  const networkAvailable = network.isConnected !== false;
   const cloudOnline = Boolean(
     runtimeProfile?.connectToCloud &&
     cloudSessionLoggedIn &&
     cloudProfileReady &&
     cloudDataHydrated &&
-    network.isConnected === true &&
-    network.isInternetReachable === true,
+    networkAvailable,
   );
   const cloudStatus: CloudConnectionState = runtimeProfile?.connectToCloud && !cloudSessionLoggedIn
     ? "login"
@@ -184,21 +188,21 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!runtimeProfile?.connectToCloud || network.isInternetReachable !== true) return;
+    if (!runtimeProfile?.connectToCloud || !networkAvailable) return;
     let active = true;
     void verifyCloudSession()
       .then((loggedIn) => { if (active) setCloudSessionLoggedIn(loggedIn); })
       .catch(() => {
         // Preserve the cached authenticated state on transient network errors.
-        // Reachability still makes the visible status OFFLINE.
+        // A failed data refresh still makes the visible status OFFLINE.
       });
     return () => { active = false; };
-  }, [network.isInternetReachable, runtimeProfile?.connectToCloud]);
+  }, [networkAvailable, runtimeProfile?.connectToCloud]);
 
   useEffect(() => {
     setCloudProfileReady(false);
     setCloudDataHydrated(false);
-    if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || network.isInternetReachable !== true) return;
+    if (!runtimeProfile?.connectToCloud || !cloudSessionLoggedIn || !networkAvailable) return;
     let active = true;
     void ensureCloudProfile(runtimeProfile)
       .then(async (cloudProfileId) => {
@@ -216,10 +220,10 @@ export default function App() {
         setSettingsError(`Cloud setup failed: ${cloudErrorMessage(caught)}`);
       });
     return () => { active = false; };
-  }, [cloudSessionLoggedIn, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id, runtimeProfile?.updatedAt]);
+  }, [cloudSessionLoggedIn, networkAvailable, runtimeProfile?.connectToCloud, runtimeProfile?.id, runtimeProfile?.updatedAt]);
 
   useEffect(() => {
-    if (!runtimeProfile?.connectToCloud || !cloudProfileReady || network.isInternetReachable !== true) return;
+    if (!runtimeProfile?.connectToCloud || !cloudProfileReady || !networkAvailable) return;
     let active = true;
     let running = false;
     const refreshOnline = async () => {
@@ -245,7 +249,7 @@ export default function App() {
     void refreshOnline();
     const timer = setInterval(() => void refreshOnline(), 5000);
     return () => { active = false; clearInterval(timer); };
-  }, [cloudProfileReady, network.isInternetReachable, runtimeProfile?.connectToCloud, runtimeProfile?.id]);
+  }, [cloudProfileReady, networkAvailable, runtimeProfile?.connectToCloud, runtimeProfile?.id]);
 
   useEffect(() => {
     void (async () => {

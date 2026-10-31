@@ -5,9 +5,11 @@ Tracker. It opens on the Home page and does not require an account, Appwrite,
 MQTT, or an Internet connection.
 
 Profiles may optionally enable **Connect to cloud**. The map and Settings show
-`ONLINE` only when cloud is enabled, the user is authenticated, and Android
-reports that the Internet is reachable. A signed-in phone without usable
-Internet remains `OFFLINE`.
+`ONLINE` only when cloud is enabled, the user is authenticated, and a cloud
+data refresh succeeds. Android's physical connection state suppresses requests
+only when the link is explicitly disconnected; OS Internet validation is not
+used because it can depend on connectivity-check services unavailable in some
+regions. A signed-in phone that cannot reach Appwrite remains `OFFLINE`.
 
 Offline profiles save devices, messages, and sensor samples in local SQLite and
 use the BLE mesh transport. Cloud-connected profiles do not synchronize that
@@ -145,8 +147,7 @@ environment. The project ID and public endpoint are client-safe identifiers.
 When an active profile enables **Connect to cloud**, the status is `LOGIN`
 until an Appwrite email session exists. Sign-in uses an email OTP, and Appwrite
 creates an account automatically when the email is new. A successful login
-reconciles a profile-scoped Team and profile row, then reports `ONLINE` only
-while Internet reachability remains available. The cached session marker
-preserves the correct `OFFLINE` state when an authenticated phone temporarily
-loses access. Authenticated users can log out from the active profile card in
-Settings.
+reconciles a profile-scoped Team and profile row, then reports `ONLINE` after
+the Appwrite data refresh succeeds. The cached session marker preserves login
+state while failed cloud requests keep the visible status `OFFLINE`.
+Authenticated users can log out from the active profile card in Settings.
