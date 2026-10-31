@@ -1240,6 +1240,29 @@ void edgez_ble_control_note_mesh_init_failed(void)
     xSemaphoreGive(state_lock);
 }
 
+bool edgez_ble_control_get_device_id(char device_id[37])
+{
+    if (device_id == NULL || state_lock == NULL) return false;
+    uint64_t high;
+    uint64_t low;
+    xSemaphoreTake(state_lock, portMAX_DELAY);
+    high = control_state.user_id_high;
+    low = control_state.user_id_low;
+    xSemaphoreGive(state_lock);
+    if (high == 0 && low == 0) {
+        device_id[0] = '\0';
+        return false;
+    }
+    snprintf(device_id, 37,
+             "%08llx-%04llx-%04llx-%04llx-%012llx",
+             (unsigned long long)(high >> 32),
+             (unsigned long long)((high >> 16) & UINT64_C(0xffff)),
+             (unsigned long long)(high & UINT64_C(0xffff)),
+             (unsigned long long)(low >> 48),
+             (unsigned long long)(low & UINT64_C(0xffffffffffff)));
+    return true;
+}
+
 void edgez_ble_control_note_mesh_link(int state)
 {
     if (state_lock == NULL) return;
