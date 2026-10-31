@@ -264,7 +264,7 @@ function TopologyGraph({ device, links }: { device: Device; links: TopologyLink[
         : 40 + index * ((height - 80) / (neighbors.length - 1));
       return <g key={neighbor.id}>
         <line className={`topology-edge ${neighbor.kind === "pawr" ? "pawr" : "mesh"}`} x1="360" y1={centerY} x2="590" y2={y} />
-        <text className={`topology-signal ${neighbor.kind === "pawr" ? "pawr" : ""}`} x="475" y={(centerY + y) / 2 - 7} textAnchor="middle">{neighbor.kind === "pawr" ? "PAwR" : typeof neighbor.rssi === "number" ? `${neighbor.rssi} dBm` : "Mesh"}</text>
+        {typeof neighbor.rssi === "number" && <text className={`topology-signal ${neighbor.kind === "pawr" ? "pawr" : ""}`} x="475" y={(centerY + y) / 2 - 7} textAnchor="middle">{neighbor.rssi} dBm</text>}
         <circle className={`topology-peer ${neighbor.kind === "pawr" ? "pawr" : "mesh"}`} cx="590" cy={y} r="25" />
         <text className="topology-node-label" x="625" y={y - 3}>{neighbor.serial}</text>
         <text className="topology-node-meta" x="625" y={y + 13}>{relativeTime(neighbor.lastSeenAt)}</text>

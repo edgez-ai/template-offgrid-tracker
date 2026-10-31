@@ -24,8 +24,11 @@ test("empty topology stays empty", () => {
 
 test("PAwR sensors create a logical dotted gateway link", () => {
   const links = topologyFromDevices([
-    { $id: "gateway", serial: "H7608", metadata: { profileId: "profile" } },
-    { $id: "sensor", serial: "NRF54-01", gatewayDeviceId: "gateway", halowMac: "02:11:22:33:44:55", lastSeenAt: "2026-10-31T08:00:00.000Z" },
+    { $id: "gateway", serial: "H7608", halowMac: "0C:BF:74:1A:AE:36", metadata: { profileId: "profile" } },
+    { $id: "sensor", name: "Barn IMU", serial: "NRF54-01", gatewayDeviceId: "gateway", halowMac: "02:11:22:33:44:55", lastSeenAt: "2026-10-31T08:00:00.000Z", topology: {
+      reportedAt: "2026-10-31T08:00:00.000Z",
+      links: [{ peerHalowMac: "0c:bf:74:1a:ae:36", ageMs: 250, rssi: -67 }],
+    } },
   ]);
   assert.deepEqual(links, [{
     $id: "gateway:pawr:sensor",
@@ -34,13 +37,13 @@ test("PAwR sensors create a logical dotted gateway link", () => {
     gatewayName: "H7608",
     gatewaySerial: "H7608",
     peerDeviceId: "sensor",
-    peerName: "NRF54-01",
+    peerName: "Barn IMU",
     peerSerial: "NRF54-01",
     peerRadioMac: "02:11:22:33:44:55",
     kind: "pawr",
-    rssi: null,
+    rssi: -67,
     active: true,
-    lastSeenAt: "2026-10-31T08:00:00.000Z",
+    lastSeenAt: "2026-10-31T07:59:59.750Z",
     reportedAt: "2026-10-31T08:00:00.000Z",
   }]);
 });

@@ -165,10 +165,11 @@ export default function TopologyCanvas({
   }
 
   function paintLinkLabel(link: LinkObject<GraphNode, GraphLink>, context: CanvasRenderingContext2D, scale: number) {
+    if (typeof link.rssi !== "number") return;
     const source = typeof link.source === "object" ? link.source : undefined;
     const target = typeof link.target === "object" ? link.target : undefined;
     if (!source || !target || source.x === undefined || source.y === undefined || target.x === undefined || target.y === undefined) return;
-    const label = link.kind === "pawr" ? "PAwR" : typeof link.rssi === "number" ? `${link.rssi} dBm` : "Mesh";
+    const label = `${link.rssi} dBm`;
     const x = (source.x + target.x) / 2;
     const y = (source.y + target.y) / 2;
     const fontSize = 9 / scale;
@@ -200,7 +201,7 @@ export default function TopologyCanvas({
       linkDirectionalArrowColor={(link) => link.kind === "pawr" ? "#7657c8" : signalColor(link.rssi)}
       linkCanvasObjectMode={() => "after"}
       linkCanvasObject={paintLinkLabel}
-      linkLabel={(link) => link.kind === "pawr" ? "PAwR sensor link" : typeof link.rssi === "number" ? `Mesh RF signal ${link.rssi} dBm` : "Mesh RF signal unavailable"}
+      linkLabel={(link) => typeof link.rssi === "number" ? `RF signal ${link.rssi} dBm` : "RF signal unavailable"}
       minZoom={.15}
       maxZoom={6}
       warmupTicks={80}

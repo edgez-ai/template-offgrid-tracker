@@ -25,6 +25,9 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
   const byMac = new Map(devices.filter((device) => device.halowMac).map((device) => [device.halowMac!.toUpperCase(), device]));
   const byId = new Map(devices.map((device) => [device.$id, device]));
   const meshLinks = devices.flatMap((device) => {
+    // A relayed sensor reports its PAwR observer as a topology link. It is not
+    // an 802.11s peer; consume that observation in the logical link below.
+    if (device.gatewayDeviceId) return [];
     const snapshot = device.topology;
     if (!snapshot?.reportedAt || !Number.isFinite(Date.parse(snapshot.reportedAt))) return [];
     const reportedAt = snapshot.reportedAt;
@@ -46,6 +49,17 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
     if (!device.gatewayDeviceId || !device.lastSeenAt || !Number.isFinite(Date.parse(device.lastSeenAt))) return [];
     const gateway = byId.get(device.gatewayDeviceId);
     if (!gateway || meshPairs.has(`${gateway.$id}:${device.$id}`)) return [];
+    const gatewayMac = gateway.halowMac?.toUpperCase();
+    const observation = device.topology?.links.find((link) =>
+      gatewayMac && link.peerHalowMac.toUpperCase() === gatewayMac) ||
+      (device.topology?.links.length === 1 ? device.topology.links[0] : undefined);
+    const observationReportedAt = device.topology?.reportedAt;
+    const hasObservationTime = Boolean(observation && observationReportedAt &&
+      Number.isFinite(Date.parse(observationReportedAt)));
+    const reportedAt = hasObservationTime ? observationReportedAt! : device.lastSeenAt;
+    const lastSeenAt = hasObservationTime
+      ? new Date(Date.parse(reportedAt) - observation!.ageMs).toISOString()
+      : device.lastSeenAt;
     return [{
       $id: `${gateway.$id}:pawr:${device.$id}`,
       profileId: device.metadata?.profileId || gateway.metadata?.profileId || "",
@@ -57,10 +71,10 @@ export function topologyFromDevices(devices: DeviceIdentity[]): TopologyLink[] {
       peerSerial: device.serial,
       peerRadioMac: device.halowMac?.toUpperCase() || "",
       kind: "pawr",
-      rssi: null,
+      rssi: observation?.rssi ?? null,
       active: true,
-      lastSeenAt: device.lastSeenAt,
-      reportedAt: device.lastSeenAt,
+      lastSeenAt,
+      reportedAt,
     }];
   });
   return [...meshLinks, ...pawrLinks];
