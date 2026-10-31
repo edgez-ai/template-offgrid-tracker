@@ -47,5 +47,9 @@ if (missing.length) throw new Error(`Missing public Appwrite configuration: ${mi
 const nextConfig: NextConfig = {
   env: { ...required, NEXT_PUBLIC_OTA_REPOSITORY_URL: otaRepositoryUrl || "" },
   output: "export",
+  // EdgeZ Sites canonicalizes directory routes with a trailing slash. Emit
+  // /topology/index.html instead of /topology.html so the route is served
+  // directly rather than falling back to the home page.
+  trailingSlash: true,
 };
 export default nextConfig;
