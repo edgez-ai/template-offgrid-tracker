@@ -2409,6 +2409,7 @@ static struct {
 	uint32_t cycle_started_ms;
 	uint32_t next_wake_ms;
 	uint32_t gps_deadline_ms;
+	bool boot_gps_fix_acquired;
 } sensor_power;
 
 static void sensor_begin_cycle(uint32_t now)
@@ -2459,10 +2460,9 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 			LOG_WRN("sensor mode could not stop the active mesh rc=%d", rc);
 		}
 	}
-	/* The power-save sensor build reuses the rail enabled by the board's early
-	 * Morse initialization. Cycling it off and immediately back on here adds
-	 * 600 ms before the first packet and provides no energy benefit. */
-#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	/* Board initialization may leave the MM8108 rail enabled before the sensor
+	 * state machine starts. Keep HaLow completely off while the boot GPS fix is
+	 * pending; the transmit phase powers and initializes it only after a fix. */
 	if (!mesh_started && edgez_halow_power_is_ready()) {
 		int rc = edgez_halow_power_set(false);
 
@@ -2470,6 +2470,9 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 			LOG_WRN("initial sensor HaLow power-off failed rc=%d", rc);
 		}
 	}
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE)
+	sensor_halow_ps_configured = false;
+	sensor_halow_sleep_allowed = false;
 #endif
 	sensor_power.generation = edgez_config_generation();
 	sensor_begin_cycle(now);
@@ -2580,18 +2583,37 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	}
 	if (sensor_power.phase == SENSOR_POWER_READY) {
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS)
-		int gps_rc = profile->device_gps_enabled ? edgez_gps_init() : -ENOTSUP;
+		/* The dedicated sensor image always reports its measured position. The
+		 * profile flag still controls GPS for companion/beacon roles, but must not
+		 * disable the physical L76K on this target. */
+		if (!sensor_power.boot_gps_fix_acquired &&
+		    sensor_power.gps_deadline_ms != 0U &&
+		    (int32_t)(now - sensor_power.gps_deadline_ms) < 0) {
+			return;
+		}
+		int gps_rc = edgez_gps_init();
 
 		if (gps_rc == 0) {
 			sensor_power.gps_deadline_ms = now + EDGEZ_SENSOR_GPS_TIMEOUT_MS;
 			sensor_power.phase = SENSOR_POWER_WAITING_GPS;
-			LOG_INF("sensor GPS awake; waiting up to %u ms for fix",
-				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+			if (sensor_power.boot_gps_fix_acquired) {
+				LOG_INF("sensor GPS awake; waiting up to %u ms for fix",
+					EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+			} else {
+				LOG_INF("sensor boot GPS awake; waiting for satellite-backed fix before first sleep");
+			}
 			return;
 		}
-		if (profile->device_gps_enabled) {
-			LOG_WRN("sensor GPS wake failed rc=%d; sending without location", gps_rc);
+		if (!sensor_power.boot_gps_fix_acquired) {
+			/* A transient UART or device-PM failure must not let the first cycle
+			 * enter sleep without a fix. Retry at a bounded cadence. */
+			sensor_power.gps_deadline_ms = now + 5000U;
+			LOG_WRN("sensor boot GPS wake failed rc=%d; retrying in 5 seconds",
+				gps_rc);
+			return;
 		}
+		LOG_WRN("sensor GPS wake failed rc=%d; sending without fresh location",
+			gps_rc);
 #endif
 		sensor_power.phase = SENSOR_POWER_TRANSMIT;
 	}
@@ -2599,11 +2621,14 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		struct edgez_gps_fix fix;
 
 		edgez_gps_poll();
-		if (edgez_gps_get_fix(&fix)) {
+		if (edgez_gps_get_fix(&fix) &&
+		    (sensor_power.boot_gps_fix_acquired || fix.satellites > 0U)) {
 			LOG_INF("sensor GPS fix ready lat=%.6f lon=%.6f satellites=%u",
 				(double)fix.latitude, (double)fix.longitude, fix.satellites);
+			sensor_power.boot_gps_fix_acquired = true;
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
-		} else if ((int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
+		} else if (sensor_power.boot_gps_fix_acquired &&
+			   (int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
 			LOG_WRN("sensor GPS fix timeout after %u ms; sending without location",
 				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;

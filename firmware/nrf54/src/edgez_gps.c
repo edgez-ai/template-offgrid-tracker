@@ -233,6 +233,7 @@ static void publish_fix(float latitude, float longitude, uint8_t satellites)
 {
 	k_spinlock_key_t key;
 	bool first_fix;
+	bool satellite_upgrade;
 	int64_t now;
 
 	if (latitude < -90.0f || latitude > 90.0f ||
@@ -240,12 +241,17 @@ static void publish_fix(float latitude, float longitude, uint8_t satellites)
 		return;
 	}
 	now = k_uptime_get();
+	key = k_spin_lock(&fix_lock);
 	first_fix = !fix_reported;
-	if (!first_fix &&
+	/* RMC/GLL commonly arrives immediately before GGA. Do not let the normal
+	 * publish throttle hide the first satellite count: the low-power sensor
+	 * uses a non-zero count to prove that its boot fix is satellite-backed. */
+	satellite_upgrade = latest_fix.satellites == 0U && satellites > 0U;
+	if (!first_fix && !satellite_upgrade &&
 	    now - gps_last_fix_publish_ms < GPS_FIX_PUBLISH_INTERVAL_MS) {
+		k_spin_unlock(&fix_lock, key);
 		return;
 	}
-	key = k_spin_lock(&fix_lock);
 	latest_fix.latitude = latitude;
 	latest_fix.longitude = longitude;
 	latest_fix.satellites = satellites;
