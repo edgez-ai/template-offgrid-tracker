@@ -40,7 +40,7 @@ export function CameraGallery({ deviceId, onImagesAvailable }: { deviceId: strin
   const activeDevice = useRef(deviceId); activeDevice.current = deviceId;
   const onImages = useRef(onImagesAvailable); onImages.current = onImagesAvailable;
   useEffect(() => {
-    let active = true, running = false;
+    let active = true, running = false, initial = true, cameraReported = false;
     setImages([]); setReader(null); setSelected(null); setPage(0); setError(""); setLoading(true);
     let readerAt = 0;
     const refresh = async () => {
@@ -56,8 +56,8 @@ export function CameraGallery({ deviceId, onImagesAvailable }: { deviceId: strin
         }
         if (!active) return;
         setImages((current) => [...rows, ...current.filter((image) => !rows.some((row) => row.$id === image.$id))]);
-        setHasMore((current) => readerAt === 0 || rows.length < 12 ? false : current || rows.length === 12);
-        if (rows.length) onImages.current();
+        if (initial) { setHasMore(rows.length === 12); initial = false; }
+        if (rows.length && !cameraReported) { cameraReported = true; onImages.current(); }
         setError("");
       } catch (caught) { if (active) setError(caught instanceof Error ? caught.message : "Could not load photos."); }
       finally { running = false; if (active) setLoading(false); }

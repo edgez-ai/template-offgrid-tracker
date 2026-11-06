@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { TablesDB, Storage } from "node-appwrite";
 import { assembleCameraImage, cleanupCameraStaging, decodeCameraChunk, fnv1a32,
   IMAGE_TABLE, PART_TABLE, persistCameraChunk } from "./camera-images.js";
 
@@ -128,4 +129,54 @@ test("scheduled cleanup expires incomplete staging and retains completed photos"
   assert.equal(h.rows.size, 1);
   assert.equal(h.rows.get(`${IMAGE_TABLE}/${complete.imageId}`).status, "complete");
   assert.equal(h.files.size, 1);
+});
+
+test("photos spanning multiple TablesDB pages assemble without truncation", async () => {
+  const h = harness();
+  const bytes = Buffer.concat([jpeg.subarray(0, -2), Buffer.alloc(125000, 0x42), jpeg.subarray(-2)]);
+  let result;
+  for (let offset = 0; offset < bytes.length; offset += 1100) {
+    const header = Buffer.from(frame(0), "base64").subarray(0, 52);
+    const data = bytes.subarray(offset, offset + 1100);
+    header.writeUInt32BE(bytes.length, 12); header.writeUInt32BE(offset, 16);
+    header.writeUInt32BE(fnv1a32(bytes), 20); header.writeUInt16BE(data.length, 28);
+    result = await h.send(Buffer.concat([header, data]).toString("base64"));
+  }
+  assert.equal(result.complete, true);
+  const saved = [...h.files.values()][0];
+  assert.deepEqual(Buffer.from(await saved.file.arrayBuffer()), bytes);
+});
+
+test("MQTT camera route uses source Device ACLs and rejects an unrelated gateway scope", async () => {
+  process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://example.test/v1";
+  process.env.APPWRITE_FUNCTION_PROJECT_ID = "project";
+  process.env.OFFGRID_TRACKER_DATABASE_ID = "db";
+  process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID = "telemetry";
+  const { default: main } = await import("./main.js");
+  const h = harness(), originals = [], originalFetch = globalThis.fetch;
+  for (const [prototype, mocks] of [[TablesDB.prototype, h.context.tables], [Storage.prototype, h.context.storage]]) {
+    for (const [method, mock] of Object.entries(mocks)) {
+      originals.push([prototype, method, prototype[method]]); prototype[method] = mock;
+    }
+  }
+  const gateway = { $id: "gateway", serial: "GW", $permissions: permissions, metadata: { profileId: "owner" } };
+  const target = { $id: "camera", serial: "CAM", $permissions: permissions, metadata: { profileId: "owner" } };
+  globalThis.fetch = async (url) => ({ ok: true, status: 200,
+    json: async () => String(url).includes("queries[]") ? { devices: [target] } : gateway });
+  const publish = (payload) => main({ req: { headers: {
+    "x-appwrite-event": "devices.gateway.mqtt.message.publish", "x-appwrite-key": "server-key",
+  }, bodyJson: { event: "message.publish", topic: "projects/project/devices/GW/telemetry/blocks/02:11:22:33:44:55",
+    payload, payload_encoding: "base64" } },
+  res: { json: (body, status) => ({ body, status }) }, error: (message) => { throw new Error(message); } });
+  try {
+    assert.equal((await publish(frame(0, jpeg.subarray(0, 7)))).status, 202);
+    assert.equal((await publish(frame(7))).status, 201);
+    assert.deepEqual([...h.files.values()][0].permissions, permissions);
+    target.$permissions = ['read("team:someone-else")']; target.metadata.profileId = "someone-else";
+    assert.equal((await publish(frame(0, jpeg, 99))).status, 403);
+    assert.equal(h.files.size, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [prototype, method, original] of originals) prototype[method] = original;
+  }
 });

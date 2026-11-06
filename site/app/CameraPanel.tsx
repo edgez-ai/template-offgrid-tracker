@@ -144,7 +144,7 @@ export default function CameraPanel({ deviceId, firmwareTarget, account, tables,
     <header><div><h3>Camera photos</h3><p>Newest first · Received time</p></div><button className="secondary" onClick={() => setControls((value) => !value)}>{controls ? "Hide controls" : "Camera controls"}</button></header>
     {controls && <form className="camera-settings" onSubmit={(event) => { event.preventDefault(); void save(); }}>
       <label>Photo interval · seconds<input type="number" min="1" max="3600" step="1" required value={interval} onChange={(event) => setIntervalSeconds(event.target.value)} /></label>
-      <label>Resolution<select value={resolution} onChange={(event) => setResolution(event.target.value)}>{resolutions.map((label, index) => <option key={index} value={index}>{label}</option>)}</select></label>
+      <label>Resolution<select aria-label="Photo resolution" value={resolution} onChange={(event) => setResolution(event.target.value)}>{resolutions.map((label, index) => <option key={index} value={index}>{label}</option>)}</select></label>
       <button disabled={saving || settingsLoading}>{saving ? "Updating…" : settingsLoading ? "Loading…" : "Update camera"}</button>
       <p>Delivered after the next beacon. Disabling capture keeps beacons and settings updates enabled.</p>
       {status && <p role="status">{status}</p>}{settingsError && <p className="inline-error" role="alert">{settingsError}</p>}

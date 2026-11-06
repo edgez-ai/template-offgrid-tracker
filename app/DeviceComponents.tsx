@@ -209,7 +209,7 @@ export function DeviceDetail({
           </View> : null}
           {cloudStatus && supportsSensorSettings ? <CameraGallery key={device.id} deviceId={device.id} onImagesAvailable={() => {
             setCameraMode(true);
-            if (settingsStatus === "DEVICE DEFAULTS") { setSamplingIntervalSeconds("60"); setBlockSamplingCount("3"); }
+            if (!settingsStatus || settingsStatus === "DEVICE DEFAULTS") { setSamplingIntervalSeconds("60"); setBlockSamplingCount("3"); }
           }} /> : null}
           {editable && !editing ? <Pressable style={styles.outline} onPress={() => setEditing(true)} accessibilityRole="button"><Text style={styles.outlineText}>EDIT DEVICE</Text></Pressable> : null}
           {editable && editing ? <View style={styles.editCard}>

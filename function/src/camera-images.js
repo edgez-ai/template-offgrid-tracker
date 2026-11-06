@@ -137,7 +137,15 @@ export async function persistCameraChunk({ tables, storage, databaseId, target, 
       data: { imageId, offset: chunk.offset, data: chunk.data.toString("base64"), expiresAt } });
   } catch (error) {
     if (codeOf(error) !== 409) throw error;
-    const existing = await tables.getRow({ databaseId, tableId: PART_TABLE, rowId: partId });
+    let existing;
+    try { existing = await tables.getRow({ databaseId, tableId: PART_TABLE, rowId: partId }); }
+    catch (readError) {
+      // A parallel finalizer may have saved the file and removed staging.
+      if (codeOf(readError) === 404 && (await tables.getRow(row)).status === "complete") {
+        return { imageId, complete: true };
+      }
+      throw readError;
+    }
     if (existing.data !== chunk.data.toString("base64")) throw invalid("retransmitted data conflicts");
   }
   if (chunk.offset + chunk.data.length === chunk.totalBytes) {
@@ -147,7 +155,15 @@ export async function persistCameraChunk({ tables, storage, databaseId, target, 
   image = await tables.getRow(row);
   if (image.status === "complete") return { imageId, complete: true };
   if (!image.lastChunkSeen) return { imageId, complete: false };
-  const parts = await imageParts(tables, databaseId, imageId);
+  let parts;
+  try { parts = await imageParts(tables, databaseId, imageId); }
+  catch (error) {
+    // A pagination cursor can disappear during a concurrent staging cleanup.
+    if (codeOf(error) === 404 && (await tables.getRow(row)).status === "complete") {
+      return { imageId, complete: true };
+    }
+    throw error;
+  }
   const assembled = assembleCameraImage(image, parts);
   if (!assembled) return { imageId, complete: false };
   try {
