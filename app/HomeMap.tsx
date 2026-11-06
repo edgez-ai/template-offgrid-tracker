@@ -426,6 +426,9 @@ export function HomeMap({
         device={selectedDevice}
         country={profile.country}
         editable={onlineMode}
+        cloudStatus={onlineMode && selectedDevice
+          ? devices.find((device) => device.id === selectedDevice.id)?.cloudStatus ?? selectedDevice.cloudStatus
+          : undefined}
         liveNode={selectedDevice ? (() => {
           const nodeNum = nodeNumFromSerial(selectedDevice.meshMacAddress || selectedDevice.serial);
           return nodeNum === null ? null : meshLink?.state.nodes.get(nodeNum) ?? null;

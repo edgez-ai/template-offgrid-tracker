@@ -522,9 +522,11 @@ export async function getCloudSensorHistory(deviceId: string, durationMs: number
 function storedDeviceFromCloud(profileId: string, device: NativeDevice): StoredDevice {
   const firmwareTarget = device.metadata?.firmwareTarget ?? "";
   const gateway = !device.gatewayDeviceId;
-  const kind: StoredDevice["kind"] = gateway
-    ? "h7608"
-    : firmwareTarget.toLowerCase().includes("nrf54") ? "nrf54" : "esp32";
+  const target = firmwareTarget.toLowerCase();
+  const kind: StoredDevice["kind"] = target.includes("nrf54") ? "nrf54"
+    : target.includes("h7608") ? "h7608"
+    : target.includes("esp32") || target.includes("hc33") ? "esp32"
+    : gateway ? "h7608" : "esp32";
   const location = Array.isArray(device.location) && device.location.length === 2 ? device.location : null;
   return {
     id: device.$id,
@@ -533,6 +535,7 @@ function storedDeviceFromCloud(profileId: string, device: NativeDevice): StoredD
     name: device.name || device.serial,
     kind,
     firmwareTarget,
+    cloudStatus: device.status === "online" ? "online" : "offline",
     locationSource: location ? "gps" : "none",
     latitude: location?.[1] ?? null,
     longitude: location?.[0] ?? null,

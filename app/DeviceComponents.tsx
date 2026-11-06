@@ -19,6 +19,7 @@ const deviceMarkerStyles = ["gateway", "sensor", "tracker", "beacon", "relay", .
 export function DeviceDetail({
   device,
   liveNode,
+  cloudStatus,
   country,
   editable = false,
   allowMessaging = true,
@@ -28,6 +29,7 @@ export function DeviceDetail({
 }: {
   device: StoredDevice | null;
   liveNode: EdgezMeshNode | null;
+  cloudStatus?: "online" | "offline";
   country: string;
   editable?: boolean;
   allowMessaging?: boolean;
@@ -49,6 +51,8 @@ export function DeviceDetail({
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState("");
   const [settingsError, setSettingsError] = useState("");
+  const supportsSensorSettings = device !== null && device.kind !== "h7608" &&
+    device.deviceType.trim().toLowerCase() !== "gateway";
 
   useEffect(() => {
     setEditing(false);
@@ -68,7 +72,7 @@ export function DeviceDetail({
     setBlockSamplingCount("0");
     setSettingsStatus("");
     setSettingsError("");
-    if (!device || !editable || device.kind === "h7608") return () => { cancelled = true; };
+    if (!device || !editable || !supportsSensorSettings) return () => { cancelled = true; };
     setSettingsLoading(true);
     void getCloudSensorSettings(device.id).then((state) => {
       if (cancelled) return;
@@ -86,7 +90,7 @@ export function DeviceDetail({
       if (!cancelled) setSettingsLoading(false);
     });
     return () => { cancelled = true; };
-  }, [device, editable]);
+  }, [device, editable, supportsSensorSettings]);
 
   if (!device) return null;
   const canMessage = liveNode
@@ -158,12 +162,14 @@ export function DeviceDetail({
           <View style={styles.detailCard}>
             <DetailRow label="TYPE" value={device.deviceType || "Unspecified"} />
             <DetailRow label="HARDWARE" value={device.kind.toUpperCase()} />
-            <DetailRow label="ROUTE" value={liveNode?.route || "Offline"} />
-            <DetailRow label="STATE" value={liveNode ? (liveNode.sleeping ? "Sleeping" : "Awake") : "Not currently visible"} />
+            <DetailRow label="ROUTE" value={cloudStatus ? "Cloud" : liveNode?.route || "Offline"} />
+            <DetailRow label="STATE" value={cloudStatus
+              ? cloudStatus === "online" ? "Online" : "Offline"
+              : liveNode ? (liveNode.sleeping ? "Sleeping" : "Awake") : "Not currently visible"} />
             <DetailRow label="LAST SEEN" value={device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : "Unknown"} />
             <DetailRow label="LOCATION" value={device.latitude !== null && device.longitude !== null ? `${device.latitude.toFixed(6)}, ${device.longitude.toFixed(6)}` : "Not shared"} />
           </View>
-          {editable && device.kind !== "h7608" ? <View style={styles.settingsCard}>
+          {editable && supportsSensorSettings ? <View style={styles.settingsCard}>
             <View style={styles.settingsHeader}>
               <View><Text style={styles.settingsTitle}>SENSOR SETTINGS</Text><Text style={styles.settingsHint}>Delivered reliably after the next beacon</Text></View>
               {settingsLoading ? <ActivityIndicator size="small" color="#0a8c87" /> : null}

@@ -50,6 +50,8 @@ export type StoredDevice = DeviceDetails & {
   id: string;
   createdAt: string;
   updatedAt: string;
+  /** Current Devices API state for cloud views; not persisted in SQLite. */
+  cloudStatus?: "online" | "offline";
 };
 
 export type StoredMessage = {
