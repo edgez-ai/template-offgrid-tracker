@@ -296,6 +296,7 @@ export async function prepareDeviceCredential(
         name: name.trim() || normalizedSerial,
         markerType,
         markerColor,
+        metadata: { ...device.metadata, profileId, firmwareTarget, mqttGateway },
       }),
     });
   }

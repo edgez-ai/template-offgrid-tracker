@@ -69,8 +69,11 @@ last-message time.
 
 ## BLE and mesh behavior
 
-The add-device flow discovers supported hardware and provisions only the active
-profile's local HaLow settings; there is no upstream Wi-Fi selection.
+The add-device flow provisions the active profile's HaLow settings. ESP32 setup
+also offers Wi-Fi scanning, manual SSID entry, and a password field. Selecting
+Wi-Fi connects the ESP32 directly to MQTT after provisioning. Selecting **No
+upstream Wi-Fi** keeps the current HaLow MQTT forwarding path. nRF54 setup
+continues to use HaLow without an upstream Wi-Fi option.
 
 - ESP32 advertisements use `EZ_<12-digit HaLow MAC>` and Espressif secure BLE
   provisioning with the compatibility endpoint `mqtt-config`.

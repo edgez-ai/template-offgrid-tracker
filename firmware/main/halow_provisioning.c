@@ -36,6 +36,7 @@ static uint8_t edgez_provisioning_service_uuid[16] = {
 static const char *TAG = "halow_prov";
 static bool provisioning_active;
 static bool restart_after_stop;
+static bool wifi_required;
 
 static bool load_string(nvs_handle_t handle, const char *key, char *value, size_t capacity)
 {
@@ -63,6 +64,12 @@ static esp_err_t save_config(const halow_provisioning_config_t *config)
     if (err == ESP_OK) {
         err = nvs_set_str(handle, "deviceUuid", config->client_id);
     }
+    if (err == ESP_OK) err = nvs_set_str(handle, "mqttUsername", config->mqtt_username);
+    if (err == ESP_OK) err = nvs_set_str(handle, "mqttPassword", config->mqtt_password);
+    if (err == ESP_OK) err = nvs_set_str(handle, "projectId", config->project_id);
+    if (err == ESP_OK) err = nvs_set_u8(handle, "wifiUpstream", config->wifi_upstream);
+    /* Do not boot a half-provisioned Wi-Fi profile after a failed/aborted setup. */
+    if (err == ESP_OK) err = nvs_set_u8(handle, "wifiPending", config->wifi_upstream);
     if (err == ESP_OK) {
         err = nvs_set_u8(handle, "hasLocation", config->has_location ? 1U : 0U);
     }
@@ -172,6 +179,9 @@ static esp_err_t config_endpoint(uint32_t session_id,
         cJSON_GetObjectItemCaseSensitive(root, "latitude");
     const cJSON *longitude = root == NULL ? NULL :
         cJSON_GetObjectItemCaseSensitive(root, "longitude");
+    const cJSON *wifi = root == NULL ? NULL :
+        cJSON_GetObjectItemCaseSensitive(root, "wifiUpstream");
+    candidate.wifi_upstream = cJSON_IsTrue(wifi);
     bool valid = root != NULL &&
         copy_json_string(root, "clientId", candidate.client_id, sizeof(candidate.client_id)) &&
         valid_uuid(candidate.client_id) &&
@@ -183,6 +193,16 @@ static esp_err_t config_endpoint(uint32_t session_id,
         strlen(passphrase->valuestring) < sizeof(candidate.passphrase) &&
         cJSON_IsNumber(channel) && channel->valuedouble >= 1 &&
         channel->valuedouble <= UINT8_MAX && channel->valuedouble == channel->valueint;
+    if (valid && wifi != NULL && !cJSON_IsBool(wifi)) valid = false;
+    if (valid && candidate.wifi_upstream) {
+#if CONFIG_DAB_DIRECT_MQTT
+        valid = copy_json_string(root, "username", candidate.mqtt_username, sizeof(candidate.mqtt_username)) &&
+            copy_json_string(root, "password", candidate.mqtt_password, sizeof(candidate.mqtt_password)) &&
+            copy_json_string(root, "projectId", candidate.project_id, sizeof(candidate.project_id));
+#else
+        valid = false;
+#endif
+    }
 
     const bool has_latitude = cJSON_IsNumber(latitude);
     const bool has_longitude = cJSON_IsNumber(longitude);
@@ -212,6 +232,8 @@ static esp_err_t config_endpoint(uint32_t session_id,
 
     esp_err_t err = ESP_ERR_INVALID_ARG;
     if (valid) {
+        /* A previous failed Wi-Fi attempt must not block a corrected retry. */
+        (void)network_prov_mgr_reset_wifi_sm_state_on_failure();
         err = save_config(&candidate);
     }
     if (err == ESP_OK) {
@@ -220,8 +242,11 @@ static esp_err_t config_endpoint(uint32_t session_id,
                  candidate.mesh_id, candidate.country, candidate.channel,
                  frequency_khz, bandwidth_mhz,
                  candidate.has_location ? 1U : 0U);
-        restart_after_stop = true;
-        if (xTaskCreate(stop_and_restart_task, "prov_stop", 3072, NULL, 5, NULL) != pdPASS) {
+        wifi_required = candidate.wifi_upstream;
+        restart_after_stop = !wifi_required;
+        /* The SDK sends Wi-Fi credentials AFTER this custom endpoint. Let
+         * Espressif finish the Wi-Fi exchange and report success before stop. */
+        if (!wifi_required && xTaskCreate(stop_and_restart_task, "prov_stop", 3072, NULL, 5, NULL) != pdPASS) {
             err = ESP_ERR_NO_MEM;
         }
     }
@@ -259,6 +284,19 @@ static void provisioning_event(void *arg,
     }
     if (event_id == NETWORK_PROV_START) {
         ESP_LOGI(TAG, "BLE provisioning started");
+    } else if (event_id == NETWORK_PROV_WIFI_CRED_SUCCESS && wifi_required) {
+        nvs_handle_t handle;
+        esp_err_t err = nvs_open(HALOW_NVS_NAMESPACE, NVS_READWRITE, &handle);
+        if (err == ESP_OK) {
+            err = nvs_set_u8(handle, "wifiPending", 0);
+            if (err == ESP_OK) err = nvs_commit(handle);
+            nvs_close(handle);
+        }
+        restart_after_stop = err == ESP_OK;
+        ESP_LOGI(TAG, "Wi-Fi provisioning completed: %s", esp_err_to_name(err));
+        /* Default auto-stop waits for the phone's connected-status query. */
+    } else if (event_id == NETWORK_PROV_WIFI_CRED_FAIL) {
+        ESP_LOGW(TAG, "Wi-Fi provisioning failed; profile remains pending");
     } else if (event_id == NETWORK_PROV_END) {
         provisioning_active = false;
         network_prov_mgr_deinit();
@@ -296,13 +334,24 @@ esp_err_t halow_provisioning_init(halow_provisioning_config_t *config,
     }
     *provisioned = load_string(handle, "meshId", config->mesh_id,
                                sizeof(config->mesh_id)) &&
-        load_string(handle, "passphrase", config->passphrase,
-                    sizeof(config->passphrase)) &&
+        nvs_get_str(handle, "passphrase", config->passphrase,
+                    &(size_t){sizeof(config->passphrase)}) == ESP_OK &&
         load_string(handle, "country", config->country, sizeof(config->country)) &&
         nvs_get_u8(handle, "channel", &config->channel) == ESP_OK &&
         load_string(handle, "deviceUuid", config->client_id,
                     sizeof(config->client_id)) && valid_uuid(config->client_id);
     uint8_t has_location = 0U;
+    uint8_t wifi_upstream = 0U;
+    uint8_t wifi_pending = 0U;
+    (void)nvs_get_u8(handle, "wifiUpstream", &wifi_upstream);
+    (void)nvs_get_u8(handle, "wifiPending", &wifi_pending);
+    config->wifi_upstream = wifi_upstream != 0;
+    if (config->wifi_upstream) {
+        *provisioned = *provisioned && wifi_pending == 0 &&
+            load_string(handle, "mqttUsername", config->mqtt_username, sizeof(config->mqtt_username)) &&
+            load_string(handle, "mqttPassword", config->mqtt_password, sizeof(config->mqtt_password)) &&
+            load_string(handle, "projectId", config->project_id, sizeof(config->project_id));
+    }
     if (nvs_get_u8(handle, "hasLocation", &has_location) == ESP_OK &&
         has_location != 0U) {
         size_t latitude_size = sizeof(config->latitude);

@@ -1,9 +1,9 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { EdgezProvisioningManager } from "@edgez/react-native-sdk";
-import type { EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
+import type { EdgezProvisioningDevice, EdgezProvisioningInput, EdgezProvisioningWifiNetwork } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { styles } from "./app-styles";
@@ -91,8 +91,17 @@ export function ProvisioningFlow({
   const [deviceLocationLoading, setDeviceLocationLoading] = useState(false);
   const [locationPickerOpen, setLocationPickerOpen] = useState(false);
   const [deviceMarkerColor, setDeviceMarkerColor] = useState<BeaconIconColor>("blue");
+  const [wifiUpstream, setWifiUpstream] = useState(false);
+  const [wifiNetworks, setWifiNetworks] = useState<EdgezProvisioningWifiNetwork[]>([]);
+  const [wifiScanning, setWifiScanning] = useState(false);
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPassword, setWifiPassword] = useState("");
+  const wifiScanGeneration = useRef(0);
+  const supportsWifi = selectedDevice?.kind === "esp32" && selectedDevice.supportsUpstreamWifi;
 
   const disconnect = async () => {
+    wifiScanGeneration.current += 1;
+    setWifiScanning(false);
     if (selectedDevice) await provisioningManager.disconnect(selectedDevice);
     setConnected(false);
   };
@@ -135,6 +144,10 @@ export function ProvisioningFlow({
     setDeviceLocationChoice("none");
     setDeviceLocation("");
     setDeviceMarkerColor("blue");
+    setWifiUpstream(false);
+    setWifiNetworks([]);
+    setWifiSsid("");
+    setWifiPassword("");
     setError("");
     setStatus(`Confirm the details for ${device.name}.`);
     setStep(2);
@@ -206,7 +219,7 @@ export function ProvisioningFlow({
         selectedDevice.requiresProofOfPossession ? proofOfPossession.trim() : undefined,
       );
       setConnected(true);
-      setStatus("Connected. Review the local HaLow configuration.");
+      setStatus("Connected. Review the configuration and choose an upstream connection.");
       setStep(3);
     } catch (caught) {
       await provisioningManager.disconnect(selectedDevice);
@@ -218,9 +231,40 @@ export function ProvisioningFlow({
     }
   };
 
+  const scanWifi = async () => {
+    if (!selectedDevice || !connected || !supportsWifi) return;
+    const generation = ++wifiScanGeneration.current;
+    if (!wifiUpstream) setPreparedCredential(null);
+    setWifiUpstream(true);
+    setWifiScanning(true);
+    setError("");
+    setStatus("Scanning Wi-Fi networks near the device…");
+    try {
+      const networks = await provisioningManager.scanUpstreamWifi(selectedDevice);
+      if (generation !== wifiScanGeneration.current) return;
+      setWifiNetworks(networks.filter((network) => network.ssid).sort((a, b) => b.rssi - a.rssi));
+      setStatus("Choose a Wi-Fi network or enter its name manually.");
+    } catch (caught) {
+      if (generation !== wifiScanGeneration.current) return;
+      setError(caught instanceof Error ? caught.message : "Wi-Fi scan failed.");
+      setStatus("Retry the scan or enter the Wi-Fi network manually.");
+    } finally {
+      if (generation === wifiScanGeneration.current) setWifiScanning(false);
+    }
+  };
+
   const provision = async () => {
     if (!selectedDevice || !connected) {
       setError("The provisioning connection was lost. Go back and reconnect.");
+      return;
+    }
+    const useWifi = supportsWifi && wifiUpstream;
+    if (useWifi && (!wifiSsid || encodeURIComponent(wifiSsid).replace(/%[\dA-F]{2}|./g, "x").length > 32)) {
+      setError("Enter a Wi-Fi network name of 1–32 bytes.");
+      return;
+    }
+    if (useWifi && wifiPassword && !/^[\x20-\x7e]{8,63}$/.test(wifiPassword)) {
+      setError("Use 8–63 printable characters for the Wi-Fi password, or leave it empty for an open network.");
       return;
     }
     const coordinates = deviceLocationChoice === "none" || deviceLocationChoice === "gps"
@@ -228,14 +272,14 @@ export function ProvisioningFlow({
       : coordinatesFromLocation(deviceLocation);
     setBusy(true);
     setError("");
-    setStatus("Saving the local HaLow configuration…");
+    setStatus(useWifi ? "Saving the configuration and connecting the device to Wi-Fi…" : "Saving the local HaLow configuration…");
     try {
       const credential = preparedCredential ?? await prepareDeviceCredential(
         profile.id,
         selectedDevice.serial,
         name.trim() || selectedDevice.serial,
         selectedDevice.firmwareTarget,
-        selectedDevice.kind === "h7608",
+        selectedDevice.kind === "h7608" || useWifi,
         selectedDevice.kind === "h7608" ? "gateway" : "sensor",
         deviceMarkerColor,
       );
@@ -251,12 +295,14 @@ export function ProvisioningFlow({
         passphrase: profile.meshPassphrase,
         country: profile.country,
         halowChannel: profile.halowChannel,
+        wifiUpstream: useWifi,
         deviceName: name.trim(),
         softapPassword: selectedDevice.kind === "h7608" ? deviceWifiPassword : undefined,
         useDeviceGps: deviceLocationChoice === "gps",
         ...(coordinates ?? (selectedDevice.supportsDeviceGps ? {} : { latitude: null, longitude: null })),
       } as EdgezProvisioningInput;
-      await provisioningManager.configure(selectedDevice, localInput);
+      await provisioningManager.configure(selectedDevice, localInput,
+        useWifi ? { ssid: wifiSsid, passphrase: wifiPassword } : undefined);
       await saveProfileDevice({
         profileId: profile.id,
         serial: selectedDevice.serial,
@@ -278,7 +324,9 @@ export function ProvisioningFlow({
       await provisioningManager.disconnect(selectedDevice);
       setConnected(false);
       setStatus(`Provisioned ${selectedDevice.serial}.`);
-      Alert.alert("Device provisioned", `${selectedDevice.name} now uses the ${profile.name} HaLow profile.`, [
+      Alert.alert("Device provisioned", useWifi
+        ? `${selectedDevice.name} will connect to ${wifiSsid} and MQTT directly.`
+        : `${selectedDevice.name} now uses the ${profile.name} HaLow profile.`, [
         { text: "Done", onPress: onClose },
       ]);
     } catch (caught) {
@@ -410,8 +458,42 @@ export function ProvisioningFlow({
               <Text style={styles.settingsMuted}>Mesh ID: {profile.meshId}</Text>
               <Text style={styles.settingsMuted}>Device: {selectedDevice.name}</Text>
             </View>
-            <Text style={styles.provisioningHelp}>The app will send the active profile's HaLow mesh settings directly to the device. Upstream network setup is skipped.</Text>
-            <Pressable style={[styles.provisioningPrimary, busy && styles.disabledButton]} onPress={() => void provision()} disabled={busy}>
+            <Text style={styles.provisioningHelp}>The app will send the active profile's HaLow mesh settings directly to the device.</Text>
+            {supportsWifi ? (
+              <>
+                <Text style={styles.provisioningFieldLabel}>UPSTREAM CONNECTION</Text>
+                <Pressable style={[styles.provisioningChoice, !wifiUpstream && styles.provisioningChoiceSelected]} onPress={() => {
+                  wifiScanGeneration.current += 1;
+                  setWifiScanning(false);
+                  if (wifiUpstream) setPreparedCredential(null);
+                  setWifiUpstream(false);
+                  setError("");
+                  setStatus("HaLow mesh selected without upstream Wi-Fi.");
+                }} disabled={busy} accessibilityRole="radio" accessibilityState={{ selected: !wifiUpstream }}>
+                  <Text style={styles.provisioningDeviceName}>No upstream Wi-Fi</Text>
+                  <Text style={styles.settingsMuted}>Use the HaLow mesh connection</Text>
+                </Pressable>
+                <Pressable style={[styles.provisioningChoice, wifiUpstream && styles.provisioningChoiceSelected]} onPress={() => void scanWifi()} disabled={busy || wifiScanning} accessibilityRole="radio" accessibilityState={{ selected: wifiUpstream }}>
+                  <Text style={styles.provisioningDeviceName}>{wifiScanning ? "Scanning Wi-Fi…" : wifiUpstream ? "Rescan Wi-Fi networks" : "Connect to Wi-Fi"}</Text>
+                  <Text style={styles.settingsMuted}>Connect directly to MQTT over Wi-Fi</Text>
+                </Pressable>
+                {wifiUpstream ? (
+                  <>
+                    {wifiNetworks.map((network, index) => (
+                      <Pressable key={`${network.ssid}-${network.bssid || index}`} style={[styles.provisioningChoice, wifiSsid === network.ssid && styles.provisioningChoiceSelected]} onPress={() => { setWifiSsid(network.ssid); setWifiPassword(""); }} disabled={busy}>
+                        <Text style={styles.provisioningDeviceName}>{network.ssid}</Text>
+                        <Text style={styles.settingsMuted}>{network.rssi} dBm</Text>
+                      </Pressable>
+                    ))}
+                    <Text style={styles.provisioningFieldLabel}>WI-FI NETWORK NAME</Text>
+                    <TextInput style={styles.provisioningInput} value={wifiSsid} onChangeText={setWifiSsid} placeholder="Network name (SSID)" placeholderTextColor="#829693" autoCapitalize="none" autoCorrect={false} maxLength={32} editable={!busy} accessibilityLabel="Wi-Fi network name" />
+                    <Text style={styles.provisioningFieldLabel}>WI-FI PASSWORD</Text>
+                    <ProvisioningPasswordField value={wifiPassword} onChangeText={setWifiPassword} placeholder="Leave empty for an open network" accessibilityName="Wi-Fi password" />
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            <Pressable style={[styles.provisioningPrimary, (busy || wifiScanning) && styles.disabledButton]} onPress={() => void provision()} disabled={busy || wifiScanning}>
               <Text style={styles.provisioningPrimaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text>
             </Pressable>
           </>

@@ -44,8 +44,11 @@ else()
         list(APPEND component_sources "halow_pawr.c")
     endif()
 
-    if(CONFIG_DAB_START_MQTT_RELAY)
+    if(CONFIG_DAB_START_MQTT_RELAY OR CONFIG_DAB_DIRECT_MQTT)
         list(APPEND component_sources "halow_telemetry.c")
+    endif()
+    if(CONFIG_DAB_DIRECT_MQTT)
+        list(APPEND component_sources "wifi_mqtt.c")
     endif()
 
     set(component_private_dependencies
@@ -57,6 +60,9 @@ else()
         esp_driver_gpio
         esp_timer
     )
+    if(CONFIG_DAB_DIRECT_MQTT)
+        list(APPEND component_private_dependencies mqtt mbedtls lwip)
+    endif()
 
     if(CONFIG_OFFGRID_HT_HC33_SENSOR)
         list(APPEND component_private_dependencies

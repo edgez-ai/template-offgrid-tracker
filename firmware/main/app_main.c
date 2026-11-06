@@ -38,10 +38,13 @@ esp_err_t edgez_ble_control_route_pawr_beacon(const uint8_t source_mac[6],
 #endif
 
 #if CONFIG_DAB_START_MQTT_RELAY
-#include "edgez_mqtt.hpp"
+#include "mesh_mqtt_relay.h"
 #endif
-#if CONFIG_DAB_START_MQTT_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_DIRECT_MQTT
 #include "halow_telemetry.h"
+#endif
+#if CONFIG_DAB_DIRECT_MQTT
+#include "wifi_mqtt.h"
 #endif
 
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_HALOW_BLE_PROVISIONING
@@ -80,6 +83,12 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
              "PAwR beacon from %02x:%02x:%02x:%02x:%02x:%02x, RSSI=%d dBm, bytes=%u",
              source_mac[0], source_mac[1], source_mac[2], source_mac[3],
              source_mac[4], source_mac[5], (int)rssi_dbm, (unsigned)length);
+#if CONFIG_DAB_DIRECT_MQTT
+    if (wifi_mqtt_ready(NULL) && halow_telemetry_forward_beacon(beacon, length) == ESP_OK) {
+        ESP_LOGI(TAG, "PAwR Beacon routed via direct Wi-Fi MQTT");
+        return;
+    }
+#endif
 #if CONFIG_DAB_START_MQTT_RELAY
     if (edgez_mqtt_gateway_available()) {
         const esp_err_t telemetry_err =
@@ -130,7 +139,14 @@ static void mesh_status_callback(edgez_halow_link_state_t state)
     }
 }
 
-#if CONFIG_DAB_START_MQTT_RELAY
+#if CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_DIRECT_MQTT
+#if CONFIG_DAB_START_MQTT_RELAY && CONFIG_DAB_DIRECT_MQTT
+static int gateway_publish(const char *topic, const void *payload, size_t length,
+                            int qos, bool retain)
+{
+    return wifi_mqtt_publish(topic, payload, length, qos, retain, NULL);
+}
+#endif
 static int relay_publish(const char *topic,
                          const void *payload,
                          size_t length,
@@ -139,19 +155,33 @@ static int relay_publish(const char *topic,
                          void *arg)
 {
     (void)arg;
+#if CONFIG_DAB_DIRECT_MQTT
+    if (provisioned_config.wifi_upstream) {
+        return wifi_mqtt_publish(topic, payload, length, qos, retain, NULL);
+    }
+#endif
+#if CONFIG_DAB_START_MQTT_RELAY
     if (strcmp(topic, "system/status") == 0) {
         return edgez_mqtt_publish_system_status(payload, length, qos, retain);
     }
     if (strcmp(topic, "telemetry/sensors") == 0) {
         return edgez_mqtt_publish_telemetry(payload, length, qos, retain);
     }
+#endif
     return -1;
 }
 
 static bool relay_ready(void *arg)
 {
     (void)arg;
+#if CONFIG_DAB_DIRECT_MQTT
+    if (provisioned_config.wifi_upstream) return wifi_mqtt_ready(NULL);
+#endif
+#if CONFIG_DAB_START_MQTT_RELAY
     return edgez_mqtt_gateway_available();
+#else
+    return false;
+#endif
 }
 #endif
 
@@ -242,18 +272,23 @@ static esp_err_t start_mesh(void)
              "%02x%02x%02x%02x%02x%02x",
              service_info.mac[0], service_info.mac[1], service_info.mac[2],
              service_info.mac[3], service_info.mac[4], service_info.mac[5]);
-#if CONFIG_HALOW_BLE_PROVISIONING
-    const bool mqtt_gateway = false;
+#if CONFIG_DAB_DIRECT_MQTT
+    const bool mqtt_gateway = provisioned_config.wifi_upstream;
+    err = edgez_mqtt_init(mqtt_gateway, device_serial,
+                           mqtt_gateway ? gateway_publish : NULL, NULL);
 #else
     const bool mqtt_gateway = false;
-#endif
     err = edgez_mqtt_init(mqtt_gateway, device_serial, NULL, NULL);
+#endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not start BATMAN MQTT relay: %s",
                  esp_err_to_name(err));
         return err;
     }
     edgez_mqtt_set_local_mac(service_info.mac);
+#if CONFIG_DAB_DIRECT_MQTT
+    if (mqtt_gateway) wifi_mqtt_relay_started();
+#endif
     if (mqtt_gateway) {
         ESP_LOGI(TAG,
                  "BATMAN-IV + MQTT relay ready as gateway; advertisement starts when MQTT is online");
@@ -274,7 +309,7 @@ static esp_err_t start_mesh(void)
     ESP_LOGI(TAG,
              "Unified NetworkPacket L2 relay ready (kind=2, broadcast/unicast)");
 #endif
-#if CONFIG_DAB_START_MQTT_RELAY && CONFIG_HALOW_BLE_PROVISIONING
+#if (CONFIG_DAB_START_MQTT_RELAY || CONFIG_DAB_DIRECT_MQTT) && CONFIG_HALOW_BLE_PROVISIONING
     char local_client_id[37] = {0};
     if (provisioned_config.client_id[0] != '\0') {
         strlcpy(local_client_id, provisioned_config.client_id,
@@ -311,7 +346,8 @@ static esp_err_t start_mesh(void)
 #endif
 #if CONFIG_DAB_WIFI_EXTENDER
 #if CONFIG_HALOW_BLE_PROVISIONING
-    err = wifi_extender_start(service_info.mac, false);
+    /* Direct MQTT owns native STA when an upstream network was provisioned. */
+    err = provisioned_config.wifi_upstream ? ESP_OK : wifi_extender_start(service_info.mac, false);
 #else
     err = wifi_extender_start(service_info.mac, false);
 #endif
@@ -397,6 +433,11 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_hosted_slave_reset());
 #endif
     ESP_ERROR_CHECK(edgez_ble_control_start());
+#if CONFIG_DAB_DIRECT_MQTT
+    if (provisioned_config.wifi_upstream) {
+        ESP_ERROR_CHECK(wifi_mqtt_start(&provisioned_config));
+    }
+#endif
 #endif
 
     const BaseType_t created = xTaskCreate(halow_init_task,

@@ -40,11 +40,10 @@ CONFIG_MBEDTLS_HARDWARE_ECDSA_VERIFY=y
 CONFIG_MMPKTMEM_TX_POOL_N_BLOCKS=20
 CONFIG_MMPKTMEM_RX_POOL_N_BLOCKS=64
 
-# P4 extender is forwarding-only. Leave MQTT relay and periodic telemetry off
-# so their packet bursts cannot compete with routed traffic for Morse buffers.
+# Direct Wi-Fi MQTT is independent of the optional BATMAN MQTT relay.
 # CONFIG_HALOW_EDGEZ_MQTT_RELAY is not set
 # CONFIG_DAB_START_MQTT_RELAY is not set
-# CONFIG_DAB_PUBLISH_SYSTEM_STATUS is not set
+CONFIG_DAB_PUBLISH_SYSTEM_STATUS=y
 CONFIG_HALOW_EDGEZ_BATMAN_INTERVAL_MS=1000
 
 CONFIG_USB_HOST_HUBS_SUPPORTED=y

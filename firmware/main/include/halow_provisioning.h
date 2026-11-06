@@ -12,6 +12,10 @@ extern "C" {
 
 typedef struct {
     char client_id[64];
+    char mqtt_username[64];
+    char mqtt_password[256];
+    char project_id[64];
+    bool wifi_upstream;
     char mesh_id[33];
     char passphrase[64];
     char country[3];

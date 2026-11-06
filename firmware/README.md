@@ -65,8 +65,8 @@ The application initializes the relay after `mmhalow_connect()`. A leaf starts
 forwarding once it receives an MQTT gateway advertisement. An ESP gateway must
 provide MQTT publish/command callbacks and call
 `edgez_mqtt_set_gateway_online(true)` only after its broker connection is
-usable; the standalone DAB application currently leaves those callbacks to the
-product integration. `CONFIG_HALOW_EDGEZ_BATMAN_INTERVAL_MS` controls the OGM
+usable. With provisioned upstream Wi-Fi, the application supplies these callbacks
+from its direct MQTT client. `CONFIG_HALOW_EDGEZ_BATMAN_INTERVAL_MS` controls the OGM
 interval. The `eu` branch uses 10000 ms and must be paired with the H7608 EU
 low-airtime profile so route expiry and gateway advertisements remain aligned.
 
@@ -400,8 +400,33 @@ The UUID is generated and retained by the mobile app per profile/device. The
 firmware stores it with the mesh values and accepts either an empty passphrase
 for an open mesh or 8–63 characters for SAE. After the endpoint responds
 successfully, BLE shuts down and the device reboots into the saved HaLow mesh.
-No upstream Wi-Fi scan or credential provisioning is performed.
+For direct Wi-Fi MQTT, the app additionally sends `wifiUpstream: true`,
+`username` (device serial), `password` (MQTT credential), and `projectId` through
+`mqtt-config`, then sends the selected SSID and Wi-Fi passphrase through the
+standard Espressif Wi-Fi provisioning endpoint. The firmware waits for Wi-Fi
+success and the phone's status query before stopping BLE and rebooting. Failed
+or interrupted Wi-Fi setup stays pending and can be retried; the MQTT password
+is never printed in logs.
+
+On subsequent boots, `CONFIG_DAB_DIRECT_MQTT` starts native Wi-Fi STA using its
+saved credentials and starts the TLS MQTT client once STA gets an IP. The broker
+is configured by `CONFIG_DAB_MQTT_BROKER_URI` (default
+`mqtts://mqtt.edgez.ai:8883`). TLS verifies the broker with the ESP certificate
+bundle; SNTP sets the device clock. Both Wi-Fi and MQTT reconnect automatically.
+Status and sensor reports use
+`projects/<projectId>/devices/<serial>/system/status` and
+`projects/<projectId>/devices/<serial>/telemetry/sensors`. When the optional
+BATMAN MQTT relay is enabled, the node advertises an MQTT gateway only while
+the direct broker connection is online.
+
+With `wifiUpstream` omitted or false, no upstream Wi-Fi connection is started:
+the current HaLow MQTT forwarding path remains in use. Existing mesh-only
+profiles remain valid. A Wi-Fi MQTT profile uses native STA instead of the
+optional downstream SoftAP extender.
 Erasing NVS returns it to provisioning mode.
+
+Run provisioning lifecycle host checks with
+`python3 main/test/provisioning/run.py` from `firmware/`.
 
 ### Direct provisioning on nRF54L15
 
@@ -448,7 +473,7 @@ advertisement adapted from the `v2` source.
   host as router and 15 DHCP leases (up to 10 associated Wi-Fi clients).
   Traffic uses a DHCP-addressed BATMAN interface, MTU 1400, and a selected
   EdgeZ Mesh Network gateway. A local bounded DNS relay serves downstream clients.
-  The offline app never scans for or stores an upstream Wi-Fi network.
+  Selecting no upstream Wi-Fi in the app retains this downstream role.
 
 As in the reference branch, downstream SoftAP traffic preserves client source
 addresses. An EdgeZ Mesh Network/OpenWrt gateway must consume the Alfred type-104
@@ -462,7 +487,8 @@ table to its radio originator. After mesh DHCP succeeds, the ESP publishes its
 A plain BATMAN gateway without that integration is insufficient for these
 routed SoftAP clients; the ESP Wi-Fi gateway role does not install those routes.
 ESP provisioning continues to use the legacy BLE `mqtt-config` endpoint name
-for SDK compatibility, but its payload is entirely local/offline.
+for SDK compatibility; it persists the HaLow profile and optional direct MQTT
+credential. Wi-Fi credentials use Espressif's standard provisioning endpoint.
 The reference firmware's web configuration UI is not included.
 
 The mesh component has a separate network receive callback so IP/ARP/Alfred

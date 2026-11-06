@@ -194,6 +194,21 @@ menu "HaLow initialization"
             creates only the mesh interface, which is normally VIF 0. Confirm
             this against the "Private EdgeZ UMAC started ... vif=N" boot log.
 
+    config DAB_DIRECT_MQTT
+        bool "Connect directly to MQTT using provisioned Wi-Fi"
+        depends on HALOW_BLE_PROVISIONING && !OFFGRID_HT_HC33_SENSOR
+        default y
+        select MBEDTLS_CERTIFICATE_BUNDLE
+        help
+            Persist the device MQTT credential received over BLE and start a
+            TLS MQTT client when the provisioned native Wi-Fi station gets IP.
+            Devices provisioned without Wi-Fi retain their HaLow-only role.
+
+    config DAB_MQTT_BROKER_URI
+        string "Direct MQTT broker URI"
+        depends on DAB_DIRECT_MQTT
+        default "mqtts://mqtt.edgez.ai:8883"
+
     config DAB_START_MQTT_RELAY
         bool "Start the MQTT relay over BATMAN-IV"
         depends on DAB_START_BATMAN && HALOW_EDGEZ_MQTT_RELAY
