@@ -97,7 +97,7 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY "edgez/sensor_settings/v2"
 #define EDGEZ_SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
 #define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 4U
-#define EDGEZ_SENSOR_GPS_TIMEOUT_MS 10000U
+#define EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS 2000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
 #define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
 #define EDGEZ_USER_NODE DT_PATH(zephyr_user)
@@ -235,6 +235,10 @@ static void sensor_settings_set_default(uint32_t interval_ms)
 
 static void sensor_settings_load(void)
 {
+	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)) {
+		sensor_settings_set_default(60000U);
+		return;
+	}
 	struct sensor_settings_record loaded = {0};
 	struct edgez_halow_profile profile = {0};
 	edgez_config_get_profile(&profile);
@@ -297,6 +301,11 @@ int edgez_sensor_handle_downlink(
 	};
 	if (!edgez_sensor_settings_valid(&updated.value)) {
 		return -ERANGE;
+	}
+	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY) &&
+	    (updated.value.sampling_interval_ms != 60000U ||
+	     updated.value.block_sampling_count != 0U)) {
+		return -ENOTSUP;
 	}
 	int rc = settings_save_one(EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY,
 		&updated, sizeof(updated));
@@ -701,9 +710,16 @@ static void poll_user_button(void)
 
 static void sensor_sleep_until_button_or_timeout(int32_t remaining_ms)
 {
+	if (remaining_ms <= 0) {
+		k_msleep(1);
+		return;
+	}
 #if DT_NODE_HAS_PROP(EDGEZ_USER_NODE, key_gpios)
-	if (user_button_ready && remaining_ms > 0 &&
-	    k_sem_take(&user_button_sem, K_MSEC(remaining_ms)) == 0) {
+	if (user_button_ready) {
+		if (k_sem_take(&user_button_sem, K_MSEC(remaining_ms)) != 0) {
+			/* The semaphore timeout already slept for the full interval. */
+			return;
+		}
 		/* The first press wakes the MCU. Keep polling only while it is held so
 		 * the five-second reset duration starts after this wake, matching the
 		 * ESP32 sensor behavior without periodic wakeups during normal sleep. */
@@ -715,7 +731,7 @@ static void sensor_sleep_until_button_or_timeout(int32_t remaining_ms)
 		return;
 	}
 #endif
-	k_msleep(remaining_ms > 0 ? remaining_ms : 1);
+	k_msleep(remaining_ms);
 }
 
 static int deliver_msdu(const uint8_t destination[6], const uint8_t source[6],
@@ -1107,6 +1123,9 @@ static bool same_radio_profile(const struct edgez_halow_profile *a,
 
 static uint32_t sensor_update_interval_ms(void)
 {
+	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)) {
+		return 60000U;
+	}
 	return edgez_config_should_autostart() ?
 		sensor_settings.value.sampling_interval_ms :
 		CONFIG_OFFGRID_NRF54_SENSOR_BOOTSTRAP_INTERVAL_SECONDS * 1000U;
@@ -2476,9 +2495,10 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 #endif
 	sensor_power.generation = edgez_config_generation();
 	sensor_begin_cycle(now);
-	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=%s IMU=hardware-FIFO",
+	LOG_INF("low-power sensor mode armed device_type=%u update_interval=%us GPS=%s IMU=%s",
 		profile->device_type, sensor_update_interval_ms() / 1000U,
-		IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS) ? "cycled" : "disabled");
+		IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS) ? "cycled" : "disabled",
+		IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY) ? "disabled" : "hardware-FIFO");
 }
 
 static void sensor_leave(void)
@@ -2594,11 +2614,12 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		int gps_rc = edgez_gps_init();
 
 		if (gps_rc == 0) {
-			sensor_power.gps_deadline_ms = now + EDGEZ_SENSOR_GPS_TIMEOUT_MS;
+			sensor_power.gps_deadline_ms = now +
+				EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS;
 			sensor_power.phase = SENSOR_POWER_WAITING_GPS;
 			if (sensor_power.boot_gps_fix_acquired) {
 				LOG_INF("sensor GPS awake; waiting up to %u ms for fix",
-					EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+					EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS);
 			} else {
 				LOG_INF("sensor boot GPS awake; waiting for satellite-backed fix before first sleep");
 			}
@@ -2634,7 +2655,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		} else if (sensor_power.boot_gps_fix_acquired &&
 			   (int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
 			LOG_WRN("sensor GPS fix timeout after %u ms; sending without location",
-				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+				EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS);
 			edgez_gps_stop();
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
 		} else {
@@ -2649,6 +2670,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	/* The reporting timer is the only periodic MCU wake source in the power
 	 * build. Collect the samples accumulated by the IMU hardware FIFO before
 	 * powering HaLow, so IMU traffic cannot overlap radio startup or TX. */
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)
 	int imu_rc;
 #if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 	size_t captured_samples = 0U;
@@ -2674,6 +2696,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	if (imu_rc != 0 && imu_rc != -ENOTSUP && imu_rc != -EAGAIN) {
 		LOG_WRN("sensor timer-wake IMU FIFO drain failed rc=%d", imu_rc);
 	}
+#endif
 
 	int rc = 0;
 	bool radio_cold_started = false;
@@ -2840,7 +2863,8 @@ int main(void)
 	if (sensor_rc != 0) {
 		LOG_WRN("IMU unavailable rc=%d; sensor beacons will omit motion", sensor_rc);
 	} else {
-		LOG_INF("IMU initialized for low-power sensor sampling");
+		LOG_INF("IMU %s", IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY) ?
+			"powered down; GPS-only sensing" : "initialized for low-power sensor sampling");
 	}
 	edgez_config_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PSK);
 	if (sensor_role) {

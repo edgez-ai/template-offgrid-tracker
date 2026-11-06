@@ -8,7 +8,9 @@ if(NOT DEFINED DTC_OVERLAY_FILE)
 	)
 endif()
 
-if(DEFINED ENV{MORSE_ZEPHYR_MODULE})
+if(OFFGRID_NRF54_ALL_OFF_BENCHMARK)
+	# No Morse module or application runtime in the standalone benchmark.
+elseif(DEFINED ENV{MORSE_ZEPHYR_MODULE})
 	set(MORSE_ZEPHYR_MODULE "$ENV{MORSE_ZEPHYR_MODULE}")
 	list(APPEND ZEPHYR_EXTRA_MODULES "${MORSE_ZEPHYR_MODULE}")
 else()
@@ -22,6 +24,11 @@ cmake_minimum_required(VERSION 3.13.1)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 
 project(offgrid-tracker-nrf54)
+
+if(OFFGRID_NRF54_ALL_OFF_BENCHMARK)
+	target_sources(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/benchmark_anchor.c")
+	return()
+endif()
 
 zephyr_include_directories("${CMAKE_CURRENT_LIST_DIR}")
 zephyr_include_directories(

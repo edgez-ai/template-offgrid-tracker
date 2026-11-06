@@ -295,6 +295,11 @@ static int imu_configure(void)
 		}
 	}
 
+	/* Reset also stops sampling left running by a previous firmware image. */
+	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)) {
+		return 0;
+	}
+
 	rc = i2c_reg_write_byte_dt(&imu_i2c, EDGEZ_IMU_CTRL3_C_REG,
 				       EDGEZ_IMU_CTRL3_BDU | EDGEZ_IMU_CTRL3_IF_INC);
 	if (rc == 0) {
@@ -459,6 +464,10 @@ int edgez_imu_init(void)
 				init_failure_count);
 		}
 		return rc;
+	}
+	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)) {
+		rc = pm_device_action_run(imu_i2c.bus, PM_DEVICE_ACTION_SUSPEND);
+		return rc == -EALREADY ? 0 : rc;
 	}
 	imu_ready = true;
 #if defined(CONFIG_OFFGRID_NRF54_IMU_TIMER_DRAIN)

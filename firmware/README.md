@@ -279,10 +279,13 @@ before distributing any build.
 
 `edgez-nrf54l15-fgh200m-sensor` is the dedicated sensor build for the EdgeZ
 nRF54L15 carrier and FGH200M/MM8108. It compiles without Bluetooth, never enters
-the companion peering/BATMAN runtime, batches accelerometer-only LSM6DSL samples
-in the hardware FIFO, disables GPS, and uses a 15-second reporting cycle. The first
-cycle initializes the MM8108 and configures chip sleep. Later cycles drain the
-IMU FIFO, wake the retained radio, send one connectionless PAwR-like beacon,
+the companion peering/BATMAN runtime, keeps the IMU powered down, and uses a
+60-second GPS sensing and beacon reporting cycle. This GPS-only build ignores
+stored reporting intervals and IMU block settings; downlinks requesting a
+different interval or IMU blocks are rejected. The first cycle waits for a
+satellite-backed GPS fix, initializes the MM8108, and configures chip sleep.
+Later cycles wake GPS for up to 2 seconds, wake the retained radio, send one
+connectionless PAwR-like beacon,
 and wait up to 500 ms for a receiver-generated application acknowledgement.
 There is no same-cycle retry. The MM8108 then returns to chip sleep without a
 firmware reload, and Zephyr returns to tickless System ON idle.
@@ -546,3 +549,10 @@ logging on an UART-connected H7608, see
 - Morse Micro `morse-firmware` (matching firmware and board configuration)
 - `edgez-ai/esp-halow` branch `edgez`, based on the Morse Micro ESP-IDF component
   `2.11.2-esp32-2`
+
+### FGH200M sleep baselines
+
+The restored `edgez-nrf54l15-fgh200m-all-off-system-on` environment disables
+external peripherals and sleeps indefinitely in System ON for comparison with
+the sensor's idle current. `edgez-nrf54l15-fgh200m-all-off` uses System OFF for
+the deeper shutdown baseline. See [benchmark instructions](benchmarks/fgh200m_all_off/README.md).
