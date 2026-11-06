@@ -7,6 +7,7 @@
 
 #include "esp_crt_bundle.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
@@ -52,8 +53,14 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         set_online(false);
         ESP_LOGW(TAG, "MQTT disconnected; automatic reconnect enabled");
     } else if (id == MQTT_EVENT_ERROR) {
-        ESP_LOGW(TAG, "MQTT connection error type=%d",
-                 event->error_handle ? event->error_handle->error_type : 0);
+        const esp_mqtt_error_codes_t *error = event->error_handle;
+        ESP_LOGW(TAG, "MQTT connection error type=%d esp_tls=0x%x tls=0x%x broker_rc=%d internal_free=%u largest=%u",
+                 error ? error->error_type : 0,
+                 error ? error->esp_tls_last_esp_err : 0,
+                 error ? -error->esp_tls_stack_err : 0,
+                 error ? error->connect_return_code : 0,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
 }
 

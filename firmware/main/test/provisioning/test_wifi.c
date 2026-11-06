@@ -32,7 +32,12 @@ static const char *esp_err_to_name(int error) { (void)error; return "error"; }
 typedef int esp_event_base_t;
 typedef int esp_netif_t;
 typedef struct { esp_netif_t *esp_netif; } ip_event_got_ip_t;
-typedef struct { int error_type; } mqtt_error_t;
+typedef struct { int error_type, esp_tls_last_esp_err, esp_tls_stack_err, connect_return_code; } esp_mqtt_error_codes_t;
+typedef esp_mqtt_error_codes_t mqtt_error_t;
+#define MALLOC_CAP_INTERNAL 1
+#define MALLOC_CAP_8BIT 2
+static size_t heap_caps_get_free_size(unsigned caps) { (void)caps; return 65536; }
+static size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return 32768; }
 typedef struct { mqtt_error_t *error_handle; } mqtt_event_data_t;
 typedef mqtt_event_data_t *esp_mqtt_event_handle_t;
 typedef struct {
@@ -126,6 +131,9 @@ int main(void)
     mqtt_event(NULL, 0, MQTT_EVENT_CONNECTED, NULL); assert(gateway_online);
     mqtt_event(NULL, 0, MQTT_EVENT_DISCONNECTED, NULL);
     assert(!wifi_mqtt_ready(NULL) && !gateway_online);
+    mqtt_error_t error = { .error_type = 1, .esp_tls_stack_err = -0x7f00 };
+    mqtt_event_data_t failure = { .error_handle = &error };
+    mqtt_event(NULL, 0, MQTT_EVENT_ERROR, &failure);
     puts("Wi-Fi/MQTT lifecycle checks passed");
     return 0;
 }

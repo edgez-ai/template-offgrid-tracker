@@ -419,6 +419,12 @@ Status and sensor reports use
 BATMAN MQTT relay is enabled, the node advertises an MQTT gateway only while
 the direct broker connection is online.
 
+The HT-HC33 profile allocates TLS memory in PSRAM and prefers PSRAM for
+application allocations above 4 KiB. The reporting task also uses a PSRAM
+stack, leaving internal RAM for Wi-Fi, BLE, HaLow and PAwR. On this combined
+profile, forcing TLS to internal RAM can fail with `mbedtls_ssl_setup -0x7F00`
+(allocation failure), leaving status reporting waiting for MQTT readiness.
+
 With `wifiUpstream` omitted or false, no upstream Wi-Fi connection is started:
 the current HaLow MQTT forwarding path remains in use. Existing mesh-only
 profiles remain valid. A Wi-Fi MQTT profile uses native STA instead of the

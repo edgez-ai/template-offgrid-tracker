@@ -19,6 +19,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/idf_additions.h"
 #include "mmwlan.h"
 
 #define BEACON_SENSOR_FIELD 101U
@@ -782,6 +783,8 @@ static void local_report_task(void *arg)
                     ESP_LOGI(TAG,
                              "Local system/status published bytes=%u message_id=%d",
                              (unsigned)length, message_id);
+                } else {
+                    ESP_LOGW(TAG, "Local system/status publish failed rc=%d", message_id);
                 }
             } else {
                 ESP_LOGE(TAG, "Could not encode local system/status protobuf");
@@ -850,8 +853,18 @@ esp_err_t halow_telemetry_start_local(const char *client_id,
     if (report_payload == NULL) return ESP_ERR_NO_MEM;
     /* ESP-IDF sizes task stacks in bytes. Includes nested JSON/protobuf,
      * MQTT framing, crypto/radio submission and diagnostic logging. */
-    if (xTaskCreate(local_report_task, "halow_report", 12288, report_payload, 5,
-                    &local_report_task_handle) != pdPASS) {
+    /* This application task runs with cache enabled. Its protobuf/JSON stack
+     * can live in PSRAM; keep internal RAM for the radio and PAwR worker. */
+#if CONFIG_SPIRAM && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    const BaseType_t created = xTaskCreateWithCaps(
+        local_report_task, "halow_report", 12288, report_payload, 5,
+        &local_report_task_handle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    const BaseType_t created = xTaskCreate(
+        local_report_task, "halow_report", 12288, report_payload, 5,
+        &local_report_task_handle);
+#endif
+    if (created != pdPASS) {
         heap_caps_free(report_payload);
         local_report_task_handle = NULL;
         return ESP_ERR_NO_MEM;
