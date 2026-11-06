@@ -2614,6 +2614,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		}
 		LOG_WRN("sensor GPS wake failed rc=%d; sending without fresh location",
 			gps_rc);
+		edgez_gps_stop();
 #endif
 		sensor_power.phase = SENSOR_POWER_TRANSMIT;
 	}
@@ -2626,11 +2627,15 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			LOG_INF("sensor GPS fix ready lat=%.6f lon=%.6f satellites=%u",
 				(double)fix.latitude, (double)fix.longitude, fix.satellites);
 			sensor_power.boot_gps_fix_acquired = true;
+			/* Retain this fix for beacon construction, but switch off the L76K
+			 * and its UART before powering the HaLow radio. */
+			edgez_gps_power_down();
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
 		} else if (sensor_power.boot_gps_fix_acquired &&
 			   (int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
 			LOG_WRN("sensor GPS fix timeout after %u ms; sending without location",
 				EDGEZ_SENSOR_GPS_TIMEOUT_MS);
+			edgez_gps_stop();
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
 		} else {
 			return;

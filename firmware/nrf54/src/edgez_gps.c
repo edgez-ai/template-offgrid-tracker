@@ -361,12 +361,18 @@ static void parse_sentence(char *line)
 int edgez_gps_init(void)
 {
 	struct uart_config config;
+	k_spinlock_key_t key;
 	int config_rc;
 	int rx_level;
 
 	if (gps_ready) {
 		return 0;
 	}
+	/* A new wake cycle must wait for a newly sampled position rather than
+	 * accepting the fix retained long enough to construct the last beacon. */
+	key = k_spin_lock(&fix_lock);
+	latest_fix = (struct edgez_gps_fix){0};
+	k_spin_unlock(&fix_lock, key);
 	config_rc = gps_set_awake(true);
 	if (config_rc < 0) {
 		LOG_WRN("L76K wake GPIO failed rc=%d", config_rc);
@@ -435,10 +441,8 @@ int edgez_gps_init(void)
 	return 0;
 }
 
-void edgez_gps_stop(void)
+void edgez_gps_power_down(void)
 {
-	k_spinlock_key_t key;
-
 	if (gps_ready) {
 		gps_ready = false;
 		(void)uart_rx_disable(gps_uart);
@@ -460,6 +464,13 @@ void edgez_gps_stop(void)
 			LOG_WRN("GPS UART suspend failed rc=%d", rc);
 		}
 	}
+}
+
+void edgez_gps_stop(void)
+{
+	k_spinlock_key_t key;
+
+	edgez_gps_power_down();
 	key = k_spin_lock(&fix_lock);
 	latest_fix = (struct edgez_gps_fix){0};
 	k_spin_unlock(&fix_lock, key);
@@ -534,7 +545,7 @@ bool edgez_gps_get_fix(struct edgez_gps_fix *fix)
 	k_spinlock_key_t key;
 	int64_t now;
 
-	if (!fix || !gps_ready) {
+	if (!fix) {
 		return false;
 	}
 	key = k_spin_lock(&fix_lock);
@@ -551,6 +562,10 @@ int edgez_gps_init(void)
 }
 
 void edgez_gps_stop(void)
+{
+}
+
+void edgez_gps_power_down(void)
 {
 }
 

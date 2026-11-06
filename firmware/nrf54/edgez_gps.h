@@ -12,6 +12,7 @@ struct edgez_gps_fix {
 };
 
 int edgez_gps_init(void);
+void edgez_gps_power_down(void);
 void edgez_gps_stop(void);
 void edgez_gps_poll(void);
 bool edgez_gps_is_ready(void);
