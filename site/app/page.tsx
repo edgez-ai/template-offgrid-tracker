@@ -4,6 +4,7 @@ import { Account, Client, ID, Models, Query, TablesDB, Teams } from "appwrite";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "./ProfileSelector";
+import CameraPanel from "./CameraPanel";
 
 import { topologyFromDevices, type DeviceSystemState, type TopologyLink } from "../lib/device-status";
 
@@ -532,6 +533,9 @@ export default function Home() {
             <div className="telemetry-route"><span>TELEMETRY ROUTE</span><strong>{!selectedLatestTelemetry ? "Waiting for telemetry" : selectedDevice?.gatewayDeviceId ? `Via ${selectedGateway?.name || selectedGateway?.serial || selectedDevice?.gatewayDeviceId}` : "Direct MQTT"}</strong>{selectedGateway && <small>{selectedGateway.serial}</small>}</div>
             <div className="gateway-summary"><div><span>DEVICE ROLE</span><strong>{selectedIsGateway ? "Gateway" : "Leaf device"}</strong></div><div><span>GATEWAY AVAILABLE</span><strong className={selectedGatewayAvailable === true ? "available" : selectedGatewayAvailable === false ? "unavailable" : "unknown"}>{selectedGatewayAvailable === true ? "Available" : selectedGatewayAvailable === false ? "Unavailable" : "Not configured"}</strong></div></div>
             {deleteConfirm && <div className="delete-confirm" role="alert"><div><strong>Delete {selectedDevice.name}?</strong><p>This permanently removes the device and its MQTT credentials. Existing time-series history is not deleted.</p></div><div><button className="cancel-delete" onClick={() => setDeleteConfirm(false)} disabled={deleting}>Cancel</button><button className="confirm-delete" onClick={() => void removeSelectedDevice()} disabled={deleting}>{deleting ? "Deleting…" : "Delete device"}</button></div></div>}
+            {!selectedIsGateway && <CameraPanel key={selectedDevice.$id} deviceId={selectedDevice.$id}
+              firmwareTarget={selectedDevice.metadata?.firmwareTarget} account={account} tables={tables}
+              endpoint={endpoint} projectId={projectId} databaseId={databaseId} />}
             <div className="range-row"><span>HISTORY RANGE</span><div>{historyRanges.map((range) => <button key={range.key} className={historyRange === range.key ? "active" : ""} onClick={() => setHistoryRange(range.key)} disabled={historyLoading}>{range.label}</button>)}</div></div>
             <div className="chart-card"><header><div><h3>Sensor history</h3><p>Mobile sync · {selectedHistorySeries.reduce((total, series) => total + series.points.length, 0)} selected readings</p></div>{historyLoading && <span className="spinner" />}</header>
               <div className="sensor-picker" aria-label="Sensors displayed in the history chart">{historySeries.map((series) => <label key={series.field} className={selectedSensorFields.includes(series.field) ? "selected" : ""}><input type="checkbox" checked={selectedSensorFields.includes(series.field)} onChange={() => toggleSensor(series.field)} /><i style={{ background: series.color }} />{series.label}<small>{series.points.length}</small></label>)}{!historyLoading && !historySeries.length && <span>No sensor fields found.</span>}</div>

@@ -56,6 +56,11 @@ removeIfPresent(
 );
 await removeTimeseries();
 removeIfPresent(
+  "camera images bucket",
+  ["storage", "get-bucket", "--bucket-id", "camera-images"],
+  ["storage", "delete-bucket", "--bucket-id", "camera-images"],
+);
+removeIfPresent(
   "telemetry database",
   ["tables-db", "get", "--database-id", config.databaseId],
   ["tables-db", "delete", "--database-id", config.databaseId],

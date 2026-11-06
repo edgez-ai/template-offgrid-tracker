@@ -39,6 +39,34 @@ const teams = client ? new Teams(client) : null;
 const tables = client ? new TablesDB(client) : null;
 const sessionCacheKey = `offgrid-tracker:cloud-session:${projectId || "unconfigured"}`;
 
+export type CloudCameraImage = Models.Row & {
+  deviceId: string; fileId: string; width: number; height: number;
+  totalBytes: number; receivedAt: string;
+};
+
+export async function listCloudCameraImages(deviceId: string, cursor?: string): Promise<CloudCameraImage[]> {
+  if (!tables) throw new Error("Cloud access is not configured in this app build.");
+  const result = await tables.listRows<CloudCameraImage>({ databaseId, tableId: "camera-images",
+    queries: [Query.equal("deviceId", [deviceId]), Query.equal("status", ["complete"]),
+      Query.orderDesc("receivedAt"), Query.limit(12), ...(cursor ? [Query.cursorAfter(cursor)] : [])] });
+  return result.rows;
+}
+
+/** A session JWT authorizes private Storage reads; no file token or public URL. */
+export async function cloudCameraImageReader() {
+  if (!account) throw new Error("Sign in to view camera photos.");
+  const jwt = (await account.createJWT()).jwt;
+  return async (fileId: string, signal?: AbortSignal): Promise<string> => {
+    const response = await fetch(`${endpoint}/storage/buckets/camera-images/files/${encodeURIComponent(fileId)}/view`, {
+      headers: { "x-appwrite-project": projectId, "x-appwrite-jwt": jwt }, signal,
+    });
+    if (!response.ok) throw new Error(`Could not load photo (${response.status}).`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 524288 || bytes[0] !== 0xff || bytes[1] !== 0xd8) throw new Error("Invalid camera photo.");
+    return `data:image/jpeg;base64,${fromByteArray(bytes)}`;
+  };
+}
+
 type NativeDevice = {
   $id: string;
   $createdAt?: string;

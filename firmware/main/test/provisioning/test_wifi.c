@@ -123,6 +123,9 @@ int main(void)
     assert(wifi_mqtt_publish("telemetry/sensors", binary, sizeof(binary), 1, false, NULL) > 0);
     assert(!strcmp(published_topic, "projects/project-a/devices/AABBCCDDEEFF/telemetry/sensors"));
     assert(wifi_mqtt_publish("unexpected", binary, sizeof(binary), 1, false, NULL) < 0);
+    const uint8_t camera_mac[] = {2, 0, 4, 0xe1, 0x51, 0x74};
+    assert(wifi_mqtt_publish_block(camera_mac, binary, sizeof(binary)) > 0);
+    assert(!strcmp(published_topic, "projects/project-a/devices/AABBCCDDEEFF/telemetry/blocks/02:00:04:E1:51:74"));
     wifi_event(NULL, WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, NULL);
     assert(wifi_connects == 2 && !wifi_mqtt_ready(NULL) && !gateway_online);
     assert(wifi_mqtt_publish("system/status", binary, sizeof(binary), 1, false, NULL) < 0);

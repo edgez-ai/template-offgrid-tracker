@@ -1,22 +1,27 @@
 #include <zephyr/autoconf.h>
 
-#if defined(CONFIG_OFFGRID_NRF54_CAMERA_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_CAMERA_TEST) || defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
 
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/kernel.h>
+#include <zephyr/pm/device.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/util.h>
 #include <hal/nrf_gpio.h>
+#if defined(CONFIG_OFFGRID_NRF54_CAMERA_TEST)
 #include "camera_ble_transport.h"
+#endif
 #include "camera_resolutions.h"
+#include "vc0706_camera.h"
 
 #define CAMERA_NODE DT_ALIAS(camera0)
 #define CAMERA_RESPONSE_TIMEOUT_MS 2000
@@ -36,6 +41,7 @@ static uint8_t camera_dma_next;
 static volatile int camera_rx_error;
 
 /* Reflected IEEE CRC32, incremental and compatible with Python zlib.crc32. */
+#if defined(CONFIG_OFFGRID_NRF54_CAMERA_TEST)
 static uint32_t camera_crc32_update(uint32_t crc, const uint8_t *data, size_t len)
 {
 	crc = ~crc;
@@ -47,6 +53,7 @@ static uint32_t camera_crc32_update(uint32_t crc, const uint8_t *data, size_t le
 	}
 	return ~crc;
 }
+#endif
 
 static bool camera_rx_pop(uint8_t *value)
 {
@@ -100,6 +107,9 @@ static void camera_uart_event(const struct device *dev, struct uart_event *event
 
 static int camera_uart_rx_start(void)
 {
+	camera_rx_head = camera_rx_tail = 0U;
+	camera_rx_error = 0;
+	camera_rx_overruns = 0U;
 	int rc = uart_callback_set(camera_uart, camera_uart_event, NULL);
 
 	if (rc != 0) {
@@ -344,6 +354,88 @@ static int camera_get_jpeg_length(uint32_t *jpeg_length)
 	return 0;
 }
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+static uint32_t frozen_jpeg_length;
+static bool camera_powered;
+
+void vc0706_camera_stop(void)
+{
+	if (camera_powered) {
+		(void)uart_rx_disable(camera_uart);
+		k_msleep(10);
+		(void)pm_device_action_run(camera_uart, PM_DEVICE_ACTION_SUSPEND);
+	}
+	nrf_gpio_pin_clear(NRF_GPIO_PIN_MAP(1, 9));
+	nrf_gpio_cfg_output(NRF_GPIO_PIN_MAP(1, 9));
+	camera_powered = false;
+	frozen_jpeg_length = 0U;
+}
+
+int vc0706_camera_begin(uint16_t width, uint16_t height, uint32_t *length)
+{
+	if (length == NULL || camera_resolution_find(width, height) == NULL) return -EINVAL;
+	vc0706_camera_stop();
+	(void)camera_power_on();
+	camera_powered = true;
+	k_msleep(CAMERA_STARTUP_DELAY_MS);
+	int rc = pm_device_action_run(camera_uart, PM_DEVICE_ACTION_RESUME);
+	if (rc == -EALREADY || rc == -ENOSYS || rc == -ENOTSUP) rc = 0;
+	if (rc == 0 && !device_is_ready(camera_uart)) rc = -ENODEV;
+	const struct uart_config config = {
+		.baudrate = 921600U, .parity = UART_CFG_PARITY_NONE,
+		.stop_bits = UART_CFG_STOP_BITS_1, .data_bits = UART_CFG_DATA_BITS_8,
+		.flow_ctrl = UART_CFG_FLOW_CTRL_NONE,
+	};
+	if (rc == 0) rc = uart_configure(camera_uart, &config);
+	if (rc == 0) rc = camera_uart_rx_start();
+	if (rc == 0) rc = camera_reset();
+	if (rc == 0) {
+		k_msleep(CAMERA_STARTUP_DELAY_MS);
+		rc = camera_query_version();
+	}
+	if (rc == 0) rc = camera_release_frame();
+	if (rc == 0) rc = camera_set_resolution(width, height);
+	if (rc == 0) {
+		k_msleep(250);
+		rc = camera_capture();
+	}
+	if (rc == 0) rc = camera_get_jpeg_length(&frozen_jpeg_length);
+	if (rc == 0) *length = frozen_jpeg_length;
+	else vc0706_camera_stop();
+	return rc;
+}
+
+int vc0706_camera_read(uint32_t offset, uint8_t *data, size_t length)
+{
+	if (!camera_powered || data == NULL || offset > frozen_jpeg_length ||
+	    length > frozen_jpeg_length - offset) return -EINVAL;
+	static const uint8_t expected[] = {0x76, 0x00, 0x32, 0x00, 0x00};
+	uint8_t command[] = {0x56, 0, 0x32, 0x0c, 0, 0x0a,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff};
+	const uint32_t overruns = camera_rx_overruns;
+	while (length > 0U) {
+		const size_t chunk = MIN(length, CAMERA_READ_CHUNK_SIZE);
+		uint8_t framing[5];
+		sys_put_be32(offset, command + 6);
+		sys_put_be32(chunk, command + 10);
+		camera_drain_rx();
+		camera_write(command, sizeof(command));
+		int rc = camera_read_exact(framing, sizeof(framing), CAMERA_RESPONSE_TIMEOUT_MS);
+		if (rc == 0 && memcmp(framing, expected, sizeof(expected)) != 0) rc = -EBADMSG;
+		if (rc == 0) rc = camera_read_exact(data, chunk, CAMERA_RESPONSE_TIMEOUT_MS);
+		if (rc == 0) rc = camera_read_exact(framing, sizeof(framing), CAMERA_RESPONSE_TIMEOUT_MS);
+		if (rc == 0 && memcmp(framing, expected, sizeof(expected)) != 0) rc = -EBADMSG;
+		if (rc == 0 && camera_rx_overruns != overruns) rc = -EOVERFLOW;
+		if (rc != 0) return rc;
+		data += chunk;
+		offset += chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_CAMERA_TEST)
 static int camera_read_and_send_jpeg(uint32_t jpeg_length, uint16_t width,
 				     uint16_t height)
 {
@@ -532,3 +624,4 @@ int main(void)
 }
 
 #endif /* CONFIG_OFFGRID_NRF54_CAMERA_TEST */
+#endif /* Camera test or sensor */

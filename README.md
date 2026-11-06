@@ -83,7 +83,8 @@ Managed deployments inject `APP_NAME`, `DOMAIN_SUFFIX`, `APPWRITE_ENDPOINT`,
 `APPWRITE_PROJECT_ID`, `APPWRITE_PROJECT_NAME`, and `APPWRITE_API_KEY`. Run
 `npm run deploy` only when you intend to reconcile a remote Appwrite project;
 `npm run clean` removes the template Site, Function, tables, Time Series store,
-proxy rules, and auth platforms while preserving project users and Devices.
+camera Storage bucket (including saved photos), proxy rules, and auth platforms
+while preserving project users and Devices.
 
 For a local mobile build connected to that deployment, copy `app/.env.example`
 to `app/.env` and set its public `APPWRITE_PROJECT_ID`. Never put the Appwrite
@@ -153,6 +154,7 @@ pio run -e heltec-hc33
 pio run -e edgez-nrf54l15-fgh200m-companion
 pio run -e edgez-nrf54l15-fgh200m-sensor
 pio run -e edgez-nrf54l15-vc0706-camera-test
+pio run -e edgez-nrf54l15-vc0706-camera-sensor
 ```
 
 Supported development environments are:
@@ -168,6 +170,7 @@ Supported development environments are:
 | `edgez-nrf54l15-fgh200m-companion` | FGH200M BLE companion and full mesh node | MM8108 over SPI | J-Link |
 | `edgez-nrf54l15-fgh200m-sensor` | FGH200M low-power connectionless sensor; no BLE | MM8108 over SPI | OpenOCD/CMSIS-DAP |
 | `edgez-nrf54l15-vc0706-camera-test` | nRF54L15 + TTL camera; BLE-triggered JPEG with selectable resolution to Python, UART 921600 | Disabled | OpenOCD/CMSIS-DAP |
+| `edgez-nrf54l15-vc0706-camera-sensor` | nRF54L15 + VC0706 camera; discovery, periodic JPEG blocks, interval/resolution downlink | MM8108 over SPI | OpenOCD/CMSIS-DAP |
 
 Release-style builds use the `edgez-halow-mesh` public headers and protected
 prebuilt libraries already pinned inside the platform submodules. To diagnose
@@ -239,6 +242,31 @@ pio run -e edgez-nrf54l15-fgh200m-sensor -t upload \
 ```
 
 The companion and factory-partition provisioning flows continue to use J-Link.
+
+### VC0706 camera sensor and photo gallery
+
+The camera sensor defaults to a **640 × 480** photo every **60 seconds**.
+It uses factory discovery and an accepted profile, with BLE disabled. In the
+mobile device settings, choose **Use camera settings** to select the capture
+interval and resolution; the website offers **Camera controls**. The existing
+`sensor.settings` downlink carries `samplingIntervalMs` and
+`blockSamplingCount`: `0` disables capture, and `1–9` select resolutions.
+The complete [resolution index table and wiring/build instructions](firmware/README.md#vc0706-sensor-resolution-indices)
+include all modes through 2304 × 1296.
+
+An updated HC33 gateway with direct Wi-Fi MQTT forwards the image chunks.
+The Function validates and reassembles them, writes the JPEG to the private
+Appwrite Storage **camera-images** bucket, and records its device, receive
+time, dimensions and file ID in the **camera-images** table. Web and mobile
+show a paginated device photo gallery, with a larger photo view; web also
+offers **Save JPEG**. Storage files and metadata inherit the source Device's
+read permissions, and each viewer uses its authenticated Appwrite session.
+Staging rows are private to the server and expire after 24 hours; completed
+photos remain in Storage.
+
+Deploying these cloud changes creates the bucket and two tables and grants
+the ingestion Function `files.read`/`files.write`. Its scheduled cleanup runs
+every 15 minutes. Firmware/client builds alone do not install these resources.
 
 ### nRF54 factory identity
 

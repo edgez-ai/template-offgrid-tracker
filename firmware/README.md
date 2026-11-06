@@ -198,6 +198,101 @@ Receiver validation tests: `python3 -m unittest discover -s scripts/tests -p tes
 The old `vc0706_hex_to_jpeg.py` utility remains available for saved logs from
 the earlier RTT-hex firmware.
 
+### VC0706 sensor resolution indices
+
+Build the camera sensor environment with:
+
+```sh
+pio run -e edgez-nrf54l15-vc0706-camera-sensor
+pio run -e edgez-nrf54l15-vc0706-camera-sensor -t upload
+```
+
+This environment uses the same immutable factory identity and regulatory
+country/channel bootstrap as the FGH200M sensor. A new device advertises
+discovery requests; accept it into a profile from the mobile app. There are no
+compiled operational mesh credentials. A previously accepted profile is reused
+from NVS. Flashing the application does not erase the factory identity or
+profile; remove/reprovision the stored profile separately to join a different
+mesh. BLE is disabled in this sensor environment; the separate
+`edgez-nrf54l15-vc0706-camera-test` environment retains BLE capture.
+
+Connect camera RX to P1.12, camera TX to P1.11 and switched power to P1.09.
+TX/RX are defined in `zephyr/boards/edgez_nrf54l15_vc0706_camera.overlay`,
+which the sensor overlay includes. Change its active and sleep pin groups
+together when rewiring. The sensor powers the camera only for a capture,
+waits four seconds, configures UART at **921600 8N1**, resets it on each power
+cycle, waits four more seconds, and selects the resolution before taking the
+photo. The frozen JPEG remains in camera memory for hashing and selective
+retransmission, avoiding a full-frame allocation on the nRF54L15. Power is
+removed after completion or failure. Maximum JPEG size is **512 KiB**.
+
+The VC0706 HaLow sensor uses the existing app sensor settings. **Sampling
+interval** controls the time between capture cycles (default **60 seconds**).
+**Block sampling count** (`blockSamplingCount`) selects the camera resolution:
+
+| Index | Resolution |
+| --- | --- |
+| `0` | Capture disabled; discovery, beacons and downlink handling continue |
+| `1` | 160 × 120 |
+| `2` | 320 × 240 |
+| `3` | **640 × 480 (default)** |
+| `4` | 1024 × 768 |
+| `5` | 1280 × 720 |
+| `6` | 1280 × 960 |
+| `7` | 1600 × 1200 |
+| `8` | 1920 × 1080 |
+| `9` | 2304 × 1296 |
+
+Indices `10–32` are invalid for camera sensors. The index selects a resolution,
+not the number of image chunks; the captured JPEG size determines the chunks
+needed for its block transfer. Camera model/firmware support still applies.
+
+For example, the existing reliable `sensor.settings` downlink payload
+`{"samplingIntervalMs":60000,"blockSamplingCount":5}` requests one 1280 × 720
+photo per minute. Set `blockSamplingCount` to `0` to disable capture. Accepted
+settings are persisted and acknowledged through the normal sensor downlink path.
+The BLE camera diagnostic continues to accept explicit width/height commands.
+
+After a normal beacon/downlink exchange succeeds, a provisioned sensor sends
+the JPEG as **EZBT v4 data chunks, kind/index 4**. The session ID, total length,
+byte offsets and FNV-1a digest identify and validate one photo; the JPEG bytes
+are the payload, without a numeric EZSB sample header. A sliding window handles
+selective retransmission. Upload attempts are bounded to three minutes; a
+failed capture is abandoned and a new capture is tried on the next cycle. Long
+captures/uploads may extend the effective interval.
+
+Use the updated HC33 gateway with its direct Wi-Fi MQTT connection configured.
+It forwards each binary chunk with QoS 1 to
+`projects/<project>/devices/<gateway-serial>/telemetry/blocks/<source-HaLow-MAC>`.
+The gateway acknowledges chunks after accepting them into its bounded MQTT
+outbox; this is not a cloud persistence acknowledgement. MQTT must be connected
+for chunk acceptance. The current camera forwarding path requires direct MQTT
+on the receiving gateway; multi-hop MQTT forwarding is not implemented here.
+
+The Function reassembles chunks across independent executions, validates
+length, digest and JPEG dimensions, and saves the verified `.jpg` in Appwrite
+Storage's private `camera-images` bucket. The `camera-images` table contains
+device/session metadata and the file ID. Both the row and file inherit only
+the source Device's read permissions. Server-only `camera-image-parts` rows
+stage chunks; the Function's 15-minute schedule cleans expired staging after
+24 hours. Completed photos are retained. Deploy the updated Appwrite plan or
+installer before uploading photos; the Function needs `files.read` and
+`files.write` in addition to its existing scopes.
+
+Select the device in the website or cloud-connected mobile app to view its
+photos. Mobile **Use camera settings** and web **Camera controls** expose the
+interval and resolution choices. On factory identities with a generic firmware
+target, choose camera settings manually until a photo identifies the camera.
+Photo timestamps are cloud receive times; the camera has no capture clock.
+
+For offline debugging, save raw MQTT binary payloads for **one source and one
+session**, then reconstruct a JPEG locally:
+
+```sh
+python3 scripts/camera_blocks_to_jpeg.py photo.jpg chunks/*.bin
+python3 -m unittest discover -s scripts/tests -p 'test_camera*.py'
+```
+
 ### HT-HC33 mesh power-save experiment
 
 The `heltec-hc33-mesh-ps` environment waits until the HT-HC33 has established

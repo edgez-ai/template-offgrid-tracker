@@ -11,12 +11,13 @@ struct camera_resolution {
 	uint8_t code;
 };
 
-/* Putal V1.14 modes up to the attached 3 MP camera's native resolution.
- * Firmware support still depends on the camera model; the receiver validates
- * the actual JPEG dimensions instead of assuming a set-command succeeded.
- */
-static inline const struct camera_resolution *camera_resolution_find(
-	uint16_t width, uint16_t height)
+#define CAMERA_RESOLUTION_DEFAULT_INDEX 3U
+#define CAMERA_RESOLUTION_MAX_INDEX 9U
+
+/* Index zero disables capture. These indices are the sensor.settings
+ * blockSamplingCount values for the VC0706 sensor environment. */
+static inline const struct camera_resolution *camera_resolution_by_index(
+	uint16_t index)
 {
 	static const struct camera_resolution modes[] = {
 		{160, 120, 0x04, 0x22},
@@ -29,9 +30,21 @@ static inline const struct camera_resolution *camera_resolution_find(
 		{1920, 1080, 0x05, 0x66},
 		{2304, 1296, 0x05, 0x88},
 	};
-	for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
-		if (modes[i].width == width && modes[i].height == height) {
-			return &modes[i];
+	return index >= 1U && index <= CAMERA_RESOLUTION_MAX_INDEX ?
+		&modes[index - 1U] : NULL;
+}
+
+/* Putal V1.14 modes up to the attached 3 MP camera's native resolution.
+ * Firmware support still depends on the camera model; the receiver validates
+ * the actual JPEG dimensions instead of assuming a set-command succeeded.
+ */
+static inline const struct camera_resolution *camera_resolution_find(
+	uint16_t width, uint16_t height)
+{
+	for (uint16_t index = 1U; index <= CAMERA_RESOLUTION_MAX_INDEX; index++) {
+		const struct camera_resolution *mode = camera_resolution_by_index(index);
+		if (mode->width == width && mode->height == height) {
+			return mode;
 		}
 	}
 	return NULL;

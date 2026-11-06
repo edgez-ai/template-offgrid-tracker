@@ -1,0 +1,7 @@
+#include "edgez_nrf54l15_vc0706_camera.overlay"
+
+/* Keep the camera UART/power wiring from the proven BLE diagnostic, and
+ * enable the FGH200M for connectionless discovery and image block uploads. */
+&morse_wifi {
+	status = "okay";
+};

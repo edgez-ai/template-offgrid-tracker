@@ -4,6 +4,7 @@ import { installDatabase } from "./database.mjs";
 import { installFunction } from "./function.mjs";
 import { installSite } from "./site.mjs";
 import { installTimeseries } from "./timeseries.mjs";
+import { installCamera } from "./camera.mjs";
 
 configureClient();
 // Reconcile the project-scoped Time Series Store first. This keeps it at the
@@ -12,5 +13,6 @@ configureClient();
 await installTimeseries();
 installAuth();
 installDatabase();
+await installCamera();
 installFunction();
 installSite();

@@ -1,4 +1,5 @@
-import { Client, ID, Query, TablesDB } from "node-appwrite";
+import { Client, ID, Query, Storage, TablesDB } from "node-appwrite";
+import { cleanupCameraStaging, isCameraChunk, persistCameraChunk } from "./camera-images.js";
 
 const DATABASE_ID = process.env.OFFGRID_TRACKER_DATABASE_ID || process.env.DATABASE_ID;
 const TELEMETRY_TABLE_ID = process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
@@ -545,6 +546,19 @@ export default async function main({ req, res, error, log = () => {} }) {
 
   const body = bodyOf(req);
 
+  if (req.headers["x-appwrite-trigger"] === "schedule") {
+    try {
+      const client = new Client().setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
+        .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID).setKey(req.headers["x-appwrite-key"]);
+      const deletedParts = await cleanupCameraStaging({ tables: new TablesDB(client),
+        storage: new Storage(client), databaseId: DATABASE_ID });
+      return json(res, { deletedParts });
+    } catch (caught) {
+      error(caught instanceof Error ? caught.message : String(caught));
+      return json(res, { error: "Could not clean camera staging" }, 500);
+    }
+  }
+
   const removedDeviceId = deletedDeviceId(req);
   if (removedDeviceId) {
     const client = new Client()
@@ -604,18 +618,24 @@ export default async function main({ req, res, error, log = () => {} }) {
       if (!target || !gatewayCanRelayForTarget(gateway, target)) {
         return json(res, { error: "Sensor block source does not share this gateway's access scope" }, 403);
       }
-      const block = decodeSensorBlock(body.payload, body.payload_encoding);
       const receivedAt = new Date().toISOString();
       const readPermissions = (target.$permissions || []).filter((permission) => permission.startsWith("read("));
       if (!readPermissions.length) {
         return json(res, { error: "Appwrite device has no owner read permission" }, 409);
       }
-      await writeTimeseries(req, blockLines(target, block, receivedAt));
       const client = new Client()
         .setEndpoint(process.env.APPWRITE_FUNCTION_API_ENDPOINT)
         .setProject(process.env.APPWRITE_FUNCTION_PROJECT_ID)
         .setKey(req.headers["x-appwrite-key"]);
       const tables = new TablesDB(client);
+      if (isCameraChunk(body.payload, body.payload_encoding)) {
+        const result = await persistCameraChunk({ tables, storage: new Storage(client),
+          databaseId: DATABASE_ID, target, gateway, encoded: body.payload,
+          encoding: body.payload_encoding, permissions: readPermissions, now: receivedAt });
+        return json(res, { accepted: true, deviceId: target.$id, ...result }, result.complete ? 201 : 202);
+      }
+      const block = decodeSensorBlock(body.payload, body.payload_encoding);
+      await writeTimeseries(req, blockLines(target, block, receivedAt));
       await upsertLatestTelemetry(tables, target, {
         deviceId: target.$id,
         profileId: target.metadata?.profileId,

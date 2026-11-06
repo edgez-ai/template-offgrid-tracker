@@ -16,7 +16,7 @@
                 "devices.*.mqtt.message.publish",
                 "devices.*.delete"
             ],
-            "schedule": "",
+            "schedule": "*/15 * * * *",
             "timeout": 15,
             "enabled": true,
             "logging": true,
@@ -26,7 +26,9 @@
                 "devices.write",
                 "rows.read",
                 "rows.write",
-                "timeseries.write"
+                "timeseries.write",
+                "files.read",
+                "files.write"
             ],
             "vars": [
                 {
@@ -741,6 +743,188 @@
                     ]
                 }
             ]
+        },
+        {
+            "$id": "camera-images",
+            "databaseId": "offgrid-tracker",
+            "name": "Camera images",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "deviceId",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 36
+                },
+                {
+                    "key": "gatewayDeviceId",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 36
+                },
+                {
+                    "key": "serial",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 36
+                },
+                {
+                    "key": "session",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 8
+                },
+                {
+                    "key": "digest",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 8
+                },
+                {
+                    "key": "status",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 16
+                },
+                {
+                    "key": "fileId",
+                    "type": "varchar",
+                    "required": false,
+                    "array": false,
+                    "size": 36
+                },
+                {
+                    "key": "receivedAt",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 40
+                },
+                {
+                    "key": "expiresAt",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 40
+                },
+                {
+                    "key": "totalBytes",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "min": 0,
+                    "max": 2147483647
+                },
+                {
+                    "key": "width",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "min": 0,
+                    "max": 2147483647
+                },
+                {
+                    "key": "height",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "min": 0,
+                    "max": 2147483647
+                },
+                {
+                    "key": "lastChunkSeen",
+                    "type": "boolean",
+                    "required": true,
+                    "array": false
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "device-status-time",
+                    "type": "key",
+                    "attributes": [
+                        "deviceId",
+                        "status",
+                        "receivedAt"
+                    ],
+                    "orders": [
+                        "ASC",
+                        "ASC",
+                        "DESC"
+                    ]
+                },
+                {
+                    "key": "staging-expiry",
+                    "type": "key",
+                    "attributes": [
+                        "status",
+                        "expiresAt"
+                    ]
+                }
+            ]
+        },
+        {
+            "$id": "camera-image-parts",
+            "databaseId": "offgrid-tracker",
+            "name": "Camera image staging",
+            "permissions": [],
+            "rowSecurity": true,
+            "enabled": true,
+            "columns": [
+                {
+                    "key": "imageId",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 36
+                },
+                {
+                    "key": "offset",
+                    "type": "integer",
+                    "required": true,
+                    "array": false,
+                    "min": 0,
+                    "max": 2147483647
+                },
+                {
+                    "key": "data",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 1468
+                },
+                {
+                    "key": "expiresAt",
+                    "type": "varchar",
+                    "required": true,
+                    "array": false,
+                    "size": 40
+                }
+            ],
+            "indexes": [
+                {
+                    "key": "image-id",
+                    "type": "key",
+                    "attributes": [
+                        "imageId"
+                    ]
+                },
+                {
+                    "key": "staging-expiry",
+                    "type": "key",
+                    "attributes": [
+                        "expiresAt"
+                    ]
+                }
+            ]
         }
     ],
     "authMethods": [
@@ -798,6 +982,22 @@
                 "read(\"users\")"
             ],
             "enabled": true
+        }
+    ],
+    "buckets": [
+        {
+            "$id": "camera-images",
+            "name": "Camera images",
+            "permissions": [],
+            "fileSecurity": true,
+            "enabled": true,
+            "maximumFileSize": 524288,
+            "allowedFileExtensions": [
+                "jpg"
+            ],
+            "compression": "none",
+            "encryption": true,
+            "antivirus": true
         }
     ]
 }

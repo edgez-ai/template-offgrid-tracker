@@ -101,9 +101,20 @@ config OFFGRID_NRF54_CAMERA_TEST
       UART, captures one 320x240 JPEG, and writes the complete image to the
       RTT console as hexadecimal text.
 
+config OFFGRID_NRF54_SENSOR_CAMERA
+    bool "VC0706 JPEG camera over the discovery/HaLow sensor block transport"
+    depends on OFFGRID_NRF54_ROLE_SENSOR
+    depends on WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY
+    default n
+    help
+      Replace GPS/IMU sampling with VC0706 UART capture. Reuse zero-touch
+      discovery, persisted sensor.settings downlinks and PAwR bulk transfers.
+      The default interval is 60 seconds and blockSamplingCount is a camera
+      resolution index: zero disables capture, 1 through 9 select dimensions.
+
 config OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE
     bool "Keep HaLow initialized in chip sleep between sensor reports"
-    depends on OFFGRID_NRF54_IMU_TIMER_DRAIN
+    depends on OFFGRID_NRF54_IMU_TIMER_DRAIN || OFFGRID_NRF54_SENSOR_CAMERA
     depends on WIFI_MORSEMICRO_POWERSAVE
     default n
     help

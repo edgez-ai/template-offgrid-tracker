@@ -13,6 +13,9 @@
 #include "edgez_pawr_bulk.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_rf_api.h"
+#if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+#include "wifi_mqtt.h"
+#endif
 
 #define PAWR_QUEUE_DEPTH 4U
 
@@ -29,6 +32,34 @@ static QueueHandle_t action_queue;
 static TaskHandle_t worker_task;
 static halow_pawr_beacon_callback_t beacon_callback;
 static void *beacon_callback_arg;
+
+#if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+static struct edgez_pawr_bulk_receiver block_receiver;
+
+static bool block_send_ack(void *ctx, const uint8_t destination[6], const uint8_t *data, size_t length)
+{
+    (void)ctx;
+    return edgez_halow_mesh_transmit_pawr_control(destination, data, length) == ESP_OK;
+}
+
+static bool block_forward(void *ctx, const struct edgez_pawr_bulk_chunk *chunk)
+{
+    struct edgez_pawr_bulk_receiver *receiver = ctx;
+    uint8_t encoded[EDGEZ_PAWR_BULK_HEADER_SIZE + EDGEZ_PAWR_BULK_MAX_CHUNK_DATA];
+    size_t length = edgez_pawr_bulk_encode(encoded, sizeof(encoded), chunk);
+    /* No bit is acknowledged until the connected MQTT client accepts the
+     * complete binary chunk into its bounded QoS 1 outbox. */
+    return length > 0 && wifi_mqtt_publish_block(receiver->peer, encoded, length) >= 0;
+}
+
+static void block_done(void *ctx, const struct edgez_pawr_bulk_transfer *transfer, bool success)
+{
+    (void)ctx;
+    ESP_LOGI(TAG, "Sensor block transfer session=%lu kind=%u bytes=%lu complete=%u",
+        (unsigned long)transfer->session_id, transfer->test_index,
+        (unsigned long)transfer->total_length, success);
+}
+#endif
 
 #if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
 struct pawr_bulk_receive_state {
@@ -183,6 +214,9 @@ static void pawr_worker(void *arg)
                                    action.length)) {
             continue;
         }
+#elif CONFIG_DAB_DIRECT_MQTT
+        if (edgez_pawr_bulk_receiver_feed(&block_receiver, action.source_mac,
+                                          action.payload, action.length)) continue;
 #endif
         if (beacon_callback != NULL) {
             beacon_callback(action.source_mac,
@@ -242,6 +276,9 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
 #if CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
         bulk_state.receiver.config.compressed_ssid = edgez_pawr_compress_ssid(
             (const uint8_t *)mesh_id, strlen(mesh_id));
+#elif CONFIG_DAB_DIRECT_MQTT
+        block_receiver.config.compressed_ssid = edgez_pawr_compress_ssid(
+            (const uint8_t *)mesh_id, strlen(mesh_id));
 #endif
         return ESP_OK;
     }
@@ -262,6 +299,17 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
         .ctx = &bulk_state,
     };
     if (!edgez_pawr_bulk_receiver_init(&bulk_state.receiver, &bulk_config)) {
+        vQueueDelete(action_queue);
+        action_queue = NULL;
+        return ESP_ERR_INVALID_STATE;
+    }
+#endif
+#if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+    const struct edgez_pawr_bulk_receiver_config block_config = {
+        .compressed_ssid = edgez_pawr_compress_ssid((const uint8_t *)mesh_id, strlen(mesh_id)),
+        .send = block_send_ack, .data = block_forward, .done = block_done, .ctx = &block_receiver,
+    };
+    if (!edgez_pawr_bulk_receiver_init(&block_receiver, &block_config)) {
         vQueueDelete(action_queue);
         action_queue = NULL;
         return ESP_ERR_INVALID_STATE;

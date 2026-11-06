@@ -104,6 +104,17 @@ int wifi_mqtt_publish(const char *topic, const void *payload, size_t length,
                                     qos, retain, true);
 }
 
+int wifi_mqtt_publish_block(const uint8_t source_mac[6], const void *payload, size_t length)
+{
+    if (!wifi_mqtt_ready(NULL) || !source_mac || !payload || length == 0 || length > INT_MAX) return -1;
+    char topic[224];
+    const int count = snprintf(topic, sizeof(topic),
+        "%s/telemetry/blocks/%02X:%02X:%02X:%02X:%02X:%02X", topic_prefix,
+        source_mac[0], source_mac[1], source_mac[2], source_mac[3], source_mac[4], source_mac[5]);
+    if (count < 0 || (size_t)count >= sizeof(topic)) return -1;
+    return esp_mqtt_client_enqueue(client, topic, payload, (int)length, 1, false, true);
+}
+
 esp_err_t wifi_mqtt_start(const halow_provisioning_config_t *config)
 {
     if (!config || !config->wifi_upstream || !config->client_id[0] ||

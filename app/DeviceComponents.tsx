@@ -12,6 +12,10 @@ import { beaconColorValues, beaconIconColors, beaconIconNames, beaconIconTypes }
 import type { BeaconIconColor, BeaconIconType } from "./beacon-options";
 import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
+import { CameraGallery } from "./CameraGallery";
+
+const cameraResolutions = ["Capture disabled", "160 × 120", "320 × 240", "640 × 480", "1024 × 768",
+  "1280 × 720", "1280 × 960", "1600 × 1200", "1920 × 1080", "2304 × 1296"];
 
 const swipeActionWidth = 92;
 const deviceMarkerStyles = ["gateway", "sensor", "tracker", "beacon", "relay", ...beaconIconTypes] as const;
@@ -51,6 +55,7 @@ export function DeviceDetail({
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState("");
   const [settingsError, setSettingsError] = useState("");
+  const [cameraMode, setCameraMode] = useState(false);
   const supportsSensorSettings = device !== null && device.kind !== "h7608" &&
     device.deviceType.trim().toLowerCase() !== "gateway";
 
@@ -67,9 +72,14 @@ export function DeviceDetail({
   }, [device]);
 
   useEffect(() => {
+    setCameraMode(/vc0706|camera/i.test(device?.firmwareTarget || ""));
+  }, [device?.id, device?.firmwareTarget]);
+
+  useEffect(() => {
     let cancelled = false;
-    setSamplingIntervalSeconds("15");
-    setBlockSamplingCount("0");
+    const camera = /vc0706|camera/i.test(device?.firmwareTarget || "");
+    setSamplingIntervalSeconds(camera ? "60" : "15");
+    setBlockSamplingCount(camera ? "3" : "0");
     setSettingsStatus("");
     setSettingsError("");
     if (!device || !editable || !supportsSensorSettings) return () => { cancelled = true; };
@@ -90,7 +100,7 @@ export function DeviceDetail({
       if (!cancelled) setSettingsLoading(false);
     });
     return () => { cancelled = true; };
-  }, [device, editable, supportsSensorSettings]);
+  }, [device?.id, editable, supportsSensorSettings]);
 
   if (!device) return null;
   const canMessage = liveNode
@@ -128,8 +138,9 @@ export function DeviceDetail({
     const seconds = Number(samplingIntervalSeconds);
     const samples = Number(blockSamplingCount);
     if (!Number.isInteger(seconds) || seconds < 1 || seconds > 3600 ||
-        !Number.isInteger(samples) || samples < 0 || samples > 32) {
-      setSettingsError("Use a 1-3600 second interval and a block sampling count from 0 to 32.");
+        !Number.isInteger(samples) || samples < 0 || samples > (cameraMode ? 9 : 32)) {
+      setSettingsError(cameraMode ? "Choose a resolution and use a 1-3600 second interval."
+        : "Use a 1-3600 second interval and a block sampling count from 0 to 32.");
       return;
     }
     setSettingsSaving(true);
@@ -171,20 +182,35 @@ export function DeviceDetail({
           </View>
           {editable && supportsSensorSettings ? <View style={styles.settingsCard}>
             <View style={styles.settingsHeader}>
-              <View><Text style={styles.settingsTitle}>SENSOR SETTINGS</Text><Text style={styles.settingsHint}>Delivered reliably after the next beacon</Text></View>
+              <View><Text style={styles.settingsTitle}>{cameraMode ? "CAMERA SETTINGS" : "SENSOR SETTINGS"}</Text><Text style={styles.settingsHint}>Delivered reliably after the next beacon</Text></View>
               {settingsLoading ? <ActivityIndicator size="small" color="#0a8c87" /> : null}
             </View>
-            <Text style={styles.editLabel}>SAMPLING INTERVAL · SECONDS</Text>
+            <Pressable onPress={() => {
+              setCameraMode(!cameraMode);
+              if (!cameraMode && settingsStatus === "DEVICE DEFAULTS") { setSamplingIntervalSeconds("60"); setBlockSamplingCount("3"); }
+            }} accessibilityRole="button"><Text style={styles.outlineText}>{cameraMode ? "USE SENSOR SETTINGS" : "USE CAMERA SETTINGS"}</Text></Pressable>
+            <Text style={styles.editLabel}>{cameraMode ? "PHOTO INTERVAL · SECONDS" : "SAMPLING INTERVAL · SECONDS"}</Text>
             <TextInput style={styles.editInput} value={samplingIntervalSeconds} onChangeText={setSamplingIntervalSeconds} keyboardType="number-pad" maxLength={4} placeholder="15" placeholderTextColor="#829693" />
-            <Text style={styles.editLabel}>BLOCK SAMPLING COUNT</Text>
-            <TextInput style={styles.editInput} value={blockSamplingCount} onChangeText={setBlockSamplingCount} keyboardType="number-pad" maxLength={2} placeholder="0" placeholderTextColor="#829693" />
-            <Text style={styles.settingsHint}>0 disables block sampling. A positive value caps samples collected before HaLow starts; upload chunks follow the actual encoded data size. Beacon and downlink ACK remain enabled.</Text>
+            <Text style={styles.editLabel}>{cameraMode ? "PHOTO RESOLUTION" : "BLOCK SAMPLING COUNT"}</Text>
+            {cameraMode ? <View style={styles.markerStyles} accessibilityRole="radiogroup">
+              {cameraResolutions.map((label, index) => <Pressable key={index} onPress={() => setBlockSamplingCount(String(index))}
+                accessibilityRole="radio" accessibilityState={{ selected: Number(blockSamplingCount) === index }}
+                style={[styles.markerStyle, Number(blockSamplingCount) === index && styles.markerStyleSelected]}>
+                <Text style={[styles.markerStyleText, Number(blockSamplingCount) === index && styles.markerStyleTextSelected]}>{label}</Text>
+              </Pressable>)}
+            </View> : <TextInput style={styles.editInput} value={blockSamplingCount} onChangeText={setBlockSamplingCount} keyboardType="number-pad" maxLength={2} placeholder="0" placeholderTextColor="#829693" />}
+            <Text style={styles.settingsHint}>{cameraMode ? "Capture disabled keeps the device available for beacons and settings updates."
+              : "0 disables block sampling. A positive value caps samples collected before HaLow starts; upload chunks follow the actual encoded data size. Beacon and downlink ACK remain enabled."}</Text>
             {settingsStatus ? <Text style={styles.settingsStatus}>{settingsStatus}</Text> : null}
             {settingsError ? <Text style={styles.editError}>{settingsError}</Text> : null}
             <Pressable style={[styles.primary, (settingsSaving || settingsLoading) && styles.buttonDisabled]} onPress={() => void saveSensorSettings()} disabled={settingsSaving || settingsLoading} accessibilityRole="button">
-              {settingsSaving ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.primaryText}>UPDATE SENSOR</Text>}
+              {settingsSaving ? <ActivityIndicator size="small" color="white" /> : <Text style={styles.primaryText}>{cameraMode ? "UPDATE CAMERA" : "UPDATE SENSOR"}</Text>}
             </Pressable>
           </View> : null}
+          {cloudStatus && supportsSensorSettings ? <CameraGallery key={device.id} deviceId={device.id} onImagesAvailable={() => {
+            setCameraMode(true);
+            if (settingsStatus === "DEVICE DEFAULTS") { setSamplingIntervalSeconds("60"); setBlockSamplingCount("3"); }
+          }} /> : null}
           {editable && !editing ? <Pressable style={styles.outline} onPress={() => setEditing(true)} accessibilityRole="button"><Text style={styles.outlineText}>EDIT DEVICE</Text></Pressable> : null}
           {editable && editing ? <View style={styles.editCard}>
             <Text style={styles.editLabel}>NAME</Text>

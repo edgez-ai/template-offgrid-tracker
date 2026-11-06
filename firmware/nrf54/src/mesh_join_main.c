@@ -48,6 +48,10 @@
 #include "edgez_reboot.h"
 #include "livestocking_config.h"
 #include "usb_control.pb.h"
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+#include "camera_resolutions.h"
+#include "vc0706_camera.h"
+#endif
 
 #ifndef EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING
 #define EDGEZ_PAWR_RESPONSE_DOWNLINK_PENDING 0x01U
@@ -94,7 +98,11 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #define EDGEZ_SENSOR_PENDING_QUEUE_DEPTH 2U
 #define EDGEZ_SENSOR_DOWNLINK_HEADER_LENGTH 12U
 #define EDGEZ_SENSOR_DOWNLINK_SETTINGS_KEY "edgez/downlink_ack/v1"
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+#define EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY "edgez/camera_settings/v2"
+#else
 #define EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY "edgez/sensor_settings/v2"
+#endif
 #define EDGEZ_SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
 #define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 4U
 #define EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS 2000U
@@ -160,7 +168,7 @@ struct sensor_pending_packet {
 K_MSGQ_DEFINE(sensor_pending_packet_queue, sizeof(struct sensor_pending_packet),
 	      EDGEZ_SENSOR_PENDING_QUEUE_DEPTH, 4);
 #if defined(CONFIG_OFFGRID_NRF54_ROLE_SENSOR)
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST) || defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
 static struct edgez_pawr_bulk_sender sensor_bulk_sender;
 #endif
 static uint8_t sensor_bulk_ack_payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
@@ -214,7 +222,11 @@ static bool sensor_settings_record_valid(
 	return record != NULL && record->magic == EDGEZ_SENSOR_SETTINGS_MAGIC &&
 		record->version == EDGEZ_SENSOR_SETTINGS_VERSION &&
 		record->length == sizeof(*record) &&
-		edgez_sensor_settings_valid(&record->value);
+		edgez_sensor_settings_valid(&record->value)
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+		&& record->value.block_sampling_count <= CAMERA_RESOLUTION_MAX_INDEX
+#endif
+		;
 }
 
 static void sensor_settings_set_default(uint32_t interval_ms)
@@ -225,7 +237,12 @@ static void sensor_settings_set_default(uint32_t interval_ms)
 		.length = sizeof(sensor_settings),
 		.value = {
 			.sampling_interval_ms = interval_ms,
-			.block_sampling_count = 0U,
+			.block_sampling_count =
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+				CAMERA_RESOLUTION_DEFAULT_INDEX,
+#else
+				0U,
+#endif
 		},
 	};
 #if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
@@ -245,6 +262,9 @@ static void sensor_settings_load(void)
 	uint32_t default_interval_ms = profile.beacon_interval_seconds != 0U ?
 		profile.beacon_interval_seconds * 1000U :
 		EDGEZ_SENSOR_UPDATE_INTERVAL_MS;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+	default_interval_ms = 60000U;
+#endif
 	ssize_t length = settings_load_one(EDGEZ_SENSOR_BEHAVIOR_SETTINGS_KEY,
 		&loaded, sizeof(loaded));
 
@@ -285,7 +305,8 @@ int edgez_sensor_handle_downlink(
 		ARRAY_SIZE(sensor_settings_json_descr), &request);
 	if (fields != BIT_MASK(ARRAY_SIZE(sensor_settings_json_descr)) ||
 		request.sampling_interval_ms < 0 ||
-		request.block_sampling_count < 0) {
+		request.block_sampling_count < 0 ||
+		request.block_sampling_count > EDGEZ_SENSOR_SETTINGS_MAX_SAMPLES_PER_BLOCK) {
 		return -EINVAL;
 	}
 	struct sensor_settings_record updated = {
@@ -302,6 +323,9 @@ int edgez_sensor_handle_downlink(
 	if (!edgez_sensor_settings_valid(&updated.value)) {
 		return -ERANGE;
 	}
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+	if (updated.value.block_sampling_count > CAMERA_RESOLUTION_MAX_INDEX) return -ERANGE;
+#endif
 	if (IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY) &&
 	    (updated.value.sampling_interval_ms != 60000U ||
 	     updated.value.block_sampling_count != 0U)) {
@@ -1683,6 +1707,121 @@ static int sensor_send_imu_block(uint32_t wake_interval_ms)
 }
 #endif
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+struct camera_bulk_source {
+	uint32_t length;
+	uint32_t interval_ms;
+	int read_error;
+};
+
+static size_t camera_bulk_read(void *ctx, uint32_t offset, uint8_t *output,
+			      size_t capacity)
+{
+	struct camera_bulk_source *source = ctx;
+	if (offset >= source->length) return 0U;
+	size_t length = MIN(capacity, source->length - offset);
+	source->read_error = vc0706_camera_read(offset, output, length);
+	return source->read_error == 0 ? length : 0U;
+}
+
+static bool camera_bulk_send(void *ctx, const uint8_t *payload, size_t length)
+{
+	struct camera_bulk_source *source = ctx;
+	return sensor_pawr_queue_bulk_chunk(payload, length, source->interval_ms) == 0;
+}
+
+static bool camera_bulk_feed_ack(void)
+{
+	uint8_t payload[EDGEZ_PAWR_BULK_CONTROL_SIZE];
+	k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+	size_t length = sensor_bulk_ack_length;
+	if (length != 0U) {
+		memcpy(payload, sensor_bulk_ack_payload, length);
+		sensor_bulk_ack_length = 0U;
+	}
+	k_spin_unlock(&sensor_pawr_lock, key);
+	return length != 0U && edgez_pawr_bulk_sender_feed(&sensor_bulk_sender, payload, length);
+}
+
+static int sensor_send_camera_image(uint32_t interval_ms)
+{
+	const uint16_t index = sensor_settings.value.block_sampling_count;
+	if (index == 0U) return 0;
+	const struct camera_resolution *mode = camera_resolution_by_index(index);
+	if (mode == NULL) return -EINVAL;
+	struct camera_bulk_source source = { .interval_ms = interval_ms };
+	int rc = vc0706_camera_begin(mode->width, mode->height, &source.length);
+	if (rc != 0) return rc;
+
+	/* Hash the frozen frame before announcing its transfer. The camera is
+	 * random-access storage for both this pass and selective retransmissions. */
+	uint8_t data[512];
+	uint8_t first[2] = {0}, last[2] = {0};
+	uint32_t digest = UINT32_C(2166136261);
+	for (uint32_t offset = 0; offset < source.length; ) {
+		size_t length = MIN(sizeof(data), source.length - offset);
+		rc = vc0706_camera_read(offset, data, length);
+		if (rc != 0) goto finished;
+		if (offset == 0U) memcpy(first, data, sizeof(first));
+		for (size_t i = 0; i < length; i++) {
+			digest = (digest ^ data[i]) * UINT32_C(16777619);
+			last[0] = last[1];
+			last[1] = data[i];
+		}
+		offset += length;
+	}
+	if (first[0] != 0xff || first[1] != 0xd8 || last[0] != 0xff || last[1] != 0xd9) {
+		rc = -EBADMSG;
+		goto finished;
+	}
+	rc = sensor_pawr_enable_bulk_burst_mode();
+	if (rc != 0) goto finished;
+	const struct edgez_pawr_bulk_sender_config config = {
+		.tiers = edgez_pawr_bulk_default_tiers,
+		.tier_count = ARRAY_SIZE(edgez_pawr_bulk_default_tiers),
+		.initial_tier = 2U, .maximum_tier = 4U,
+		.max_attempts = EDGEZ_SENSOR_BULK_ACK_ATTEMPTS,
+		.read = camera_bulk_read, .send = camera_bulk_send, .ctx = &source,
+	};
+	const struct edgez_pawr_bulk_transfer transfer = {
+		.compressed_ssid = mesh_runtime.config.compressed_ssid,
+		.session_id = sys_rand32_get() | 1U,
+		.total_length = source.length, .expected_digest = digest,
+		.test_index = EDGEZ_SENSOR_BLOCK_KIND_JPEG,
+		.regulatory = sensor_pawr_bulk_regulatory(),
+	};
+	k_sem_reset(&sensor_bulk_ack_sem);
+	sensor_bulk_ack_length = 0U;
+	if (!edgez_pawr_bulk_sender_init(&sensor_bulk_sender, &config) ||
+	    !edgez_pawr_bulk_sender_start(&sensor_bulk_sender, &transfer)) {
+		rc = -EINVAL;
+		goto finished;
+	}
+	LOG_INF("camera JPEG transfer index=%u resolution=%ux%u bytes=%u session=%u digest=%08x",
+		index, mode->width, mode->height, source.length, transfer.session_id, digest);
+	const int64_t deadline = k_uptime_get() + 180000;
+	for (;;) {
+		(void)camera_bulk_feed_ack();
+		uint32_t now = k_uptime_get_32();
+		enum edgez_pawr_bulk_result result = edgez_pawr_bulk_sender_poll(&sensor_bulk_sender, now);
+		if (result == EDGEZ_PAWR_BULK_COMPLETE) { rc = 0; break; }
+		if (source.read_error != 0) { rc = source.read_error; break; }
+		if (result < 0 || k_uptime_get() >= deadline) { rc = -ETIMEDOUT; break; }
+		if (result == EDGEZ_PAWR_BULK_WAITING) {
+			uint32_t next = edgez_pawr_bulk_sender_next_deadline(&sensor_bulk_sender);
+			uint32_t wait_ms = (int32_t)(next - now) > 0 ? next - now : 1U;
+			(void)k_sem_take(&sensor_bulk_ack_sem, K_MSEC(MIN(wait_ms, 1000U)));
+		} else {
+			k_yield();
+		}
+	}
+	LOG_INF("camera JPEG transfer rc=%d bytes_acked=%u", rc, sensor_bulk_sender.stats.bytes_acked);
+finished:
+	vc0706_camera_stop();
+	return rc;
+}
+#endif
+
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 
 struct sensor_bulk_test_source {
@@ -2527,6 +2666,9 @@ static void sensor_finish_cycle(uint32_t now)
 	uint32_t interval_ms = sensor_update_interval_ms();
 
 	edgez_gps_stop();
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+	vc0706_camera_stop();
+#endif
 	/* A zero-touch wake may spend several seconds sweeping all regulatory
 	 * 1 MHz channels. Its configured interval is sleep time after that sweep,
 	 * not a period measured from the beginning of the radio activity. */
@@ -2670,7 +2812,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	/* The reporting timer is the only periodic MCU wake source in the power
 	 * build. Collect the samples accumulated by the IMU hardware FIFO before
 	 * powering HaLow, so IMU traffic cannot overlap radio startup or TX. */
-#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY)
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS_ONLY) && !defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
 	int imu_rc;
 #if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 	size_t captured_samples = 0U;
@@ -2765,6 +2907,10 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 #endif
 #if !defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST)
 			if (!provisioning_cycle && rc == 0) {
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+				int image_rc = sensor_send_camera_image(sensor_update_interval_ms());
+				if (image_rc != 0) LOG_WRN("camera capture/upload failed rc=%d; retry next cycle", image_rc);
+#else
 				if (sensor_settings.value.block_sampling_count > 0U &&
 				    sensor_block_sample_count > 0U) {
 					int block_rc = sensor_send_imu_block(
@@ -2774,6 +2920,7 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 							block_rc);
 					}
 				}
+#endif
 			}
 #endif
 			/* A provisioning acceptance is returned as a direct PAwR mesh
@@ -2841,6 +2988,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 
 int main(void)
 {
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA)
+	vc0706_camera_stop();
+#endif
 #if EDGEZ_DIAGNOSTICS_ENABLED && !defined(EDGEZ_PLATFORM_ARCHIVE_BUILD)
 	edgez_diagnostics_set_sink(join_diagnostic_sink, NULL);
 	edgez_diagnostics_set_level(EDGEZ_DIAGNOSTIC_DEBUG);
@@ -2859,7 +3009,7 @@ int main(void)
 	if (sensor_rc != 0) {
 		LOG_WRN("battery sensing unavailable rc=%d", sensor_rc);
 	}
-	sensor_rc = edgez_imu_init();
+	sensor_rc = IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_CAMERA) ? -ENOTSUP : edgez_imu_init();
 	if (sensor_rc != 0) {
 		LOG_WRN("IMU unavailable rc=%d; sensor beacons will omit motion", sensor_rc);
 	} else {
