@@ -78,7 +78,7 @@ test("missing data, corrupt digest, invalid JPEG, and conflicting retries cannot
   const h = harness();
   await h.send(frame(0, jpeg.subarray(0, 7)));
   assert.equal(h.files.size, 0);
-  await assert.rejects(h.send(frame(0, Buffer.from("bad"))), /conflicts/);
+  await assert.rejects(h.send(frame(0, Buffer.from("badbad!"))), /conflicts/);
   await assert.rejects(h.send(frame(0, jpeg, 8, 1)), /digest/);
   const invalidJpeg = Buffer.alloc(jpeg.length);
   await assert.rejects(h.send(frame(0, invalidJpeg, 9, fnv1a32(invalidJpeg))), /markers/);
@@ -93,6 +93,14 @@ test("session IDs isolate photos and staging rows grant no client access", async
   assert.equal(h.files.size, 0);
   for (const [id, row] of h.rows) if (id.startsWith(PART_TABLE)) assert.deepEqual(row.$permissions, []);
   await h.send(frame(7, jpeg.subarray(7), 7));
+  assert.equal(h.files.size, 1);
+});
+
+test("adaptive transport retries may change chunk size at the same offset", async () => {
+  const h = harness();
+  await h.send(frame(0, jpeg.subarray(0, 7)));
+  await h.send(frame(0, jpeg.subarray(0, 10)));
+  assert.equal((await h.send(frame(10))).complete, true);
   assert.equal(h.files.size, 1);
 });
 

@@ -131,7 +131,8 @@ export async function persistCameraChunk({ tables, storage, databaseId, target, 
     image = await tables.getRow(row);
   }
   if (image.status === "complete") return { imageId, complete: true };
-  const partId = idFor(`${imageId}:${chunk.offset}`);
+  // Adaptive transport tiers may retry an offset with a different chunk size.
+  const partId = idFor(`${imageId}:${chunk.offset}:${chunk.data.length}`);
   try {
     await tables.createRow({ databaseId, tableId: PART_TABLE, rowId: partId, permissions: [],
       data: { imageId, offset: chunk.offset, data: chunk.data.toString("base64"), expiresAt } });

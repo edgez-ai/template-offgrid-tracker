@@ -43,7 +43,7 @@ class CameraBlocksTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Conflicting"):
             camera.assemble([frame(0, JPEG), frame(0, b"bad")])
 
-    def test_readme_indices_match_firmware(self):
+    def test_resolution_indices_match_firmware_readme_and_clients(self):
         firmware = SCRIPTS.parent
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory, "modes.c")
@@ -66,3 +66,10 @@ int main(void) {
         documented = [(int(i), int(w), int(h)) for i, w, h in re.findall(
             r"\| `(\d+)` \| (?:\*\*)?(\d+) × (\d+)", (firmware / "README.md").read_text())]
         self.assertEqual(actual, documented)
+        root = firmware.parent
+        sizes = [(w, h) for _, w, h in actual]
+        for source in [root / 'app/DeviceComponents.tsx', root / 'site/app/CameraPanel.tsx']:
+            self.assertEqual(sizes, [(int(w), int(h)) for w, h in re.findall(
+                r'"(\d+) × (\d+)"', source.read_text())], str(source))
+        self.assertEqual(sizes, [(int(w), int(h)) for w, h in re.findall(
+            r'"(\d+)x(\d+)"', (root / 'function/src/camera-images.js').read_text())])

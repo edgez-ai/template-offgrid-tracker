@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import struct
 import subprocess
@@ -28,6 +29,35 @@ PARTITION_ADDRESSES = {
 }
 PRIVATE_DER_PREFIX = bytes.fromhex("302e020100300506032b656e04220420")
 PUBLIC_DER_PREFIX = bytes.fromhex("302a300506032b656e032100")
+
+
+def without_mesh_profile(data: bytes) -> bytes:
+    """Strip mesh credentials while retaining identity and discovery settings."""
+    if len(data) != PARTITION_SIZE:
+        raise ValueError("expected a complete 4 KiB factory partition backup")
+    fields = list(struct.unpack(RECORD_FORMAT, data[:RECORD_SIZE]))
+    magic, version, length, serial, public, private, country, mesh, channel, password, crc = fields
+    if (magic != MAGIC or version != VERSION or length != RECORD_SIZE or
+            zlib.crc32(data[:RECORD_SIZE - 4]) & 0xFFFFFFFF != crc or
+            not serial[0] or b"\0" not in serial or not any(public) or not any(private) or
+            not country[0] or not country[1] or country[2] != 0 or channel == 0 or
+            b"\0" not in mesh or b"\0" not in password):
+        raise ValueError("factory record is invalid; refusing to replace identity")
+    fields[7] = bytes(MESH_ID_SIZE)
+    fields[9] = bytes(PASSPHRASE_SIZE)
+    body = struct.pack(RECORD_FORMAT, *fields)[:-4]
+    record = body + struct.pack("<I", zlib.crc32(body) & 0xFFFFFFFF)
+    return record + data[RECORD_SIZE:]
+
+
+def clear_mesh_profile(image: pathlib.Path, output: pathlib.Path) -> None:
+    result = without_mesh_profile(image.read_bytes())
+    # The record contains the private key. Never print it or create a public file.
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(result)
+    print("Factory mesh credentials cleared; identity and discovery country/channel retained.")
 
 
 def openssl_der(private_key: pathlib.Path, public: bool) -> bytes:
@@ -175,12 +205,17 @@ def main() -> int:
     create.add_argument("--manifest", type=pathlib.Path)
     show = subparsers.add_parser("inspect")
     show.add_argument("image", type=pathlib.Path)
+    clear = subparsers.add_parser("clear-mesh-profile")
+    clear.add_argument("image", type=pathlib.Path)
+    clear.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
     try:
         if args.command == "create":
             build(args.serial, args.private_key, args.output, args.manifest,
                   args.country, args.mesh_id, args.channel, args.passphrase,
                   args.target)
+        elif args.command == "clear-mesh-profile":
+            clear_mesh_profile(args.image, args.output)
         else:
             inspect(args.image)
     except (OSError, ValueError) as error:

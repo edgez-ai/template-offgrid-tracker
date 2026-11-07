@@ -226,6 +226,20 @@ photo. The frozen JPEG remains in camera memory for hashing and selective
 retransmission, avoiding a full-frame allocation on the nRF54L15. Power is
 removed after completion or failure. Maximum JPEG size is **512 KiB**.
 
+For flashing a board whose previous firmware sleeps before the debugger can
+attach, connect the probe's **nRESET** wire to the board's RESET pin and run
+the supplied script from `firmware/` with an OpenOCD build that supports nRF54L:
+
+```sh
+openocd -f scripts/flash_camera_openocd.cfg
+```
+
+It connects with hardware RESET asserted, halts before programming, commits
+the RRAM buffer, verifies the HEX, and leaves the CPU **halted**. It does not
+mass erase the device. Attach the RTT reader before issuing `reset run` from
+OpenOCD to start discovery and capture the boot logs. The camera sensor uses
+timed System ON idle between cycles.
+
 The VC0706 HaLow sensor uses the existing app sensor settings. **Sampling
 interval** controls the time between capture cycles (default **60 seconds**).
 **Block sampling count** (`blockSamplingCount`) selects the camera resolution:
