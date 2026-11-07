@@ -19,7 +19,7 @@ typedef int (*halow_telemetry_publish_fn_t)(const char *topic,
 typedef bool (*halow_telemetry_ready_fn_t)(void *arg);
 
 /** Decode an EdgeZ PAwR Beacon protobuf and publish its sensor JSON. */
-esp_err_t halow_telemetry_forward_beacon(const uint8_t *beacon, size_t length);
+esp_err_t halow_telemetry_forward_beacon(const uint8_t source[6], const uint8_t *beacon, size_t length);
 
 /**
  * Start local telemetry using an application-selected MQTT publisher.

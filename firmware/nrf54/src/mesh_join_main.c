@@ -145,6 +145,9 @@ static bool mesh_services_initialized;
 static struct k_spinlock sensor_pawr_lock;
 static uint32_t sensor_pawr_expected_hash;
 static bool sensor_pawr_waiting;
+static uint8_t sensor_discovery_gateway[6];
+static uint8_t sensor_discovery_channel;
+static uint32_t sensor_discovery_seen_at;
 static bool sensor_pawr_downlink_pending;
 static uint32_t sensor_downlink_ack_id;
 struct sensor_settings_record {
@@ -898,6 +901,11 @@ static int join_ignore_unsupported(void *ctx,
 				       &response_hash, &response_ssid) &&
 	    response_ssid == mesh_runtime.config.compressed_ssid) {
 		k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
+		if (response_hash == 0U && (action.source[0] & 1U) == 0U) {
+			memcpy(sensor_discovery_gateway, action.source, 6);
+			sensor_discovery_channel = sensor_bootstrap_channel;
+			sensor_discovery_seen_at = k_uptime_get_32();
+		}
 		bool matched = sensor_pawr_waiting &&
 			response_hash == sensor_pawr_expected_hash;
 
@@ -1334,8 +1342,9 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 			&packet_len)) {
 		return -EMSGSIZE;
 	}
-	const uint8_t *destination = provisioning ? broadcast :
-		persisted_profile.gateway_mac;
+	uint8_t destination[6];
+	memcpy(destination, provisioning ? broadcast : persisted_profile.gateway_mac, 6);
+encode_discovery_frame:
 	if (!edgez_pawr_encode_action_frame(
 			frame, sizeof(frame), pawr_sequence_number++,
 			mesh_runtime.radio_info.mac_addr,
@@ -1355,7 +1364,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 		.attempts = 1U,
 		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
 		.short_guard = mesh_runtime.config.short_guard,
-		.no_ack = provisioning,
+		.no_ack = provisioning && memcmp(destination, broadcast, 6) == 0,
 		.immediate_status = true,
 	};
 	k_sem_reset(&sensor_pawr_response_sem);
@@ -1394,7 +1403,16 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
 	}
 	key = k_spin_lock(&sensor_pawr_lock);
 	sensor_pawr_waiting = false;
+	bool advertised = provisioning && memcmp(destination, broadcast, 6) == 0 &&
+		sensor_discovery_channel == sensor_bootstrap_channel &&
+		(uint32_t)(k_uptime_get_32() - sensor_discovery_seen_at) < 5000U &&
+		memcmp(sensor_discovery_gateway, "\0\0\0\0\0\0", 6) != 0;
+	if (advertised) memcpy(destination, sensor_discovery_gateway, 6);
 	k_spin_unlock(&sensor_pawr_lock, key);
+	if (advertised) {
+		LOG_INF("zero-touch retrying discovery via advertised gateway");
+		goto encode_discovery_frame;
+	}
 	LOG_WRN("sensor PAwR request=%u acknowledgement timeout", request_id);
 	return -ETIMEDOUT;
 }

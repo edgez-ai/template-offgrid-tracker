@@ -15,6 +15,7 @@
 #include "edgez_rf_api.h"
 #if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
 #include "wifi_mqtt.h"
+#include "halow_discovery.h"
 #endif
 
 #define PAWR_QUEUE_DEPTH 4U
@@ -204,7 +205,10 @@ static void pawr_worker(void *arg)
     (void)arg;
     struct pawr_action action;
     while (true) {
-        if (xQueueReceive(action_queue, &action, portMAX_DELAY) != pdTRUE) {
+#if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+        halow_discovery_tick();
+#endif
+        if (xQueueReceive(action_queue, &action, pdMS_TO_TICKS(250)) != pdTRUE) {
             continue;
         }
         ESP_LOGI(TAG, "Beacon RSSI=%d dBm, payload=%u",
@@ -217,6 +221,7 @@ static void pawr_worker(void *arg)
 #elif CONFIG_DAB_DIRECT_MQTT
         if (edgez_pawr_bulk_receiver_feed(&block_receiver, action.source_mac,
                                           action.payload, action.length)) continue;
+        if (halow_discovery_receive(action.source_mac, action.payload, action.length)) continue;
 #endif
         if (beacon_callback != NULL) {
             beacon_callback(action.source_mac,

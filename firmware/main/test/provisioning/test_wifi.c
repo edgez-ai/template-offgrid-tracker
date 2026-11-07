@@ -21,6 +21,7 @@
 #define MQTT_EVENT_CONNECTED 4
 #define MQTT_EVENT_DISCONNECTED 5
 #define MQTT_EVENT_ERROR 6
+#define MQTT_EVENT_DATA 7
 #define ESP_EVENT_ANY_ID -1
 #define WIFI_MODE_STA 1
 #define WIFI_IF_STA 1
@@ -38,7 +39,10 @@ typedef esp_mqtt_error_codes_t mqtt_error_t;
 #define MALLOC_CAP_8BIT 2
 static size_t heap_caps_get_free_size(unsigned caps) { (void)caps; return 65536; }
 static size_t heap_caps_get_largest_free_block(unsigned caps) { (void)caps; return 32768; }
-typedef struct { mqtt_error_t *error_handle; } mqtt_event_data_t;
+typedef struct { mqtt_error_t *error_handle;
+    int current_data_offset, topic_len, total_data_len, data_len;
+    const char *topic, *data;
+} mqtt_event_data_t;
 typedef mqtt_event_data_t *esp_mqtt_event_handle_t;
 typedef struct {
     struct { struct { const char *uri; } address;
@@ -55,7 +59,11 @@ typedef int wifi_init_config_t;
 #define WIFI_INIT_CONFIG_DEFAULT() 0
 typedef struct { struct { uint8_t ssid[32]; } sta; } wifi_config_t;
 static int station_instance, other_instance;
-static unsigned wifi_connects, mqtt_starts, publishes, time_starts;
+static unsigned wifi_connects, mqtt_starts, publishes, time_starts, subscriptions, acceptances;
+static bool halow_discovery_accept(const uint8_t *payload, size_t length)
+{ assert(length == 4 && payload[0] == 0 && payload[1] == 255); ++acceptances; return true; }
+static int esp_mqtt_client_subscribe(void *handle, const char *topic, int qos)
+{ (void)handle; assert(qos == 1); assert(!strcmp(topic,"projects/project-a/devices/AABBCCDDEEFF/system/commands/discover")); return ++subscriptions; }
 static bool gateway_online;
 static esp_mqtt_client_config_t saved_mqtt;
 static char published_topic[192];
@@ -123,6 +131,18 @@ int main(void)
     assert(wifi_mqtt_publish("telemetry/sensors", binary, sizeof(binary), 1, false, NULL) > 0);
     assert(!strcmp(published_topic, "projects/project-a/devices/AABBCCDDEEFF/telemetry/sensors"));
     assert(wifi_mqtt_publish("unexpected", binary, sizeof(binary), 1, false, NULL) < 0);
+    assert(wifi_mqtt_publish("system/discover", binary, sizeof(binary), 1, false, NULL) > 0);
+    assert(!strcmp(published_topic, "projects/project-a/devices/AABBCCDDEEFF/system/discover"));
+    assert(subscriptions == 1);
+    mqtt_event_data_t first = { .topic = discovery_command_topic, .topic_len = (int)strlen(discovery_command_topic),
+        .data = (const char *)binary, .data_len = 2, .total_data_len = 4 };
+    mqtt_event(NULL, 0, MQTT_EVENT_DATA, &first);
+    assert(acceptances == 0);
+    mqtt_event_data_t second = { .data = (const char *)binary + 2, .data_len = 2, .total_data_len = 4, .current_data_offset = 2 };
+    mqtt_event(NULL, 0, MQTT_EVENT_DATA, &second);
+    assert(acceptances == 1);
+    mqtt_event(NULL, 0, MQTT_EVENT_DATA, &second);
+    assert(acceptances == 1);
     const uint8_t camera_mac[] = {2, 0, 4, 0xe1, 0x51, 0x74};
     assert(wifi_mqtt_publish_block(camera_mac, binary, sizeof(binary)) > 0);
     assert(!strcmp(published_topic, "projects/project-a/devices/AABBCCDDEEFF/telemetry/blocks/02:00:04:E1:51:74"));

@@ -48,7 +48,7 @@ else()
         list(APPEND component_sources "halow_telemetry.c")
     endif()
     if(CONFIG_DAB_DIRECT_MQTT)
-        list(APPEND component_sources "wifi_mqtt.c")
+        list(APPEND component_sources "wifi_mqtt.c" "halow_discovery.c")
     endif()
 
     set(component_private_dependencies

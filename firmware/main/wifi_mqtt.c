@@ -13,6 +13,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
+#include "halow_discovery.h"
 #if CONFIG_DAB_START_MQTT_RELAY
 #include "mesh_mqtt_relay.h"
 #endif
@@ -24,6 +25,37 @@ static atomic_bool online;
 static atomic_bool relay_started;
 static bool client_started;
 static char topic_prefix[160];
+static char discovery_command_topic[224];
+static char receive_topic[224];
+static uint8_t receive_payload[1536];
+static size_t receive_length;
+static size_t receive_expected;
+
+static void receive_command(const esp_mqtt_event_handle_t event)
+{
+    if (event->current_data_offset == 0) {
+        receive_length = receive_expected = 0;
+        if (event->topic_len <= 0 || event->topic_len >= (int)sizeof(receive_topic) ||
+            event->total_data_len <= 0 || event->total_data_len > (int)sizeof(receive_payload)) return;
+        memcpy(receive_topic, event->topic, event->topic_len);
+        receive_topic[event->topic_len] = '\0';
+        if (strcmp(receive_topic, discovery_command_topic) != 0) return;
+        receive_expected = event->total_data_len;
+    }
+    if (!receive_expected || event->data_len < 0 || event->current_data_offset < 0 ||
+        (size_t)event->current_data_offset != receive_length ||
+        (size_t)event->data_len > receive_expected - receive_length) {
+        receive_expected = receive_length = 0;
+        return;
+    }
+    memcpy(receive_payload + receive_length, event->data, event->data_len);
+    receive_length += event->data_len;
+    if (receive_length == receive_expected) {
+        if (!halow_discovery_accept(receive_payload, receive_length))
+            ESP_LOGW(TAG, "Discovery acceptance rejected: no matching sensor or invalid envelope");
+        receive_expected = receive_length = 0;
+    }
+}
 
 static void set_online(bool connected)
 {
@@ -48,10 +80,16 @@ static void mqtt_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     const esp_mqtt_event_handle_t event = data;
     if (id == MQTT_EVENT_CONNECTED) {
         set_online(true);
+        receive_expected = receive_length = 0;
+        int subscription = esp_mqtt_client_subscribe(client, discovery_command_topic, 1);
+        ESP_LOGI(TAG, "Discovery command subscription message_id=%d", subscription);
         ESP_LOGI(TAG, "MQTT connected directly over Wi-Fi");
     } else if (id == MQTT_EVENT_DISCONNECTED) {
         set_online(false);
+        receive_expected = receive_length = 0;
         ESP_LOGW(TAG, "MQTT disconnected; automatic reconnect enabled");
+    } else if (id == MQTT_EVENT_DATA) {
+        receive_command(event);
     } else if (id == MQTT_EVENT_ERROR) {
         const esp_mqtt_error_codes_t *error = event->error_handle;
         ESP_LOGW(TAG, "MQTT connection error type=%d esp_tls=0x%x tls=0x%x broker_rc=%d internal_free=%u largest=%u",
@@ -96,7 +134,8 @@ int wifi_mqtt_publish(const char *topic, const void *payload, size_t length,
 {
     (void)arg;
     if (!wifi_mqtt_ready(NULL) || !topic || !payload || length > INT_MAX ||
-        (strcmp(topic, "system/status") != 0 && strcmp(topic, "telemetry/sensors") != 0)) return -1;
+        (strcmp(topic, "system/status") != 0 && strcmp(topic, "telemetry/sensors") != 0 &&
+         strcmp(topic, "system/discover") != 0 && strcmp(topic, "system/accepted") != 0)) return -1;
     char full_topic[192];
     const int count = snprintf(full_topic, sizeof(full_topic), "%s/%s", topic_prefix, topic);
     if (count < 0 || (size_t)count >= sizeof(full_topic)) return -1;
@@ -125,6 +164,9 @@ esp_err_t wifi_mqtt_start(const halow_provisioning_config_t *config)
     const int count = snprintf(topic_prefix, sizeof(topic_prefix), "projects/%s/devices/%s",
                                config->project_id, config->mqtt_username);
     if (count < 0 || (size_t)count >= sizeof(topic_prefix)) return ESP_ERR_INVALID_SIZE;
+    const int command_count = snprintf(discovery_command_topic, sizeof(discovery_command_topic),
+        "%s/system/commands/discover", topic_prefix);
+    if (command_count < 0 || (size_t)command_count >= sizeof(discovery_command_topic)) return ESP_ERR_INVALID_SIZE;
     const esp_mqtt_client_config_t mqtt_config = {
         .broker.address.uri = CONFIG_DAB_MQTT_BROKER_URI,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,

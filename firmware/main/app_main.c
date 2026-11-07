@@ -84,7 +84,7 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
              source_mac[0], source_mac[1], source_mac[2], source_mac[3],
              source_mac[4], source_mac[5], (int)rssi_dbm, (unsigned)length);
 #if CONFIG_DAB_DIRECT_MQTT
-    if (wifi_mqtt_ready(NULL) && halow_telemetry_forward_beacon(beacon, length) == ESP_OK) {
+    if (wifi_mqtt_ready(NULL) && halow_telemetry_forward_beacon(source_mac, beacon, length) == ESP_OK) {
         ESP_LOGI(TAG, "PAwR Beacon routed via direct Wi-Fi MQTT");
         return;
     }
@@ -92,7 +92,7 @@ static void pawr_beacon_callback(const uint8_t source_mac[6],
 #if CONFIG_DAB_START_MQTT_RELAY
     if (edgez_mqtt_gateway_available()) {
         const esp_err_t telemetry_err =
-            halow_telemetry_forward_beacon(beacon, length);
+            halow_telemetry_forward_beacon(source_mac, beacon, length);
         if (telemetry_err == ESP_OK) {
             ESP_LOGI(TAG, "PAwR Beacon routed via MQTT");
             return;

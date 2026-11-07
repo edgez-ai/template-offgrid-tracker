@@ -264,7 +264,9 @@ static bool append_sensor(cJSON *sensors, const struct decoded_sensor *sensor)
     return true;
 }
 
-esp_err_t halow_telemetry_forward_beacon(const uint8_t *data, size_t length)
+static esp_err_t forward_sensor_status(const uint8_t source[6], const char *client_id);
+
+esp_err_t halow_telemetry_forward_beacon(const uint8_t source[6], const uint8_t *data, size_t length)
 {
     if (data == NULL || length == 0) return ESP_ERR_INVALID_ARG;
 
@@ -283,6 +285,7 @@ esp_err_t halow_telemetry_forward_beacon(const uint8_t *data, size_t length)
              (unsigned long long)(beacon.user_id_low >> 48),
              (unsigned long long)(beacon.user_id_low & UINT64_C(0xffffffffffff)));
 
+    const esp_err_t status_result = forward_sensor_status(source, client_id);
     cJSON *batch = cJSON_CreateArray();
     cJSON *entry = cJSON_CreateObject();
     cJSON *sensors = cJSON_CreateArray();
@@ -324,7 +327,7 @@ esp_err_t halow_telemetry_forward_beacon(const uint8_t *data, size_t length)
         cJSON_Delete(batch);
         cJSON_Delete(entry);
         cJSON_Delete(sensors);
-        return ESP_ERR_NOT_FOUND;
+        return status_result;
     }
     cJSON_AddItemToObject(entry, "sensors", sensors);
     cJSON_AddItemToArray(batch, entry);
@@ -437,6 +440,22 @@ static bool protobuf_put_double(uint8_t *buffer,
         buffer[(*offset)++] = (uint8_t)(bits >> (index * 8U));
     }
     return true;
+}
+
+static esp_err_t forward_sensor_status(const uint8_t source[6], const char *client_id)
+{
+    if (!source || !local_config.publish_fn) return ESP_ERR_INVALID_STATE;
+    uint8_t status[96], batch[100];
+    size_t status_length = 0, batch_length = 0;
+    bool ok = protobuf_put_bytes(status, sizeof(status), &status_length, 1,
+                                  client_id, strlen(client_id)) &&
+              protobuf_put_u64(status, sizeof(status), &status_length, 2, 1) &&
+              protobuf_put_bytes(status, sizeof(status), &status_length, 3, source, 6) &&
+              protobuf_put_bytes(batch, sizeof(batch), &batch_length, 1, status, status_length);
+    if (!ok) return ESP_ERR_INVALID_SIZE;
+    int message = local_config.publish_fn("system/status", batch, batch_length, 1, false,
+                                          local_config.publisher_arg);
+    return message >= 0 ? ESP_OK : ESP_FAIL;
 }
 
 static bool encode_local_topology(uint8_t *output,
