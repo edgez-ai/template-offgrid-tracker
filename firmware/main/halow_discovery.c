@@ -1,4 +1,7 @@
 #include "halow_discovery.h"
+#include "sdkconfig.h"
+
+#if CONFIG_IDF_TARGET_ESP32S3
 #include <string.h>
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
@@ -116,3 +119,12 @@ bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, si
     free(reply);
     return discovery;
 }
+
+#else
+/* The HC33 receiver update uses the ESP32-S3 SDK archive. */
+void halow_discovery_tick(void) {}
+bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, size_t length)
+{ (void)source; (void)payload; (void)length; return false; }
+bool halow_discovery_accept(const uint8_t *payload, size_t length)
+{ (void)payload; (void)length; return false; }
+#endif

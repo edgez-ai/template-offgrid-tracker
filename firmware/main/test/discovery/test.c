@@ -32,6 +32,7 @@ static int wifi_mqtt_publish(const char *topic,const void *data,size_t length,in
 }
 static int edgez_halow_mesh_transmit_pawr_control(const uint8_t to[6],const uint8_t *data,size_t length)
 {assert(length<=sizeof(sent));memcpy(sent,data,length);sent_length=length;memcpy(sent_to,to,6);++sends;return ESP_OK;}
+#define CONFIG_IDF_TARGET_ESP32S3 1
 #include "discovery.inc"
 int main(void)
 {

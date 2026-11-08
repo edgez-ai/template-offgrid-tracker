@@ -307,6 +307,46 @@ python3 scripts/camera_blocks_to_jpeg.py photo.jpg chunks/*.bin
 python3 -m unittest discover -s scripts/tests -p 'test_camera*.py'
 ```
 
+### HC33 gateway sensor discovery
+
+The HC33 gateway supports the same zero-touch discovery exchange as H7608
+when its provisioned Wi-Fi MQTT connection is online. It advertises
+`edgez-zero-touch` on its current HaLow channel, validates discovery requests
+against their radio source MAC, and publishes the original NetworkPacket to
+`projects/<project>/devices/<gateway-serial>/system/discover` with QoS 1.
+Appwrite Devices owns the discovery record; the telemetry Function does not
+create it. The gateway and sensor need compatible discovery country/channel
+settings. An unprovisioned sensor sweeps the regulatory 1 MHz channels.
+
+The gateway subscribes to `system/commands/discover`, caches the opaque
+encrypted acceptance for a recently discovered sensor, and returns it when the
+sensor next requests provisioning. An operational sensor uplink confirms the
+acceptance through `system/accepted`; subsequent uplinks publish native sensor
+status as well as numeric telemetry. The gateway never decrypts the sensor's
+mesh profile. Cache entries are bounded and expire after 15 minutes.
+
+The nRF54 sensor learns gateway advertisements and retries a broadcast request
+by unicast on the same channel. This allows the gateway to retain its normal
+mesh receive filters. No operational mesh profile needs to be embedded in the
+sensor's factory partition.
+
+Build `heltec-hc33` for the gateway and
+`edgez-nrf54l15-fgh200m-sensor` for the L76K GPS sensor. The ESP platform
+submodule contains the matching updated ESP32-S3 SDK libraries and protocol
+header; ship that SDK update together with the application change. This
+discovery bridge is enabled on ESP32-S3. For SDK development, the existing
+`EDGEZ_HALOW_MESH_SOURCE_ROOT` build override can use a local SDK checkout.
+
+Host checks for MQTT fragmentation and discovery/acceptance replay:
+
+```sh
+python3 main/test/provisioning/run.py
+python3 main/test/discovery/run.py
+```
+
+The discovery host test uses the protocol codec from the sibling
+`edgez-halow-mesh` source checkout.
+
 ### HT-HC33 mesh power-save experiment
 
 The `heltec-hc33-mesh-ps` environment waits until the HT-HC33 has established
