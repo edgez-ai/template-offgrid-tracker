@@ -8,6 +8,12 @@
 #include <string.h>
 #include "edgez_pawr_protocol.h"
 #define ESP_OK 0
+#define CONFIG_SPIRAM 1
+#define MALLOC_CAP_SPIRAM 1
+#define MALLOC_CAP_8BIT 2
+static bool fail_allocation;
+static void *heap_caps_calloc(size_t count, size_t size, unsigned caps)
+{ assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)); return fail_allocation ? NULL : calloc(count, size); }
 #define portMUX_INITIALIZER_UNLOCKED 0
 typedef int portMUX_TYPE;
 #define taskENTER_CRITICAL(lock) ((void)(lock))
@@ -36,6 +42,10 @@ static int edgez_halow_mesh_transmit_pawr_control(const uint8_t to[6],const uint
 #include "discovery.inc"
 int main(void)
 {
+    fail_allocation = true;
+    assert(!halow_discovery_init());
+    fail_allocation = false;
+    assert(halow_discovery_init());
     uint8_t packet[] = {0x8, 0x2, 0x18, 0x1, 0x20, 0x5, 0xc2, 0x6, 0x2c, 0x8, 0x3, 0x2a, 0x3, 0x64, 0x65, 0x76, 0x52, 0x20, 0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0xc0, 0x1, 0x5};
     uint8_t source[6] = {0,0,0,0,0,2};
     const uint8_t acceptance[] = {16,2,0xa2,6,1,0x42};

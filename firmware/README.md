@@ -324,6 +324,8 @@ sensor next requests provisioning. An operational sensor uplink confirms the
 acceptance through `system/accepted`; subsequent uplinks publish native sensor
 status as well as numeric telemetry. The gateway never decrypts the sensor's
 mesh profile. Cache entries are bounded and expire after 15 minutes.
+The HC33 keeps the discovery cache, block receiver, and PAwR worker buffers
+in PSRAM to leave internal RAM available for Wi-Fi and the HaLow driver.
 
 The nRF54 sensor learns gateway advertisements and retries a broadcast request
 by unicast on the same channel. This allows the gateway to retain its normal
@@ -342,6 +344,7 @@ Host checks for MQTT fragmentation and discovery/acceptance replay:
 ```sh
 python3 main/test/provisioning/run.py
 python3 main/test/discovery/run.py
+python3 scripts/tests/test_gps_schedule.py
 ```
 
 The discovery host test uses the protocol codec from the sibling
@@ -431,9 +434,15 @@ nRF54L15 carrier and FGH200M/MM8108. It compiles without Bluetooth, never enters
 the companion peering/BATMAN runtime, keeps the IMU powered down, and uses a
 60-second GPS sensing and beacon reporting cycle. This GPS-only build ignores
 stored reporting intervals and IMU block settings; downlinks requesting a
-different interval or IMU blocks are rejected. The first cycle waits for a
-satellite-backed GPS fix, initializes the MM8108, and configures chip sleep.
-Later cycles wake GPS for up to 2 seconds, wake the retained radio, send one
+different interval or IMU blocks are rejected. GPS stays powered down until
+the sensor has an accepted mesh profile; unprovisioned discovery never waits
+for a GPS fix. After provisioning, the first GPS acquisition after each boot
+and subsequent acquisitions at least 30 minutes apart allow up to 3 minutes
+for a fix. Other reporting cycles allow up to 2 seconds. Each window ends
+early when a fix arrives; a timeout sends the report without location.
+The 30-minute interval is measured between long acquisition starts, including
+attempts that time out. The sensor initializes the MM8108, configures chip
+sleep, and on later cycles wakes the retained radio, sends one
 connectionless PAwR-like beacon,
 and wait up to 500 ms for a receiver-generated application acknowledgement.
 There is no same-cycle retry. The MM8108 then returns to chip sleep without a

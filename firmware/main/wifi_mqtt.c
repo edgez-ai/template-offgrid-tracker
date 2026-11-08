@@ -108,6 +108,10 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (base == WIFI_EVENT &&
         (id == WIFI_EVENT_STA_START || id == WIFI_EVENT_STA_DISCONNECTED)) {
         set_online(false);
+        if (id == WIFI_EVENT_STA_DISCONNECTED && data) {
+            const wifi_event_sta_disconnected_t *event = data;
+            ESP_LOGW(TAG, "Wi-Fi station disconnected, reason=%u", (unsigned)event->reason);
+        }
         const esp_err_t err = esp_wifi_connect();
         if (err != ESP_OK) ESP_LOGW(TAG, "Wi-Fi connect failed: %s", esp_err_to_name(err));
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {

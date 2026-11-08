@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "esp_timer.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_halow_mesh_service.h"
 #include "wifi_mqtt.h"
@@ -24,7 +25,18 @@ struct discovery_entry {
     size_t length;
     uint8_t acceptance[ACCEPTANCE_MAX];
 };
-static struct discovery_entry cache[DISCOVERY_SLOTS];
+static struct discovery_entry *cache;
+bool halow_discovery_init(void)
+{
+    if (cache) return true;
+#if CONFIG_SPIRAM
+    const unsigned caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#else
+    const unsigned caps = MALLOC_CAP_8BIT;
+#endif
+    cache = heap_caps_calloc(DISCOVERY_SLOTS, sizeof(*cache), caps);
+    return cache != NULL;
+}
 static size_t next_entry;
 static uint32_t request_id;
 
@@ -50,7 +62,7 @@ void halow_discovery_tick(void)
 bool halow_discovery_accept(const uint8_t *payload, size_t length)
 {
     uint8_t destination[6];
-    if (!payload || length == 0 || length > ACCEPTANCE_MAX ||
+    if (!cache || !payload || length == 0 || length > ACCEPTANCE_MAX ||
         !edgez_pawr_packet_destination(payload, length, destination)) return false;
     bool stored = false;
     int64_t now = esp_timer_get_time() / 1000;
@@ -72,6 +84,7 @@ bool halow_discovery_accept(const uint8_t *payload, size_t length)
 
 bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, size_t length)
 {
+    if (!cache) return false;
     const bool discovery = edgez_pawr_is_sensor_discovery(source, payload, length);
     int64_t now = esp_timer_get_time() / 1000;
     uint8_t *reply = NULL;
@@ -122,6 +135,7 @@ bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, si
 
 #else
 /* The HC33 receiver update uses the ESP32-S3 SDK archive. */
+bool halow_discovery_init(void) { return true; }
 void halow_discovery_tick(void) {}
 bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, size_t length)
 { (void)source; (void)payload; (void)length; return false; }

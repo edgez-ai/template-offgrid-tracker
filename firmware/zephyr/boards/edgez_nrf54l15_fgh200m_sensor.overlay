@@ -1,7 +1,8 @@
 #include "edgez_nrf54l15_fgh200m_companion.overlay"
 
-/* The L76K remains available for profiles using Live location. Application
- * device-PM and its wake GPIO keep it off for Off/Map profiles and sleep. */
+/* The GPS-only sensor powers the L76K only in acquisition windows after
+ * provisioning. Device PM and the wake GPIO keep GPS off during discovery
+ * and between reports. */
 
 /* Battery measurement is omitted from this power profile.  Disabling the DT
  * device as well as CONFIG_ADC prevents the SAADC from being initialized and

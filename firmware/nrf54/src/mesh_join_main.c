@@ -42,6 +42,7 @@
 #include "edgez_mesh_zephyr.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_sensor_settings.h"
+#include "edgez_gps_schedule.h"
 #include "edgez_mesh_sae_provider.h"
 #include "edgez_rf_api.h"
 #include "edgez_umac_mesh_runtime.h"
@@ -105,7 +106,6 @@ LOG_MODULE_REGISTER(edgez_mesh_join, LOG_LEVEL_INF);
 #endif
 #define EDGEZ_SENSOR_SETTINGS_MAGIC UINT32_C(0x455a5353)
 #define EDGEZ_SENSOR_BULK_ACK_ATTEMPTS 4U
-#define EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS 2000U
 #define EDGEZ_BUTTON_DEBOUNCE_MS 50U
 #define EDGEZ_BUTTON_RESET_HOLD_MS 5000U
 #define EDGEZ_USER_NODE DT_PATH(zephyr_user)
@@ -2585,6 +2585,8 @@ static struct {
 	uint32_t cycle_started_ms;
 	uint32_t next_wake_ms;
 	uint32_t gps_deadline_ms;
+	uint32_t gps_window_ms;
+	struct edgez_gps_schedule gps_schedule;
 	bool boot_gps_fix_acquired;
 } sensor_power;
 
@@ -2636,9 +2638,8 @@ static void sensor_enter(const struct edgez_halow_profile *profile, uint32_t now
 			LOG_WRN("sensor mode could not stop the active mesh rc=%d", rc);
 		}
 	}
-	/* Board initialization may leave the MM8108 rail enabled before the sensor
-	 * state machine starts. Keep HaLow completely off while the boot GPS fix is
-	 * pending; the transmit phase powers and initializes it only after a fix. */
+	/* Keep HaLow off during the bounded GPS acquisition window. Discovery
+	 * skips GPS and enters the radio transmit phase immediately. */
 	if (!mesh_started && edgez_halow_power_is_ready()) {
 		int rc = edgez_halow_power_set(false);
 
@@ -2763,39 +2764,26 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	}
 	if (sensor_power.phase == SENSOR_POWER_READY) {
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_GPS)
-		/* The dedicated sensor image always reports its measured position. The
-		 * profile flag still controls GPS for companion/beacon roles, but must not
-		 * disable the physical L76K on this target. */
-		if (!sensor_power.boot_gps_fix_acquired &&
-		    sensor_power.gps_deadline_ms != 0U &&
-		    (int32_t)(now - sensor_power.gps_deadline_ms) < 0) {
-			return;
-		}
-		int gps_rc = edgez_gps_init();
-
-		if (gps_rc == 0) {
-			sensor_power.gps_deadline_ms = now +
-				EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS;
-			sensor_power.phase = SENSOR_POWER_WAITING_GPS;
-			if (sensor_power.boot_gps_fix_acquired) {
-				LOG_INF("sensor GPS awake; waiting up to %u ms for fix",
-					EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS);
-			} else {
-				LOG_INF("sensor boot GPS awake; waiting for satellite-backed fix before first sleep");
+		/* Provisioning must work indoors and with an absent/unfixed GPS.
+		 * Start GPS sampling only after an accepted profile is persisted. */
+		if (!edgez_config_should_autostart()) {
+			edgez_gps_stop();
+			LOG_INF("unprovisioned sensor: discovery does not wait for GPS fix");
+		} else {
+			sensor_power.gps_window_ms = edgez_gps_schedule_begin(
+				&sensor_power.gps_schedule, now, true);
+			sensor_power.gps_deadline_ms = now + sensor_power.gps_window_ms;
+			int gps_rc = edgez_gps_init();
+			if (gps_rc == 0) {
+				sensor_power.phase = SENSOR_POWER_WAITING_GPS;
+				LOG_INF("sensor GPS %s acquisition; timeout=%u ms",
+					sensor_power.gps_window_ms == EDGEZ_GPS_LONG_TIMEOUT_MS ? "long" : "normal",
+					sensor_power.gps_window_ms);
+				return;
 			}
-			return;
+			LOG_WRN("sensor GPS wake failed rc=%d; sending without fresh location", gps_rc);
+			edgez_gps_stop();
 		}
-		if (!sensor_power.boot_gps_fix_acquired) {
-			/* A transient UART or device-PM failure must not let the first cycle
-			 * enter sleep without a fix. Retry at a bounded cadence. */
-			sensor_power.gps_deadline_ms = now + 5000U;
-			LOG_WRN("sensor boot GPS wake failed rc=%d; retrying in 5 seconds",
-				gps_rc);
-			return;
-		}
-		LOG_WRN("sensor GPS wake failed rc=%d; sending without fresh location",
-			gps_rc);
-		edgez_gps_stop();
 #endif
 		sensor_power.phase = SENSOR_POWER_TRANSMIT;
 	}
@@ -2812,10 +2800,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 			 * and its UART before powering the HaLow radio. */
 			edgez_gps_power_down();
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
-		} else if (sensor_power.boot_gps_fix_acquired &&
-			   (int32_t)(now - sensor_power.gps_deadline_ms) >= 0) {
+		} else if (edgez_gps_window_expired(now, sensor_power.gps_deadline_ms)) {
 			LOG_WRN("sensor GPS fix timeout after %u ms; sending without location",
-				EDGEZ_SENSOR_GPS_WAKE_TIMEOUT_MS);
+				sensor_power.gps_window_ms);
 			edgez_gps_stop();
 			sensor_power.phase = SENSOR_POWER_TRANSMIT;
 		} else {

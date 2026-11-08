@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+bool halow_discovery_init(void);
 void halow_discovery_tick(void);
 /** True when the payload is a validated discovery, rather than sensor data. */
 bool halow_discovery_receive(const uint8_t source[6], const uint8_t *payload, size_t length);

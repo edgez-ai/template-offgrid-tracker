@@ -32,6 +32,7 @@ static const char *esp_err_to_name(int error) { (void)error; return "error"; }
 #define ESP_LOGE(...) log_message(__VA_ARGS__)
 typedef int esp_event_base_t;
 typedef int esp_netif_t;
+typedef struct { unsigned reason; } wifi_event_sta_disconnected_t;
 typedef struct { esp_netif_t *esp_netif; } ip_event_got_ip_t;
 typedef struct { int error_type, esp_tls_last_esp_err, esp_tls_stack_err, connect_return_code; } esp_mqtt_error_codes_t;
 typedef esp_mqtt_error_codes_t mqtt_error_t;

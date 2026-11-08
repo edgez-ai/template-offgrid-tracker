@@ -3,6 +3,9 @@
 #include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
+#include "esp_heap_caps.h"
+#include "freertos/idf_additions.h"
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -35,7 +38,7 @@ static halow_pawr_beacon_callback_t beacon_callback;
 static void *beacon_callback_arg;
 
 #if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
-static struct edgez_pawr_bulk_receiver block_receiver;
+static struct edgez_pawr_bulk_receiver *block_receiver;
 
 static bool block_send_ack(void *ctx, const uint8_t destination[6], const uint8_t *data, size_t length)
 {
@@ -219,7 +222,7 @@ static void pawr_worker(void *arg)
             continue;
         }
 #elif CONFIG_DAB_DIRECT_MQTT
-        if (edgez_pawr_bulk_receiver_feed(&block_receiver, action.source_mac,
+        if (edgez_pawr_bulk_receiver_feed(block_receiver, action.source_mac,
                                           action.payload, action.length)) continue;
         if (halow_discovery_receive(action.source_mac, action.payload, action.length)) continue;
 #endif
@@ -255,6 +258,15 @@ static void pawr_beacon_rx(const uint8_t source_mac[6],
     }
 }
 
+static void pawr_queue_delete(QueueHandle_t queue)
+{
+#if CONFIG_SPIRAM
+    vQueueDeleteWithCaps(queue);
+#else
+    vQueueDelete(queue);
+#endif
+}
+
 esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
                            const char *mesh_id, const char country_code[3],
                            uint32_t frequency_khz, uint8_t bandwidth_mhz)
@@ -282,13 +294,28 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
         bulk_state.receiver.config.compressed_ssid = edgez_pawr_compress_ssid(
             (const uint8_t *)mesh_id, strlen(mesh_id));
 #elif CONFIG_DAB_DIRECT_MQTT
-        block_receiver.config.compressed_ssid = edgez_pawr_compress_ssid(
+        block_receiver->config.compressed_ssid = edgez_pawr_compress_ssid(
             (const uint8_t *)mesh_id, strlen(mesh_id));
 #endif
         return ESP_OK;
     }
 
+#if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
+    if (!halow_discovery_init()) return ESP_ERR_NO_MEM;
+    if (!block_receiver) {
+#if CONFIG_SPIRAM
+        block_receiver = heap_caps_calloc(1, sizeof(*block_receiver), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+        block_receiver = calloc(1, sizeof(*block_receiver));
+#endif
+    }
+    if (!block_receiver) return ESP_ERR_NO_MEM;
+#endif
+#if CONFIG_SPIRAM
+    action_queue = xQueueCreateWithCaps(PAWR_QUEUE_DEPTH, sizeof(struct pawr_action), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
     action_queue = xQueueCreate(PAWR_QUEUE_DEPTH, sizeof(struct pawr_action));
+#endif
     if (action_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
@@ -304,7 +331,7 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
         .ctx = &bulk_state,
     };
     if (!edgez_pawr_bulk_receiver_init(&bulk_state.receiver, &bulk_config)) {
-        vQueueDelete(action_queue);
+        pawr_queue_delete(action_queue);
         action_queue = NULL;
         return ESP_ERR_INVALID_STATE;
     }
@@ -312,10 +339,10 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
 #if CONFIG_DAB_DIRECT_MQTT && !CONFIG_OFFGRID_PAWR_BULK_TEST_RECEIVER
     const struct edgez_pawr_bulk_receiver_config block_config = {
         .compressed_ssid = edgez_pawr_compress_ssid((const uint8_t *)mesh_id, strlen(mesh_id)),
-        .send = block_send_ack, .data = block_forward, .done = block_done, .ctx = &block_receiver,
+        .send = block_send_ack, .data = block_forward, .done = block_done, .ctx = block_receiver,
     };
-    if (!edgez_pawr_bulk_receiver_init(&block_receiver, &block_config)) {
-        vQueueDelete(action_queue);
+    if (!edgez_pawr_bulk_receiver_init(block_receiver, &block_config)) {
+        pawr_queue_delete(action_queue);
         action_queue = NULL;
         return ESP_ERR_INVALID_STATE;
     }
@@ -323,8 +350,14 @@ esp_err_t halow_pawr_start(halow_pawr_beacon_callback_t callback, void *arg,
     /* The worker decodes a maximum-size NetworkPacket and can forward it to
      * both the BLE notification queue and the mesh TX queue.  The previous
      * 4 KiB stack was exhausted by that nested protobuf/BLE call chain. */
-    if (xTaskCreate(pawr_worker, "halow_pawr", 8192, NULL, 6, &worker_task) != pdPASS) {
-        vQueueDelete(action_queue);
+#if CONFIG_SPIRAM && CONFIG_FREERTOS_TASK_CREATE_ALLOW_EXT_MEM
+    BaseType_t created = xTaskCreateWithCaps(pawr_worker, "halow_pawr", 12288, NULL, 6, &worker_task,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+    BaseType_t created = xTaskCreate(pawr_worker, "halow_pawr", 8192, NULL, 6, &worker_task);
+#endif
+    if (created != pdPASS) {
+        pawr_queue_delete(action_queue);
         action_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
