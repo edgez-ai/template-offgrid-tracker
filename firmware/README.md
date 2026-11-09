@@ -349,10 +349,52 @@ The quiet image then passed another 85-second run: both USER commands were
 acknowledged, both LED cycles ended, and the retained 60-second report passed
 between them. LOG, RTT and the diagnostic snapshot were disabled in that image.
 With the nRF USB/debug cable disconnected and the same separate 5-V supply,
-the user measured a 400 µA sleep floor between DTIM40 wake bursts, versus
-500 µA for the five-second TWT image: 100 µA (20%) lower. This is 2.0 mW
-at the whole-board input, not a full-cycle average or isolated radio power.
-The quiet DTIM40 wake image remains installed for this comparison.
+the user initially reported 400 µA between DTIM40 wake bursts, then a stable
+600 µA with the same firmware. The initial apparent 20% improvement over the
+500 µA TWT reading is therefore not established as a repeatable result.
+These readings cover the whole-board input; a full-cycle average and isolated
+radio current have not been measured.
+
+For the follow-up DTIM20 comparison, build
+`edgez-nrf54l15-fgh200m-dtim20-test` (quiet) or
+`edgez-nrf54l15-fgh200m-dtim20-audit` (diagnostic), and select HC33 serial
+`a`, `2`, `c` after a fresh HC33 boot. Both sides then use a 20-beacon period,
+nominally 2.048 seconds. The quiet image keeps the IMU off, the SPI IRQ sleep
+pull-up fix, and one-minute reports. The legacy `DTIM40_TEST` Kconfig switch
+selects the shared DTIM test path; `DTIM_PERIOD` chooses 20 or 40.
+
+The setup audit found that `mmdrv_set_dynamic_ps_timeout(0)` failed (SDK
+status 1), but the factory path ignored its result and left the driver at its
+100-ms default. DTIM20 explicitly requests 20 ms, checks success (status 0),
+and the diagnostic image reads back 20 ms in global and STA scope. DTIM40
+defaults to 100 ms to keep its timing available as a separate comparison.
+The DTIM20 profile changes both the DTIM period and the dynamic timeout;
+an eventual current change cannot be attributed to either one alone.
+Timeout tuning affects wake/transmit tails; it does not establish the cause
+of the same-image 400-to-600 µA change.
+
+The live DTIM40 host audit found no held wake veto (`wakers=0`, suspended=1,
+pending_wake=0, WAKE/BUSY low). SPI IRQ had no pull-up, the IMU rail was low,
+and SPI00/TWIM30/UARTE22 were disabled. DTIM20's paired firmware snapshots
+then recorded 59.516996 seconds asleep over 59.995259 seconds (99.20%),
+including a USER command and the minute report between snapshots. Both
+snapshots showed PS and dynamic PS enabled, no queued traffic or beacon loss,
+and zero TWT service periods. TIM mode read back zero non-TIM mode, and slow
+clock selection read back AUTO; AUTO does not prove an external RTC crystal
+is present or selected. Both remote commands, their ACKs, both LED cycles,
+and the one-minute report passed in the diagnostic run with the debugger closed.
+The final quiet DTIM20 image also passed an 85-second run with two remote
+commands, completed ACK/LED cycles, one successful report and no failed reports.
+It was left running after debug power requests were cleared and a normal pin
+reset; HC33's continuous AP beacons and UART monitor remain active for measurement.
+
+Use `--dtim20` in the bench runner for the DTIM20 images. Its `.ps.json`
+records parameter validity/status as well as values; invalid getter responses
+must not be treated as zero-valued settings. The audit captures sleep/MAC
+statistics at 15 and 75 seconds and saves the first and second responses.
+The quiet image compiles these queries out. During firmware changes, loss of
+HC33 AP beacons and debugger attachment can increase current; complete setup
+before disconnecting nRF USB/debug and comparing the external 5-V readings.
 
 Run the DTIM audit with the exact flashed ELF:
 

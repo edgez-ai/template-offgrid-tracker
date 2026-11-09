@@ -172,15 +172,32 @@ config OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
       Shut down the radio at failure. Does not prove RF sleep.
 
 config OFFGRID_NRF54_SENSOR_DTIM40_TEST
-    bool "Compare DTIM40 reception without installing native TWT"
+    bool "Compare DTIM reception without installing native TWT"
     depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
     depends on !OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST
     default n
     help
       Factory AP/STA experiment: retain the PAwR control session, but use
-      TIM mode and a 40-beacon listen interval instead of a TWT agreement.
-      Requires HC33 AP beacons configured with serial '4' before 'c'.
+      TIM mode and the configured listen interval instead of a TWT agreement.
+      Requires matching HC33 AP beacons: serial '2' (20) or '4' (40), then 'c'.
       This manually creates station state; it is not a full association test.
+
+config OFFGRID_NRF54_SENSOR_DTIM_PERIOD
+    int "Beacon intervals per DTIM in the factory comparison"
+    depends on OFFGRID_NRF54_SENSOR_DTIM40_TEST
+    range 1 255
+    default 40
+
+config OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS
+    int "Dynamic PS timeout for the DTIM comparison (ms)"
+    depends on OFFGRID_NRF54_SENSOR_DTIM40_TEST
+    range 20 1000
+    default 100
+
+config OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT
+    bool "Capture DTIM PS parameters and a second sleep snapshot"
+    depends on OFFGRID_NRF54_SENSOR_DTIM40_TEST && OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT
+    default n
 
 config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST
     bool "Use an unannounced agreement in the factory PAwR/TWT experiment"

@@ -56,7 +56,11 @@ def symbols(elf_path):
                    'sensor_twt_mac_snapshot_status', 'sensor_twt_test_capture_after_user',
                    'sensor_twt_sleep_snapshot', 'sensor_twt_sleep_snapshot_length',
                    'sensor_twt_sleep_snapshot_status', 'sensor_twt_test_bootstrap_attempts',
-                   'sensor_dtim40_ready']
+                   'sensor_twt_test_reports_completed', 'sensor_twt_test_reports_failed',
+                   'sensor_dtim40_ready', 'sensor_dtim_period', 'sensor_dtim_timeout_result',
+                   'sensor_dtim_first_sleep', 'sensor_dtim_first_sleep_length',
+                   'sensor_dtim_first_mac', 'sensor_dtim_first_mac_length',
+                   'sensor_dtim_params', 'sensor_dtim_audit_count']
         result = {}
         for name in wanted:
             found = table.get_symbol_by_name(name) or []
@@ -73,6 +77,9 @@ def read_counters(table):
               for name in COUNTERS}
     if 'sensor_twt_test_bootstrap_attempts' in table:
         result['bootstrap_attempts'] = read_memory(table['sensor_twt_test_bootstrap_attempts'][0], 32, 1)[0]
+    for name in ['reports_completed', 'reports_failed']:
+        if 'sensor_twt_test_' + name in table:
+            result[name] = read_memory(table['sensor_twt_test_' + name][0], 32, 1)[0]
     return result
 
 
@@ -108,6 +115,7 @@ def main():
     parser.add_argument('--physical-button', action='store_true',
                         help='With --leave-running, keep UART control lines deasserted and wait for a real USER press')
     parser.add_argument('--keep-beacons', action='store_true', help='Keep firmware AP beacons running until B, m, or reset, including after handoff')
+    parser.add_argument('--dtim20', action='store_true', help='Use DTIM20 image and HC33 serial 2 mode')
     parser.add_argument('--dtim40', action='store_true', help='Use the separate DTIM40 image and HC33 serial 4 mode')
     parser.add_argument('--mesh-after-seed', type=float,
                         help='Send HC33 m after this many ACTIVE seconds to return its radio to mesh')
@@ -115,6 +123,9 @@ def main():
                         help='Opt in to RF snapshots after USER traffic, while its host wake is already held')
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
+    if args.dtim20 and args.dtim40:
+        parser.error('Choose one DTIM period')
+    dtim_period = 20 if args.dtim20 else 40 if args.dtim40 else 0
     delays = sorted(float(value) for value in args.wake_delays.split(','))
     if not delays or delays[0] < 1 or any(b-a < 8 for a, b in zip(delays, delays[1:])):
         parser.error('Wake delays must be at least one second and eight seconds apart')
@@ -124,8 +135,8 @@ def main():
         parser.error('Detach after the 15-second snapshot and before the first command (18+ seconds)')
     if args.keep_beacons and args.mode != 'ap':
         parser.error('--keep-beacons requires --mode ap')
-    if args.dtim40 and (args.mode != 'ap' or not args.keep_beacons):
-        parser.error('--dtim40 requires --mode ap --keep-beacons')
+    if dtim_period and (args.mode != 'ap' or not args.keep_beacons):
+        parser.error('DTIM tests require --mode ap --keep-beacons')
     if args.normal_boot and (args.detach_after is not None or args.snapshot_after_user):
         parser.error('--normal-boot cannot use --detach-after or debugger-set --snapshot-after-user')
     if args.leave_running and not args.normal_boot:
@@ -169,7 +180,7 @@ def main():
             text = f'{time.monotonic()-started:.3f} [{name}] {line}'
             output.write(text + '\n')
             output.flush()
-            if name == 'TEST' or any(s in line for s in ['PAWR_TWT', 'TWT_SYNC', 'TWT_AP', 'TWT_MESH', 'DTIM40', 'USER_PIN', '<err>']):
+            if name == 'TEST' or any(s in line for s in ['PAWR_TWT', 'TWT_SYNC', 'TWT_AP', 'TWT_MESH', 'DTIM40', 'DTIM20', 'USER_PIN', '<err>']):
                 print(text, flush=True)
 
         def start_server():
@@ -251,6 +262,22 @@ def main():
                 raw = bytes(read_memory(table[prefix][0], 8, length))
                 args.log.with_suffix('.sleep.bin').write_bytes(raw)
                 record('TEST', f'Saved existing Apps-core sleep snapshot bytes={length}; no RF query')
+            if 'sensor_dtim_params' in table:
+                audit = {'count': read_memory(table['sensor_dtim_audit_count'][0], 32, 1)[0],
+                         'param_ids': [4, 5, 16, 17, 18, 20, 24],
+                         'columns': ['sdk_status', 'firmware_status_u32', 'value', 'valid'],
+                         'global_then_sta': read_memory(table['sensor_dtim_params'][0], 32, 56),
+                         'timeout_set_status_value_zero_probe_status': read_memory(
+                             table['sensor_dtim_timeout_result'][0], 32, 3)}
+                args.log.with_suffix('.ps.json').write_text(json.dumps(audit, indent=2) + '\n')
+                for kind in ['sleep', 'mac']:
+                    prefix = 'sensor_dtim_first_' + kind
+                    length = read_memory(table[prefix + '_length'][0], 32, 1)[0]
+                    if not 16 <= length <= table[prefix][1]:
+                        raise ValueError(f'Invalid first DTIM {kind} snapshot length {length}')
+                    args.log.with_suffix(f'.first.{kind}.bin').write_bytes(
+                        bytes(read_memory(table[prefix][0], 8, length)))
+                record('TEST', 'Saved DTIM PS parameters and both audit snapshots; no RF query')
 
         def send(command):
             port.write(command.encode())
@@ -305,12 +332,12 @@ def main():
                             match = re.search(r'sequence=(\d+).*queued=1', line)
                             if match:
                                 queued_sequences.append(int(match.group(1)))
-                        if args.dtim40 and active_at is not None and 'DTIM40 USER burst sequence=' in line:
+                        if dtim_period and active_at is not None and f'DTIM{dtim_period} USER burst sequence=' in line:
                             match = re.search(r'sequence=(\d+)', line)
                             if match:
                                 queued_sequences.append(int(match.group(1)))
                         if active_at is not None and ('PAWR_TWT STATS sequence=' in line or
-                                (args.dtim40 and 'DTIM40 ACK sequence=' in line)):
+                                (dtim_period and f'DTIM{dtim_period} ACK sequence=' in line)):
                             match = re.search(r'sequence=(\d+)', line)
                             if match:
                                 acknowledgements += 1
@@ -323,8 +350,8 @@ def main():
                     reset_at = now + 2
                 if reset_at is not None and not reset_done and now >= reset_at:
                     if args.mode == 'ap':
-                        if args.dtim40:
-                            send('4')
+                        if dtim_period:
+                            send('2' if dtim_period == 20 else '4')
                         send('c' if args.keep_beacons else 'b')
                         beacon_at = now
                     if args.normal_boot:
@@ -405,7 +432,7 @@ def main():
                     checks['physical_gpio_and_ack'] = physical['gpio_trigger'] and physical['acknowledged']
                 if args.mesh_after_seed is not None:
                     checks['returned_to_mesh_with_same_mac'] = mesh_confirmed
-                result = {'mode': args.mode, 'dtim40': args.dtim40, 'session': session, 'functional_pass': None,
+                result = {'mode': args.mode, 'dtim40': args.dtim40, 'dtim_period': dtim_period, 'session': session, 'functional_pass': None,
                           'hc33_observation_pass': all(checks.values()), 'checks': checks,
                           'commands': sent, 'hc33_acknowledgements': acknowledgements,
                           'counter_verification': 'skipped to avoid debugger reattachment',
@@ -426,8 +453,15 @@ def main():
             led_out = read_memory(0x50050400, 32, 1)[0]
             led_dir = read_memory(0x50050410, 32, 1)[0]
             checks = assess(session, counters, sent, acknowledgements)
-            if args.dtim40:
-                checks['dtim40_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
+            if dtim_period:
+                checks['dtim_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
+                if 'sensor_dtim_period' in table:
+                    checks['dtim_period_matches'] = read_memory(table['sensor_dtim_period'][0], 32, 1)[0] == dtim_period
+                if 'sensor_dtim_timeout_result' in table:
+                    timeout_status, timeout_ms = read_memory(table['sensor_dtim_timeout_result'][0], 32, 2)
+                    checks['dynamic_ps_timeout_configured'] = timeout_status == 0 and timeout_ms >= 20
+                if args.duration >= 70 and 'reports_completed' in counters:
+                    checks['minute_report_retained'] = counters['reports_completed'] > 0 and counters['reports_failed'] == 0
             checks['all_commands_queued'] = len(queued_sequences) == sent
             checks['led_pin_off'] = bool(led_out & 32) and not bool(led_dir & 32)
             reset_reason = read_memory(0x5010e600, 32, 1)[0]
@@ -435,7 +469,7 @@ def main():
                 checks['pin_reset_detected'] = bool(reset_reason & 1)
             if args.mesh_after_seed is not None:
                 checks['returned_to_mesh_with_same_mac'] = mesh_confirmed
-            result = {'mode': args.mode, 'dtim40': args.dtim40, 'session': session, 'debugger_closed_during_commands': detached,
+            result = {'mode': args.mode, 'dtim40': args.dtim40, 'dtim_period': dtim_period, 'session': session, 'debugger_closed_during_commands': detached,
                       'probe_wiring_connected': True, 'duration_after_active_seconds': args.duration,
                       'snapshot_after_user': args.snapshot_after_user,
                       'mesh_after_seed': args.mesh_after_seed, 'mesh_confirmed': mesh_confirmed,

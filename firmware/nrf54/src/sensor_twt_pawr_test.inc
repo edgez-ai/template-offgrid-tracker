@@ -20,6 +20,47 @@ static volatile uint32_t sensor_twt_test_reports_completed;
 static volatile uint32_t sensor_twt_test_reports_failed;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM40_TEST)
 static volatile uint32_t sensor_dtim40_ready;
+static volatile uint32_t sensor_dtim_period;
+static volatile uint32_t sensor_dtim_timeout_result[3];
+#endif
+
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+#include "edgez_morse_diagnostics.h"
+/* Rows: global then STA; columns: SDK status, FW status, value, validity.
+ * Parameters: power-save type, snooze adjustment, memory retention, non-TIM,
+ * dynamic timeout, slow clock mode, beacon offload. Read-only and bounded. */
+static const uint32_t sensor_dtim_param_ids[] = {4, 5, 16, 17, 18, 20, 24};
+static volatile uint32_t sensor_dtim_params[2][7][4];
+static volatile uint32_t sensor_dtim_audit_count;
+static uint8_t sensor_dtim_first_sleep[4096] __aligned(4);
+static volatile uint32_t sensor_dtim_first_sleep_length;
+static uint8_t sensor_dtim_first_mac[EDGEZ_MORSE_MAC_DIAGNOSTICS_CAPACITY] __aligned(4);
+static volatile uint32_t sensor_dtim_first_mac_length;
+
+static void sensor_dtim_read_ps_params(void)
+{
+    const uint16_t scopes[] = {UINT16_MAX, mesh_runtime.umac.vif_id};
+    for (unsigned s = 0; s < ARRAY_SIZE(scopes); ++s) {
+        for (unsigned i = 0; i < ARRAY_SIZE(sensor_dtim_param_ids); ++i) {
+            struct morse_cmd_req_get_set_generic_param cmd = MORSE_COMMAND_INIT(cmd,
+                MORSE_CMD_ID_GET_SET_GENERIC_PARAM, scopes[s],
+                .param_id = htole32(sensor_dtim_param_ids[i]),
+                .action = htole32(MORSE_CMD_PARAM_ACTION_GET));
+            struct morse_cmd_resp_get_set_generic_param reply = {0};
+            uint32_t len = sizeof(reply);
+            enum mmwlan_status sdk = mmdrv_execute_command((uint8_t *)&cmd, (uint8_t *)&reply, &len);
+            bool valid = (sdk == MMWLAN_SUCCESS || sdk == MMWLAN_COMMAND_ERROR) &&
+                len >= sizeof(struct morse_cmd_resp) && len <= sizeof(reply) &&
+                le16toh(reply.hdr.message_id) == MORSE_CMD_ID_GET_SET_GENERIC_PARAM &&
+                le16toh(reply.hdr.vif_id) == scopes[s];
+            sensor_dtim_params[s][i][0] = sdk;
+            sensor_dtim_params[s][i][1] = valid ? le32toh(reply.status) : INT32_MIN;
+            sensor_dtim_params[s][i][2] = valid && len == sizeof(reply) ? le32toh(reply.value) : 0;
+            sensor_dtim_params[s][i][3] = valid && sdk == MMWLAN_SUCCESS &&
+                le32toh(reply.status) == 0 && len == sizeof(reply);
+        }
+    }
+}
 #endif
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
 static volatile uint32_t sensor_twt_native_ps_ready;
@@ -572,11 +613,25 @@ static bool sensor_twt_pawr_test(void)
     /* Control exchange is complete before enabling the long beacon sleep.
      * The PAwR schedule is transport metadata only in this experiment. */
     if (mesh_runtime.umac.driver->configure_bss(mesh_runtime.umac.driver_ctx,
-            mesh_runtime.umac.vif_id, 100, 40, 0) != 0 ||
-        !sensor_twt_ps_contract_values(MORSE_CMD_ID_LI_SLEEP, 40, false) ||
-        !sensor_twt_ps_contract_values(MORSE_CMD_ID_GET_SET_GENERIC_PARAM, 40, false)) goto done;
+            mesh_runtime.umac.vif_id, 100, CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PERIOD, 0) != 0 ||
+        !sensor_twt_ps_contract_values(MORSE_CMD_ID_LI_SLEEP, CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PERIOD, false) ||
+        !sensor_twt_ps_contract_values(MORSE_CMD_ID_GET_SET_GENERIC_PARAM, CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PERIOD, false)) goto done;
+    /* Record support for the old zero-timeout request in diagnostic builds.
+     * The factory path previously ignored that request's failure. */
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+    sensor_dtim_timeout_result[2] = mmdrv_set_dynamic_ps_timeout(0);
+#endif
+    sensor_dtim_timeout_result[0] = mmdrv_set_dynamic_ps_timeout(
+        CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS);
+    if (sensor_dtim_timeout_result[0] != MMWLAN_SUCCESS) goto done;
+    sensor_dtim_timeout_result[1] = CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+    sensor_dtim_read_ps_params();
+#endif
+    sensor_dtim_period = CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PERIOD;
     sensor_dtim40_ready = 1;
-    LOG_INF("DTIM40 ACTIVE beacon_tu=100 dtim=40 listen=40 non_tim=0 native_twt=0 association_frames=0");
+    LOG_INF("DTIM ACTIVE beacon_tu=100 dtim=%u listen=%u non_tim=0 native_twt=0 association_frames=0",
+        sensor_dtim_period, sensor_dtim_period);
 #endif
     edgez_gps_stop();
     /* Release host wake after setup. Only actual PAwR USER traffic supplies
@@ -603,6 +658,15 @@ static bool sensor_twt_pawr_test(void)
         if (snapshot_at != UINT64_MAX && now >= snapshot_at) {
             snapshot_at = UINT64_MAX;
             sensor_twt_capture_mac();
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+            if (sensor_dtim_audit_count++ == 0) {
+                sensor_dtim_first_sleep_length = sensor_twt_sleep_snapshot_length;
+                memcpy(sensor_dtim_first_sleep, sensor_twt_sleep_snapshot, sensor_dtim_first_sleep_length);
+                sensor_dtim_first_mac_length = sensor_twt_mac_snapshot_length;
+                memcpy(sensor_dtim_first_mac, sensor_twt_mac_snapshot, sensor_dtim_first_mac_length);
+                snapshot_at = release_at + 75000000;
+            }
+#endif
             now = sensor_twt_now_us();
         }
 #endif

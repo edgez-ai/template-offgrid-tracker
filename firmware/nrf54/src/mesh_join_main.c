@@ -2620,13 +2620,15 @@ static bool sensor_configure_halow_power_save(void)
 	 * is normally managed by the associated-STA UMAC flow, which this PAwR-only
 	 * mesh VIF does not run. Configure it explicitly once after radio startup,
 	 * then use only the cheap host-wake toggle for subsequent report cycles. */
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PS_PROBE) && defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)
+	if (sensor_factory_wake_mode) {
+		return sensor_twt_pawr_test();
+	}
+#endif
 	enum mmwlan_status status = mmdrv_set_dynamic_ps_timeout(0U);
 
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PS_PROBE)
 	if (sensor_factory_wake_mode) {
-#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)
-		return sensor_twt_pawr_test();
-#endif
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_RX_SLEEP_COMPARE)
 		if (!sensor_probe_config_ps(false, false)) {
 			return false;

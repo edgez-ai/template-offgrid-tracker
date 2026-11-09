@@ -112,7 +112,7 @@ static atomic_uint sync_dtim_period = ATOMIC_VAR_INIT(1);
 static unsigned sync_dtim_count;
 static atomic_uint sync_beacons_built;
 static atomic_bool dtim_command_pending;
-static bool dtim40_mode;
+static bool dtim_mode;
 static uint64_t dtim_burst_until, dtim_next_tx;
 static struct edgez_pawr_twt dtim_probe;
 
@@ -139,7 +139,7 @@ struct mmpkt *__wrap_mmdrv_host_get_beacon(void)
             if (sync_dtim_count >= period) sync_dtim_count = period - 1;
             data[at + 2] = sync_dtim_count;
             data[at + 3] = period;
-            if (period == 40 && data[at + 1] == 6) {
+            if ((period == 20 || period == 40) && data[at + 1] == 6) {
                 bool pending = atomic_load(&dtim_command_pending);
                 /* SDK S1G TIM: unsliced page 0, block bitmap, AID 1. */
                 data[at + 4] = 0x3e | (pending && !sync_dtim_count ? 1 : 0);
@@ -147,8 +147,8 @@ struct mmpkt *__wrap_mmdrv_host_get_beacon(void)
                 data[at + 6] = 1;
                 data[at + 7] = pending ? 2 : 0;
             }
-            if (period == 40 && sync_dtim_count == 0)
-                ESP_LOGI(TAG, "DTIM40 BEACON count=0 period=40 built=%u", atomic_load(&sync_beacons_built));
+            if ((period == 20 || period == 40) && sync_dtim_count == 0)
+                ESP_LOGI(TAG, "DTIM%u BEACON count=0 period=%u built=%u", period, period, atomic_load(&sync_beacons_built));
             sync_dtim_count = sync_dtim_count ? sync_dtim_count - 1 : period - 1;
             atomic_fetch_add(&sync_beacons_built, 1);
             break;
@@ -200,7 +200,7 @@ static void sync_beacon_start(bool continuous)
         5, 2, 0, 1,                    /* SDK empty S1G TIM: count and period only. */
     };
     memcpy(frame + n, timing_ies, sizeof(timing_ies)); n += sizeof(timing_ies);
-    if (atomic_load(&sync_dtim_period) == 40) {
+    if (dtim_mode) {
         frame[n - 3] = 6; /* TIM length, extended for its pending-traffic bitmap. */
         frame[n++] = 0x3e; frame[n++] = 0; frame[n++] = 1; frame[n++] = 0;
     }
@@ -417,7 +417,7 @@ static bool send_twt(const struct edgez_pawr_twt *msg, const uint8_t peer[6])
             ++request_id, 0, ssid, payload, sizeof(payload), &packet_length)) return false;
     if (!edgez_pawr_encode_action_frame(frame, sizeof(frame), sequence_number++,
             radio_info.mac_addr, peer, packet, packet_length, &frame_length)) return false;
-    if (dtim40_mode) memcpy(frame + 16, radio_info.mac_addr, 6);
+    if (dtim_mode) memcpy(frame + 16, radio_info.mac_addr, 6);
     const struct edgez_umac_tx_request tx = {
         .token = ++tx_token, .frame = frame, .frame_length = frame_length,
         .frame_type = EDGEZ_UMAC_TX_MANAGEMENT, .tid = 8, .mcs = 0,
@@ -487,12 +487,12 @@ static void twt_receive_pending(void)
                 msg->round_trip_us != schedule.round_trip_us ||
                 msg->sequence != pending_probe_sequence || msg->echo_host_us != pending_probe_us)
                 continue;
-            if (dtim40_mode) {
+            if (dtim_mode) {
                 atomic_store(&dtim_command_pending, false);
                 dtim_burst_until = 0;
                 pending_probe_us = 0;
                 user_wake_pending = false;
-                ESP_LOGI(TAG, "DTIM40 ACK sequence=%lu beacons_built=%u", (unsigned long)msg->sequence,
+                ESP_LOGI(TAG, "DTIM%u ACK sequence=%lu beacons_built=%u", atomic_load(&sync_dtim_period), (unsigned long)msg->sequence,
                     atomic_load(&sync_beacons_built));
                 continue;
             }
@@ -769,10 +769,11 @@ static void wake_sender_task(void *arg)
         if (command == 'P') pm_audit_stop();
         if (command == 'b') sync_beacon_start(false);
         if (command == 'c') sync_beacon_start(true);
-        if (command == '4' && sync_ap_mode && !sync_beacon_until && !twt_active && !twt_pending) {
-            dtim40_mode = true;
-            atomic_store(&sync_dtim_period, 40);
-            ESP_LOGI(TAG, "DTIM40 MODE native_twt=0 USER_burst_ms=4300 beacon_period=40");
+        if ((command == '4' || command == '2') && sync_ap_mode && !sync_beacon_until && !twt_active && !twt_pending) {
+            dtim_mode = true;
+            unsigned period = command == '2' ? 20 : 40;
+            atomic_store(&sync_dtim_period, period);
+            ESP_LOGI(TAG, "DTIM%u MODE native_twt=0 beacon_period=%u", period, period);
         }
         if (command == 'B') sync_beacon_stop();
         if (command == 'd') capture_mac_diagnostics();
@@ -797,7 +798,7 @@ static void wake_sender_task(void *arg)
             log_button_state(button_trigger ? "debounce-pass" : "debounce-rejected");
         }
         now = esp_timer_get_time();
-        if (dtim40_mode && twt_active) {
+        if (dtim_mode && twt_active) {
             if (button_trigger || command == 'w') {
                 dtim_probe = schedule;
                 dtim_probe.kind = EDGEZ_PAWR_TWT_PROBE;
@@ -805,13 +806,14 @@ static void wake_sender_task(void *arg)
                 dtim_probe.echo_host_us = now;
                 pending_probe_us = now;
                 pending_probe_sequence = dtim_probe.sequence;
-                dtim_burst_until = now + 4300000;
+                uint32_t burst_us = (atomic_load(&sync_dtim_period) + 2U) * 102400U;
+                dtim_burst_until = now + burst_us;
                 atomic_store(&dtim_command_pending, true);
                 dtim_next_tx = now;
-                ESP_LOGI(TAG, "DTIM40 USER burst sequence=%lu duration_ms=4300", (unsigned long)dtim_probe.sequence);
+                ESP_LOGI(TAG, "DTIM%u USER burst sequence=%lu duration_ms=%u", atomic_load(&sync_dtim_period), (unsigned long)dtim_probe.sequence, burst_us / 1000U);
             }
             if (dtim_burst_until && now >= dtim_burst_until) {
-                ESP_LOGW(TAG, "DTIM40 USER timeout without ACK");
+                ESP_LOGW(TAG, "DTIM%u USER timeout without ACK", atomic_load(&sync_dtim_period));
                 dtim_burst_until = pending_probe_us = 0;
                 atomic_store(&dtim_command_pending, false);
             }
