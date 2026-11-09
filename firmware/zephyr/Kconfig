@@ -82,6 +82,15 @@ config OFFGRID_NRF54_IMU_TIMER_DRAIN
       in hardware while the MCU remains in System ON idle; the application
       drains the FIFO synchronously after the reporting timer wakes it.
 
+config OFFGRID_NRF54_SENSOR_SPI_IRQ_SLEEP_NOPULL
+    bool "Remove the sensor SPI IRQ pull-up while transport IRQ is masked"
+    depends on OFFGRID_NRF54_SENSOR_HALOW_POWER_SAVE
+    default n
+    help
+      FGH200M power test: the SPI IRQ pin can be low during retained sleep.
+      Remove its pull-up only after the SDK masks IRQ, and restore the pull-up
+      before checking/unmasking IRQ on wake. Preserve BUSY wake and polarity.
+
 config OFFGRID_NRF54_SENSOR_GPS
     bool "Wake GPS during each low-power sensor reporting cycle"
     default n

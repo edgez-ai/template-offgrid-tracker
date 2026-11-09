@@ -79,6 +79,36 @@ if not is_complete_morse_module(mm_root):
     print(f"ERROR: Complete mm-iot-zephyr source checkout not found at {mm_root}")
     env.Exit(1)
 
+def patch_sensor_sleep_irq_pull(module):
+    """Keep the optional sensor sleep-pin fix reproducible in vendor sources."""
+    path = module / "drivers/wifi/morsemicro/morsemicro_spi.c"
+    source = path.read_text(encoding="utf-8")
+    marker = "CONFIG_OFFGRID_NRF54_SENSOR_SPI_IRQ_SLEEP_NOPULL"
+    if marker in source:
+        return
+    enable = '\tif (enabled) {\n\t\t/* The transiver'
+    disable = ('\t} else {\n'
+               '\t\tgpio_pin_interrupt_configure_dt(&bus_config.spi_irq, GPIO_INT_DISABLE);\n'
+               '\t}\n}\n\nstatic int morsemicro_bus_init')
+    if source.count(enable) != 1 or source.count(disable) != 1:
+        raise RuntimeError("Unsupported Morse SPI IRQ layout for sensor sleep pull fix")
+    source = source.replace(enable, '\tif (enabled) {\n'
+        '#if defined(' + marker + ')\n'
+        '\t\t/* Restore open-drain bias before reading/unmasking IRQ. */\n'
+        '\t\tgpio_pin_configure_dt(&bus_config.spi_irq, GPIO_INPUT | GPIO_PULL_UP);\n'
+        '#endif\n\t\t/* The transiver')
+    source = source.replace(disable, '\t} else {\n'
+        '\t\tgpio_pin_interrupt_configure_dt(&bus_config.spi_irq, GPIO_INT_DISABLE);\n'
+        '#if defined(' + marker + ')\n'
+        '\t\t/* IRQ is masked before retained sleep; BUSY remains the wake source. */\n'
+        '\t\tgpio_pin_configure_dt(&bus_config.spi_irq, GPIO_INPUT);\n'
+        '#endif\n\t}\n}\n\nstatic int morsemicro_bus_init')
+    path.write_text(source, encoding="utf-8")
+    print("Prepared optional sensor sleep SPI IRQ pull fix")
+
+
+patch_sensor_sleep_irq_pull(mm_root)
+
 pio_env = env.get("PIOENV", "")
 edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
 if not edgez_source_option:

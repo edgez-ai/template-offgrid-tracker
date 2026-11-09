@@ -302,6 +302,11 @@ after a failure. The retained session still requires the radio to remain powered
 Sensor profiles use 10000 kernel ticks/s so the GRTC 1 MHz counter has an
 integer 100 cycles/tick. The previous 32768 ticks/s setting truncated to
 30 cycles/tick, shortening a configured minute to 58.9824 seconds.
+The current sensor power overlay disables the IMU and I2C30, removes the
+XIAO IMU power-on hog, and holds P0.01 low. IMU INT/SCL/SDA remain disconnected
+without pull-ups; telemetry contains no IMU samples. This also avoids leaving
+TWIM30 enabled after an IMU initialization failure. The TWT interval and
+one-minute report schedule are unchanged.
 Clean the nRF build after changing the tick rate: an incremental build can
 retain a timer object compiled with the old value. The clean five-second image
 was checked on hardware: consecutive retained-session reports were 59.999 s apart.
