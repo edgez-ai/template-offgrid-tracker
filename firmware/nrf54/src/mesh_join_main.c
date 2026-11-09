@@ -1584,6 +1584,9 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
         k_spinlock_key_t key = k_spin_lock(&sensor_pawr_lock);
         sensor_twt_seed_valid = false;
         k_spin_unlock(&sensor_pawr_lock, key);
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+        return sensor_pawr_exchange(wake_interval_ms);
+#else
         /* Unassociated STA needs broad RX for this existing PAwR ACK window.
          * No discovery packets, channel sweep or additional listening period. */
         uint16_t monitor = UINT16_MAX;
@@ -1602,6 +1605,7 @@ static int sensor_pawr_send_once(uint32_t wake_interval_ms)
             return rc ? rc : -EIO;
         }
         return 0;
+#endif
     }
 #endif
     return sensor_pawr_exchange(wake_interval_ms);
@@ -3146,7 +3150,8 @@ static int start_sensor_radio(const struct edgez_halow_profile *profile)
 		.events = join_events,
 	};
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_PS_PROBE)
-	if (sensor_factory_wake_mode) {
+	if (sensor_factory_wake_mode &&
+	    !IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)) {
 		static struct edgez_rf_backend_ops station_probe_ops;
 		station_probe_ops = *config.radio;
 		station_probe_ops.add_mesh_interface = sensor_probe_add_station;

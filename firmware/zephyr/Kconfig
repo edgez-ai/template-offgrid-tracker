@@ -171,6 +171,16 @@ config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST
       Compare firmware service-period counters with the announced baseline;
       command acceptance and application RX do not establish RF sleep.
 
+config OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST
+    bool "Probe native TWT on a MESH VIF without STA state or AP timing"
+    depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
+    default n
+    help
+      Keep the radio backend's native MESH interface. Do not create a STA
+      or monitor interface, scan, set BSSID, authorize a station, or configure
+      STA listen/non-TIM behavior. Test native validate/install commands on
+      the MESH VIF and retain diagnostics. Firmware support is not assumed.
+
 config OFFGRID_NRF54_SENSOR_TWT_BEACON_SYNC_TEST
     bool "Allow native BSS timing seed before installing TWT (factory test)"
     depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST

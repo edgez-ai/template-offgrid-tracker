@@ -302,6 +302,9 @@ after a failure. The retained session still requires the radio to remain powered
 Sensor profiles use 10000 kernel ticks/s so the GRTC 1 MHz counter has an
 integer 100 cycles/tick. The previous 32768 ticks/s setting truncated to
 30 cycles/tick, shortening a configured minute to 58.9824 seconds.
+Clean the nRF build after changing the tick rate: an incremental build can
+retain a timer object compiled with the old value. The clean five-second image
+was checked on hardware: consecutive retained-session reports were 59.999 s apart.
 
 With both images flashed, run the CMSIS-DAP bench test using Python with
 `pyserial` and `pyelftools` installed:
@@ -414,6 +417,29 @@ SPI/UART disabled, and zero HAL deep-sleep vetoes. The observed loss of radio
 sleep followed removal of AP timing; adding another CPU sleep call alone does
 not address that dependency. The quiet handoff uses AP/STA context with
 continuous HC33 beacons; fully stateless TWT sleep is still unverified.
+
+The `edgez-nrf54l15-fgh200m-twt-native-mesh-test` diagnostic retains a native
+MESH VIF on both boards, with no STA interface, manual station authorization,
+BSSID setup, STA listen/non-TIM configuration, scanning, monitor interface, AP
+beacons, or association. On November 9, stateless PAwR bootstrap and the
+five-second application offer/accept succeeded. Native
+`TWT_AGREEMENT_VALIDATE` (`0x0036`) rejected all three tested forms:
+
+| Form | Request type | Target TSF | Result |
+| --- | --- | --- | --- |
+| Basic 1-second REQUEST | `0x1021` | 0 | SDK 14, firmware -32768 |
+| Basic 5.000064-second REQUEST | `0x1c21` | 0 | SDK 14, firmware -32768 |
+| Negotiated 5.000064-second SUGGEST | `0x1c23` | Future radio TSF | SDK 14, firmware -32768 |
+
+SDK 14 is `MMWLAN_COMMAND_ERROR`, with a valid firmware response in each case.
+No agreement was installed and no MESH TWT sleep or remote wake was established.
+This rules out the five-second encoding as the sole cause of this failure;
+firmware support or an additional firmware requirement for MESH remains to be
+resolved. The diagnostic shuts the radio down after failure and does not retry
+automatically. Its low idle current must not be mistaken for retained TWT sleep.
+The working reference still uses an nRF STA context and continuous HC33 AP
+beacons, despite having no on-air authentication/association exchange. It does
+not meet the native-MESH-only requirement.
 
 An isolated SET_LONG_SLEEP_CONFIG comparison did enter sleep, but reported
 zero TWT service periods and received no later HC33 command. That option is

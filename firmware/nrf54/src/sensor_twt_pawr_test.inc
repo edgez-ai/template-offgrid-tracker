@@ -356,8 +356,23 @@ static bool sensor_twt_pawr_test(void)
     sensor_twt_log_busy("setup");
 #endif
     if (mmdrv_set_wake_enabled(true) != MMWLAN_SUCCESS ||
-        !sensor_probe_long_sleep(false) || !sensor_probe_config_ps(false, false)) goto done;
+        !sensor_probe_config_ps(false, false)) goto done;
     k_msgq_purge(&sensor_twt_queue);
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+    LOG_INF("PAWR_TWT NATIVE_MESH vif=%u STA=0 BSSID_SET=0 association=0 AP_beacons=0 monitor=0 scan=0",
+        mesh_runtime.umac.vif_id);
+    /* Compare SDK REQUEST forms before the negotiated SUGGEST below.
+     * Validation alone does not install state or establish a wake schedule. */
+    k_msleep(100);
+    bool request_1s = sensor_probe_twt_with_mantissa_at(
+        MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, 0x1021, 0, 62500);
+    k_msleep(100);
+    bool request_5s = sensor_probe_twt_with_mantissa_at(
+        MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, 0x1c21, 0, SENSOR_TWT_WAKE_MANTISSA);
+    LOG_INF("PAWR_TWT NATIVE_MESH SDK_REQUEST accepted_1s=%u accepted_5s=%u", request_1s, request_5s);
+    k_msleep(100);
+#else
+    if (!sensor_probe_long_sleep(false)) goto done;
     /* Match umac_connection_set_bss_cfg(): station BSS configuration uses
      * zero DTIM/CSSID, unlike the mesh/AP configuration used at radio start.
      * PAwR's application-level CSSID remains in mesh_runtime.config. */
@@ -372,7 +387,7 @@ static bool sensor_twt_pawr_test(void)
 #endif
     /* The SDK programs LI_SLEEP at interface creation, then non-TIM after
      * association. LI_SLEEP counts configured beacon intervals; this does
-     * not change the separately negotiated 2.000 s TWT agreement. */
+     * not change the separately negotiated TWT agreement. */
     if (!sensor_twt_ps_contract(MORSE_CMD_ID_LI_SLEEP)) goto done;
     for (uint16_t state = 1; state <= 4; ++state) {
         if (!sensor_probe_sta_state(state)) goto done;
@@ -386,6 +401,7 @@ static bool sensor_twt_pawr_test(void)
      * firmware. Linux uses PS_NULLFUNC_STACK when offload is disabled;
      * this stateless host does not implement that PM-null state machine. */
     if (!sensor_probe_config_ps(true, true)) goto done;
+#endif
     /* Clock mapping must be supported and advancing before any install. */
     uint64_t previous;
     if (!sensor_probe_get_tsf(&previous)) goto done;
@@ -424,6 +440,9 @@ static bool sensor_twt_pawr_test(void)
     installed = sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL,
         request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA);
     if (!installed) goto done;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+    if (!sensor_probe_config_ps(true, true)) goto done;
+#endif
     offer.kind = EDGEZ_PAWR_TWT_COMMIT;
     bool ready = false;
     for (unsigned retry = 0; retry < 3; ++retry) {
