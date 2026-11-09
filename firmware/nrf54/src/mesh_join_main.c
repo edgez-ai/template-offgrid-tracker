@@ -2372,6 +2372,13 @@ static bool sensor_probe_get_tsf(uint64_t *tsf)
 	return valid;
 }
 
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+/* Exact command outcomes survive dropped RTT lines, including failed setup.
+ * Rows: command, req_type, SDK status, valid response, firmware status, bytes. */
+static volatile uint32_t sensor_twt_native_results[8][6];
+static volatile uint32_t sensor_twt_native_result_count;
+#endif
+
 static bool sensor_probe_twt_with_mantissa_at(uint16_t command_id,
 	uint16_t request_type, uint64_t target_tsf, uint16_t wake_mantissa)
 {
@@ -2403,6 +2410,18 @@ static bool sensor_probe_twt_with_mantissa_at(uint16_t command_id,
 		response_len >= sizeof(reply.resp) && response_len <= sizeof(reply) &&
 		le16toh(reply.resp.hdr.message_id) == command_id &&
 		le16toh(reply.resp.hdr.vif_id) == mesh_runtime.umac.vif_id;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+	uint32_t row = sensor_twt_native_result_count;
+	if (row < ARRAY_SIZE(sensor_twt_native_results)) {
+		sensor_twt_native_results[row][0] = command_id;
+		sensor_twt_native_results[row][1] = request_type;
+		sensor_twt_native_results[row][2] = status;
+		sensor_twt_native_results[row][3] = valid;
+		sensor_twt_native_results[row][4] = valid ? le32toh(reply.resp.status) : INT32_MIN;
+		sensor_twt_native_results[row][5] = response_len;
+		sensor_twt_native_result_count = row + 1;
+	}
+#endif
 	LOG_INF("TWT_PROBE cmd=0x%04x vif=%u flow=0 unannounced=%u req_type=0x%04x target=%llu sdk=%d response_valid=%u fw=%d bytes=%u",
 		command_id, mesh_runtime.umac.vif_id, !!(request_type & BIT(6)), request_type,
 		(unsigned long long)target_tsf, status, valid,

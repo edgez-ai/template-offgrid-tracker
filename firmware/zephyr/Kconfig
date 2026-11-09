@@ -172,14 +172,25 @@ config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST
       command acceptance and application RX do not establish RF sleep.
 
 config OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST
-    bool "Probe native TWT on a MESH VIF without STA state or AP timing"
+    bool "Probe native TWT on a MESH VIF without a STA VIF or AP timing"
     depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
     default n
     help
       Keep the radio backend's native MESH interface. Do not create a STA
-      or monitor interface, scan, set BSSID, authorize a station, or configure
-      STA listen/non-TIM behavior. Test native validate/install commands on
-      the MESH VIF and retain diagnostics. Firmware support is not assumed.
+      or monitor interface, scan, set BSSID, or configure STA listen/non-TIM
+      behavior. Start beaconless MESH and test native validate/direct-install
+      commands with PS offload enabled. The default has no peer authorization;
+      a separate opt-in peer test compares manually registered mesh peers.
+      Retain diagnostics. Firmware support is not assumed.
+
+config OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_PEER_TEST
+    bool "Add a static peer record before the native MESH TWT probe"
+    depends on OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST && OFFGRID_NRF54_SENSOR_TWT_STATE_PROBE
+    default n
+    help
+      Compare the bare MESH VIF with manually registered peer states, as used
+      by mac80211 for mesh peers. No STA VIF or on-air association is created.
+      This is a stateful peer diagnostic, not a stateless operating mode.
 
 config OFFGRID_NRF54_SENSOR_TWT_BEACON_SYNC_TEST
     bool "Allow native BSS timing seed before installing TWT (factory test)"

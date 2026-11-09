@@ -18,6 +18,36 @@ static volatile uint32_t sensor_twt_test_led_off;
 static volatile uint32_t sensor_twt_test_host_released;
 static volatile uint32_t sensor_twt_test_reports_completed;
 static volatile uint32_t sensor_twt_test_reports_failed;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+static volatile uint32_t sensor_twt_native_ps_ready;
+/* SDK status, requester capability, responder capability. */
+static volatile uint32_t sensor_twt_native_capabilities[3];
+/* SDK status, valid response, firmware status for beaconless MESH START. */
+static volatile uint32_t sensor_twt_native_mesh_start_result[3];
+
+static bool sensor_twt_native_start_mesh(void)
+{
+    /* Linux morse_cmd_cfg_mesh_bss(beaconless): START, beaconing=0, MBCA=0.
+     * SDK ABI has no wrapper; payload matches morse_cmd_req_mesh_config. */
+    struct __packed {
+        struct morse_cmd_header hdr;
+        uint8_t opcode, beaconing, mbca, min_beacon_gap_ms;
+        uint16_t scan_duration_ms, tbtt_adjust_interval_ms;
+    } cmd = MORSE_COMMAND_INIT(cmd, 0x0039, mesh_runtime.umac.vif_id);
+    struct morse_cmd_resp reply = {0};
+    uint32_t bytes = sizeof(reply);
+    enum mmwlan_status sdk = mmdrv_execute_command((uint8_t *)&cmd, (uint8_t *)&reply, &bytes);
+    bool valid = (sdk == MMWLAN_SUCCESS || sdk == MMWLAN_COMMAND_ERROR) &&
+        bytes == sizeof(reply) && le16toh(reply.hdr.message_id) == 0x0039 &&
+        le16toh(reply.hdr.vif_id) == mesh_runtime.umac.vif_id;
+    sensor_twt_native_mesh_start_result[0] = sdk;
+    sensor_twt_native_mesh_start_result[1] = valid;
+    sensor_twt_native_mesh_start_result[2] = valid ? le32toh(reply.status) : INT32_MIN;
+    LOG_INF("PAWR_TWT NATIVE_MESH START beaconing=0 MBCA=0 sdk=%d valid=%u fw=%d",
+        sdk, valid, (int32_t)sensor_twt_native_mesh_start_result[2]);
+    return valid && sdk == MMWLAN_SUCCESS && le32toh(reply.status) == 0;
+}
+#endif
 /* Opt-in debugger control: capture only after real USER traffic, while that
  * traffic already holds host wake. Zero leaves the one-shot behavior intact. */
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
@@ -52,6 +82,7 @@ static void sensor_twt_set_bssid(void)
 }
 #endif
 
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
 static bool sensor_twt_ps_contract(uint16_t command_id)
 {
     struct morse_cmd_req_li_sleep li = MORSE_COMMAND_INIT(li,
@@ -75,6 +106,7 @@ static bool sensor_twt_ps_contract(uint16_t command_id)
         (int)(valid ? (int32_t)le32toh(reply.resp.status) : INT32_MIN), len);
     return valid && sdk == MMWLAN_SUCCESS && le32toh(reply.resp.status) == 0;
 }
+#endif
 
 static bool sensor_twt_send_to(const struct edgez_pawr_twt *msg, const uint8_t peer[6])
 {
@@ -361,6 +393,42 @@ static bool sensor_twt_pawr_test(void)
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
     LOG_INF("PAWR_TWT NATIVE_MESH vif=%u STA=0 BSSID_SET=0 association=0 AP_beacons=0 monitor=0 scan=0",
         mesh_runtime.umac.vif_id);
+    if (!sensor_twt_native_start_mesh()) goto done;
+    k_msleep(100);
+    struct morse_cmd_req_get_capabilities caps_cmd = MORSE_COMMAND_INIT(caps_cmd,
+        MORSE_CMD_ID_GET_CAPABILITIES, mesh_runtime.umac.vif_id);
+    struct morse_cmd_resp_get_capabilities native_caps = {0};
+    uint32_t caps_bytes = sizeof(native_caps);
+    enum mmwlan_status caps_status = mmdrv_execute_command((uint8_t *)&caps_cmd,
+        (uint8_t *)&native_caps, &caps_bytes);
+    bool caps_valid = caps_status == MMWLAN_SUCCESS && caps_bytes == sizeof(native_caps) &&
+        le16toh(native_caps.hdr.message_id) == MORSE_CMD_ID_GET_CAPABILITIES &&
+        le16toh(native_caps.hdr.vif_id) == mesh_runtime.umac.vif_id &&
+        le32toh(native_caps.status) == 0;
+    /* SDK internal/mmdrv.h morse_caps_flags: requester=43, responder=42.
+     * Keep the factory probe on the raw ABI, without mmrc private headers. */
+    sensor_twt_native_capabilities[0] = caps_status;
+    sensor_twt_native_capabilities[1] = caps_valid ?
+        !!(le32toh(native_caps.capabilities.flags[1]) & BIT(11)) : UINT32_MAX;
+    sensor_twt_native_capabilities[2] = caps_valid ?
+        !!(le32toh(native_caps.capabilities.flags[1]) & BIT(10)) : UINT32_MAX;
+    LOG_INF("PAWR_TWT NATIVE_MESH capabilities sdk=%d requester=%u responder=%u",
+        caps_status, sensor_twt_native_capabilities[1], sensor_twt_native_capabilities[2]);
+    k_msleep(100);
+    /* Linux enables requester TWT only with chip PS and dynamic offload.
+     * Keep host WAKE asserted while setting up the native MESH agreement. */
+    sensor_twt_native_ps_ready = sensor_probe_config_ps(true, true);
+    if (!sensor_twt_native_ps_ready) goto done;
+    k_msleep(100);
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_PEER_TEST)
+    /* mac80211 also uses SET_STA_STATE for peers on MESH VIFs. Keep VIF type
+     * MESH; test a static peer record without an on-air association/peering. */
+    for (uint16_t state = 1; state <= 4; ++state) {
+        if (!sensor_probe_sta_state(state)) goto done;
+        k_msleep(100);
+    }
+    LOG_INF("PAWR_TWT NATIVE_MESH static_peer=1 STA_VIF=0 association_frames=0");
+#endif
     /* Compare SDK REQUEST forms before the negotiated SUGGEST below.
      * Validation alone does not install state or establish a wake schedule. */
     k_msleep(100);
@@ -369,7 +437,11 @@ static bool sensor_twt_pawr_test(void)
     k_msleep(100);
     bool request_5s = sensor_probe_twt_with_mantissa_at(
         MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, 0x1c21, 0, SENSOR_TWT_WAKE_MANTISSA);
-    LOG_INF("PAWR_TWT NATIVE_MESH SDK_REQUEST accepted_1s=%u accepted_5s=%u", request_1s, request_5s);
+    k_msleep(100);
+    bool driver_5s = sensor_probe_twt_with_mantissa_at(
+        MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, 0x1c20, 0, SENSOR_TWT_WAKE_MANTISSA);
+    LOG_INF("PAWR_TWT NATIVE_MESH PS_ENABLED SDK_REQUEST accepted_1s=%u accepted_5s=%u driver_5s=%u",
+        request_1s, request_5s, driver_5s);
     k_msleep(100);
 #else
     if (!sensor_probe_long_sleep(false)) goto done;
@@ -435,10 +507,46 @@ static bool sensor_twt_pawr_test(void)
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST)
     request_type |= BIT(6);
 #endif
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+    /* Linux morse_twt_process_set_cmd(FORCE_INSTALL_AGREEMENT) bypasses
+     * VALIDATE and uses only exponent + implicit in req_type. Reproduce that
+     * native command on the existing MESH VIF, with the negotiated radio TSF.
+     * Acceptance alone is not proof of service periods, sleep or reception. */
+    request_type = (SENSOR_TWT_WAKE_EXPONENT << 10) | BIT(5);
+    LOG_INF("PAWR_TWT NATIVE_MESH FORCE_INSTALL req_type=0x%04x validate_gate=0 STA=0 AP_beacons=0",
+        request_type);
+    k_msleep(100);
+#else
     if (!sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE,
             request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA)) goto done;
+#endif
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
+    const uint16_t install_forms[] = {
+        (SENSOR_TWT_WAKE_EXPONENT << 10) | 0x0020, /* Linux FORCE_INSTALL */
+        (SENSOR_TWT_WAKE_EXPONENT << 10) | 0x0023, /* SDK retained SUGGEST */
+        (SENSOR_TWT_WAKE_EXPONENT << 10) | 0x0028, /* negotiated ACCEPT */
+    };
+    for (size_t candidate = 0; candidate < ARRAY_SIZE(install_forms); ++candidate) {
+        request_type = install_forms[candidate];
+        LOG_INF("PAWR_TWT NATIVE_MESH INSTALL candidate=%u req_type=0x%04x",
+            (unsigned)candidate, request_type);
+        k_msleep(100);
+        installed = sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL,
+            request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA);
+        if (installed) break;
+        /* Try another form only after an explicit firmware rejection.
+         * A lost/invalid response can leave installed state: shut down then. */
+        uint32_t count = sensor_twt_native_result_count;
+        if (!count || count > ARRAY_SIZE(sensor_twt_native_results) ||
+            !sensor_twt_native_results[count - 1][3] ||
+            sensor_twt_native_results[count - 1][2] != MMWLAN_COMMAND_ERROR ||
+            (int32_t)sensor_twt_native_results[count - 1][4] >= 0) goto done;
+        k_msleep(100);
+    }
+#else
     installed = sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL,
         request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA);
+#endif
     if (!installed) goto done;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
     if (!sensor_probe_config_ps(true, true)) goto done;

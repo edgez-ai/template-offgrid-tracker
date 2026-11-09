@@ -441,6 +441,47 @@ The working reference still uses an nRF STA context and continuous HC33 AP
 beacons, despite having no on-air authentication/association exchange. It does
 not meet the native-MESH-only requirement.
 
+The follow-up driver/SDK comparison reproduced the Linux driver's
+`FORCE_INSTALL_AGREEMENT` path. `SET_TWT_CONF` (`0xA010`) is handled by the
+Linux host driver; its forced-install branch sends native
+`TWT_AGREEMENT_INSTALL` (`0x0026`) directly, without a validation gate. Sending
+`0xA010` straight to the radio would not reproduce that behavior. SDK
+`umac_twt_handle_command()` rejects its force-install command type, but the
+lower-level `mmdrv_execute_command()` permits the native install probe.
+
+The final comparison used the SDK tree at `2.13.1-5-gc4417d16`, the local
+Linux driver based on `1.16.4`, and the existing bundled MM8108 image. MESH
+START (`0x0039`, beaconless, MBCA disabled), CONFIG_PS with dynamic offload,
+and static peer states 1 through 4 all succeeded. The interface remained
+MESH, with no association or peering frames and no AP timing. The firmware
+also reported both TWT capability bits; those bits did not predict whether
+an agreement would be accepted on MESH.
+
+| Native install form | Request type | Result |
+| --- | --- | --- |
+| Linux forced agreement | `0x1c20` | SDK 14, firmware -32768 |
+| SDK retained SUGGEST | `0x1c23` | SDK 14, firmware -32768 |
+| Negotiated ACCEPT | `0x1c28` | SDK 14, firmware -32768 |
+
+All used flow 0, a future radio TSF, interval 5.000064 s, and window 50.176 ms.
+The same forced-install rejection was observed without a peer record and
+before explicit MESH START. Basic 1-second/5-second validation and the Linux
+validation form also failed with PS/offload enabled. Exact command results
+are retained in `sensor_twt_native_results` and `sensor_twt_native_result_count`
+so dropped RTT lines cannot hide the firmware status; the capability, MESH
+START, and PS readiness symbols retain the setup results separately.
+The additional `edgez-nrf54l15-fgh200m-twt-native-mesh-peer-test` environment
+enables only the static peer comparison. It is a stateful diagnostic, not a
+stateless operating mode. Further install candidates are attempted only after
+an explicit negative firmware response; ambiguous responses cause shutdown.
+
+These probes found no host-command sequence that establishes native MESH TWT
+with the bundled radio firmware. They do not prove that every Morse firmware
+build forbids it. A supported MESH sequence or firmware-side explanation of
+the rejection is still needed. Earlier captures labeled stateless created a
+STA VIF, and the HC33 mesh-return test retained that nRF STA context. Application
+schedule notifications and ACKs alone do not establish scheduled RF reception.
+
 An isolated SET_LONG_SLEEP_CONFIG comparison did enter sleep, but reported
 zero TWT service periods and received no later HC33 command. That option is
 excluded from the TWT image. It cannot substitute for scheduled reception.
