@@ -286,10 +286,17 @@ HC33 from the matching ACK. This allows replacing HC33 even when the nRF has
 an older gateway MAC saved in settings. Subsequent TWT traffic addresses the
 negotiated peer; the production sensor's gateway selection is unchanged.
 
+The current power test uses a nominal 5-second TWT interval with a 50.176-ms wake
+window. The native agreement uses mantissa 39063 and exponent 7 (5.000064 s,
+the nearest representation rounded up); HC33 schedules
+its USER transmission from that same negotiated interval. Earlier captures
+below used the previous 2-second interval.
+
 This factory TWT test performs only one bootstrap exchange per boot. It omits
-the boot LED self-test, then waits for received HC33 requests; each accepted
-request lights the LED for five seconds. It does not send periodic sensor
-reports or retry failed setup on a timer. Reset both boards and rerun setup
+the boot LED self-test, then sends a sensor report every 60 seconds while
+waiting for received HC33 requests; each accepted USER request lights the LED
+for five seconds. Periodic reports do not light the LED and retain the current
+TWT session. It does not retry failed setup on a timer. Reset both boards and rerun setup
 after a failure. The retained session still requires the radio to remain powered.
 
 With both images flashed, run the CMSIS-DAP bench test using Python with

@@ -157,8 +157,9 @@ config OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
       Factory-only one-shot experiment with HC33. Bootstrap using monitor RX,
       authorize the peer locally, query radio TSF, negotiate and install flow 0.
       Remove monitor/scan before the retained session. Reject stale/mismatched
-      replies and excessive timing uncertainty. No sensor reports or timed
-      retries after the initial exchange; reset to retry after failure.
+      replies and excessive timing uncertainty. Send periodic sensor reports
+      at the configured bootstrap interval while retaining the agreement.
+      Reset to retry after setup failure; no automatic rebootstrap timer.
       Shut down the radio at failure. Does not prove RF sleep.
 
 config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST

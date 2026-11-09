@@ -59,7 +59,7 @@ static uintptr_t tx_token;
 
 struct twt_rx_event {
     bool pawr_request;
-    uint32_t request_id, payload_hash;
+    uint32_t request_id, payload_hash, report_interval_ms;
     struct edgez_pawr_twt msg;
     uint8_t peer[6];
     uint64_t received_us;
@@ -331,6 +331,7 @@ static void receive_frame(void *ctx, const struct edgez_umac_rx_frame *frame)
             event.pawr_request = true;
             event.request_id = request.request_id;
             event.payload_hash = edgez_pawr_payload_hash(request.payload, request.payload_length);
+            event.report_interval_ms = request.wake_interval_ms;
         } else if (request.type != EDGEZ_PAWR_REQUEST_TWT_CONTROL ||
             !edgez_pawr_twt_decode(request.payload, request.payload_length, &event.msg) ||
             event.msg.kind == EDGEZ_PAWR_TWT_HELLO ||
@@ -367,7 +368,7 @@ static bool send_twt(const struct edgez_pawr_twt *msg, const uint8_t peer[6])
     return edgez_umac_transmit(&wake_umac, &tx) == EDGEZ_UMAC_OK;
 }
 
-static bool send_pawr_session_ack(const struct twt_rx_event *event)
+static bool send_pawr_session_ack(const struct twt_rx_event *event, bool bootstrap)
 {
     uint8_t packet[EDGEZ_PAWR_HEADER_LENGTH + EDGEZ_PAWR_TWT_TRAILER_LENGTH];
     uint8_t frame[EDGEZ_PAWR_ACTION_HEADER_LENGTH + sizeof(packet)];
@@ -375,7 +376,7 @@ static bool send_pawr_session_ack(const struct twt_rx_event *event)
     uint32_t ssid = edgez_pawr_compress_ssid((const uint8_t *)WAKE_TEST_SSID, strlen(WAKE_TEST_SSID));
     const struct edgez_pawr_twt seed = { .kind = EDGEZ_PAWR_TWT_HELLO, .session = twt_session };
     if (!edgez_pawr_encode_response(packet, sizeof(packet), event->payload_hash, ssid, &packet_length) ||
-        !edgez_pawr_twt_append(packet, sizeof(packet), &packet_length, &seed) ||
+        (bootstrap && !edgez_pawr_twt_append(packet, sizeof(packet), &packet_length, &seed)) ||
         !edgez_pawr_encode_action_frame(frame, sizeof(frame), sequence_number++,
             radio_info.mac_addr, event->peer, packet, packet_length, &frame_length)) return false;
     const struct edgez_umac_tx_request tx = {
@@ -393,6 +394,13 @@ static void twt_receive_pending(void)
         struct edgez_pawr_twt *msg = &event.msg;
         if (event.pawr_request) {
             if ((twt_active || twt_pending) && memcmp(event.peer, twt_peer, 6)) continue;
+            if (twt_active && event.request_id != 1U) {
+                bool sent = send_pawr_session_ack(&event, false);
+                ESP_LOGI(TAG, "PAWR_TWT PERIODIC_REPORT request=%lu session=%lu interval_ms=%lu queued=%u retained=1",
+                    (unsigned long)event.request_id, (unsigned long)twt_session,
+                    (unsigned long)event.report_interval_ms, sent);
+                continue;
+            }
             /* A retransmission in the same ACK window reuses the session.
              * A later cycle (including reboot with request_id=1) replaces it. */
             bool duplicate = last_pawr_us && event.received_us - last_pawr_us < 100000 &&
@@ -409,7 +417,7 @@ static void twt_receive_pending(void)
                 last_pawr_us = event.received_us;
                 memcpy(last_pawr_peer, event.peer, 6);
             }
-            bool sent = send_pawr_session_ack(&event);
+            bool sent = send_pawr_session_ack(&event, true);
             ESP_LOGI(TAG, "PAWR_TWT PAWR_ACK request=%lu session=%lu queued=%u",
                 (unsigned long)event.request_id, (unsigned long)twt_session, sent);
             continue;
@@ -476,9 +484,10 @@ static void twt_receive_pending(void)
                     user_wake_at = 0;
                     missing_feedback = 0;
                     twt_active = true;
-                    ESP_LOGI(TAG, "PAWR_TWT ACTIVE session=%lu start_host_us=%llu rtt_us=%lu lease_ms=%lu calibration=piggyback",
+                    ESP_LOGI(TAG, "PAWR_TWT ACTIVE session=%lu start_host_us=%llu rtt_us=%lu lease_ms=%lu interval_us=%lu calibration=piggyback",
                         (unsigned long)schedule.session, (unsigned long long)start,
-                        (unsigned long)schedule.round_trip_us, (unsigned long)schedule.lease_ms);
+                        (unsigned long)schedule.round_trip_us, (unsigned long)schedule.lease_ms,
+                        (unsigned long)schedule.interval_us);
                 }
                 struct edgez_pawr_twt reply = schedule;
                 reply.kind = EDGEZ_PAWR_TWT_READY;

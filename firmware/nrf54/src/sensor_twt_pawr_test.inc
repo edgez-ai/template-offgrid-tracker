@@ -1,5 +1,9 @@
 /* Factory-only application-thread experiment. RX callbacks only enqueue.
  * Included after raw command helpers to keep the production sensor path small. */
+#define SENSOR_TWT_INTERVAL_US EDGEZ_PAWR_TWT_INTERVAL_5S_US
+#define SENSOR_TWT_WAKE_EXPONENT 7U
+#define SENSOR_TWT_WAKE_MANTISSA 39063U
+BUILD_ASSERT((SENSOR_TWT_WAKE_MANTISSA << SENSOR_TWT_WAKE_EXPONENT) == SENSOR_TWT_INTERVAL_US);
 /* Passive test evidence survives an RTT disconnect. Read these symbols from
  * the exact flashed ELF after the quiet interval; they never poll or wake RF.
  * Counts establish application behavior, not radio sleep or supply current. */
@@ -12,6 +16,8 @@ static volatile uint32_t sensor_twt_test_feedback_skipped;
 static volatile uint32_t sensor_twt_test_led_on;
 static volatile uint32_t sensor_twt_test_led_off;
 static volatile uint32_t sensor_twt_test_host_released;
+static volatile uint32_t sensor_twt_test_reports_completed;
+static volatile uint32_t sensor_twt_test_reports_failed;
 /* Opt-in debugger control: capture only after real USER traffic, while that
  * traffic already holds host wake. Zero leaves the one-shot behavior intact. */
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
@@ -342,7 +348,7 @@ static bool sensor_twt_pawr_test(void)
     atomic_set(&sensor_probe_peer_seen, 1);
     offer = (struct edgez_pawr_twt) {
         .kind = EDGEZ_PAWR_TWT_OFFER, .session = event.msg.session,
-        .interval_us = 2000000, .duration_us = 50176, .lease_ms = 0,
+        .interval_us = SENSOR_TWT_INTERVAL_US, .duration_us = 50176, .lease_ms = 0,
     };
     LOG_INF("PAWR_TWT session=%u from PAwR ACK; no discovery", offer.session);
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
@@ -407,14 +413,16 @@ static bool sensor_twt_pawr_test(void)
     }
     if (!accepted) { LOG_ERR("PAWR_TWT accept timeout or timing uncertainty"); goto done; }
     /* Match SDK requester/SUGGEST installation for a negotiated explicit TSF:
-     * request=1, setup=SUGGEST(1), implicit=1, announced flow 0, exponent=5.
-     * Period remains 62500 << 5 = 2 seconds. */
-    uint16_t request_type = 0x1423;
+     * request=1, setup=SUGGEST(1), implicit=1, announced flow 0, exponent=7.
+     * Period is 39063 << 7 = 5000064 us, matching the PAwR offer. */
+    uint16_t request_type = (SENSOR_TWT_WAKE_EXPONENT << 10) | 0x0023;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST)
     request_type |= BIT(6);
 #endif
-    if (!sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, request_type, offer.target_tsf)) goto done;
-    installed = sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL, request_type, offer.target_tsf);
+    if (!sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE,
+            request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA)) goto done;
+    installed = sensor_probe_twt_with_mantissa_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL,
+        request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA);
     if (!installed) goto done;
     offer.kind = EDGEZ_PAWR_TWT_COMMIT;
     bool ready = false;
@@ -429,6 +437,10 @@ static bool sensor_twt_pawr_test(void)
     sensor_led_set_awake(false);
     uint64_t expires = offer.lease_ms ? offered_at + 3000000 + (uint64_t)offer.lease_ms * 1000 : UINT64_MAX;
     uint64_t release_at = sensor_twt_now_us();
+    const uint64_t report_interval_us = (uint64_t)sensor_update_interval_ms() * 1000U;
+    uint64_t next_report_at = release_at + report_interval_us;
+    sensor_twt_test_reports_completed = 0;
+    sensor_twt_test_reports_failed = 0;
     sensor_twt_test_active = 1;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
     uint64_t snapshot_at = release_at + 15000000;
@@ -454,6 +466,24 @@ static bool sensor_twt_pawr_test(void)
             ++sensor_twt_test_led_off;
         }
         if (now >= expires) break;
+        if (now >= next_report_at) {
+            /* Send normal sensor data without changing STA/TWT or lighting
+             * the LED. HC33 returns a plain ACK for this retained session. */
+            if (mmdrv_set_wake_enabled(true) != MMWLAN_SUCCESS) goto done;
+            sensor_twt_test_host_released = 0;
+            (void)edgez_imu_drain_fifo();
+            int report_rc = sensor_pawr_exchange(sensor_update_interval_ms());
+            if (report_rc == 0) ++sensor_twt_test_reports_completed;
+            else ++sensor_twt_test_reports_failed;
+            if (mmdrv_set_wake_enabled(false) != MMWLAN_SUCCESS) goto done;
+            sensor_twt_test_host_released = 1;
+            sensor_halow_sleep_allowed = host_released = true;
+            LOG_INF("PAWR_TWT PERIODIC_REPORT rc=%d completed=%u failed=%u interval_ms=%u session=%u",
+                report_rc, sensor_twt_test_reports_completed, sensor_twt_test_reports_failed,
+                sensor_update_interval_ms(), offer.session);
+            now = sensor_twt_now_us();
+            do { next_report_at += report_interval_us; } while (next_report_at <= now);
+        }
         if (!host_released && now >= release_at) {
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_FORCE_SNOOZE)
             sensor_twt_force_snooze();
@@ -467,6 +497,7 @@ static bool sensor_twt_pawr_test(void)
 #endif
         }
         uint64_t deadline = led_until && led_until < expires ? led_until : expires;
+        if (next_report_at < deadline) deadline = next_report_at;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
         if (snapshot_at < deadline) deadline = snapshot_at;
 #endif

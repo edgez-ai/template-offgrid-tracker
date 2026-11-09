@@ -2368,7 +2368,8 @@ static bool sensor_probe_get_tsf(uint64_t *tsf)
 	return valid;
 }
 
-static bool sensor_probe_twt_at(uint16_t command_id, uint16_t request_type, uint64_t target_tsf)
+static bool sensor_probe_twt_with_mantissa_at(uint16_t command_id,
+	uint16_t request_type, uint64_t target_tsf, uint16_t wake_mantissa)
 {
 	struct morse_cmd_req_twt_agreement_install cmd = MORSE_COMMAND_INIT(cmd,
 		command_id, mesh_runtime.umac.vif_id, .flow_id = 0, .agreement_len = 15);
@@ -2378,13 +2379,13 @@ static bool sensor_probe_twt_at(uint16_t command_id, uint16_t request_type, uint
 	 * individual, implicit, non-triggered, unprotected, channel 0. Keep the
 	 * zero target for the SDK REQUEST baseline, or an explicit radio TSF for
 	 * negotiation; never substitute MCU uptime. Agreement excludes IE ID/length.
-	 * Period=62500<<request_exponent us; duration=196*256 us. */
+	 * Period=wake_mantissa<<request_exponent us; duration=196*256 us. */
 	cmd.agreement[1] = (uint8_t)request_type;
 	cmd.agreement[2] = (uint8_t)(request_type >> 8);
 	for (unsigned i = 0; i < 8; ++i) cmd.agreement[3 + i] = (uint8_t)(target_tsf >> (i * 8));
 	cmd.agreement[11] = 196;
-	cmd.agreement[12] = (uint8_t)62500U;
-	cmd.agreement[13] = (uint8_t)(62500U >> 8);
+	cmd.agreement[12] = (uint8_t)wake_mantissa;
+	cmd.agreement[13] = (uint8_t)(wake_mantissa >> 8);
 	struct {
 		struct morse_cmd_resp_twt_agreement_install resp;
 		uint8_t extra[112];
@@ -2403,6 +2404,11 @@ static bool sensor_probe_twt_at(uint16_t command_id, uint16_t request_type, uint
 		(unsigned long long)target_tsf, status, valid,
 		(int)(valid ? (int32_t)le32toh(reply.resp.status) : INT32_MIN), response_len);
 	return valid && status == MMWLAN_SUCCESS && le32toh(reply.resp.status) == 0U;
+}
+
+static bool sensor_probe_twt_at(uint16_t command_id, uint16_t request_type, uint64_t target_tsf)
+{
+	return sensor_probe_twt_with_mantissa_at(command_id, request_type, target_tsf, 62500U);
 }
 
 static bool sensor_probe_twt_command_type(uint16_t command_id, uint16_t request_type)
