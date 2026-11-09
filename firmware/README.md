@@ -299,6 +299,10 @@ for five seconds. Periodic reports do not light the LED and retain the current
 TWT session. It does not retry failed setup on a timer. Reset both boards and rerun setup
 after a failure. The retained session still requires the radio to remain powered.
 
+Sensor profiles use 10000 kernel ticks/s so the GRTC 1 MHz counter has an
+integer 100 cycles/tick. The previous 32768 ticks/s setting truncated to
+30 cycles/tick, shortening a configured minute to 58.9824 seconds.
+
 With both images flashed, run the CMSIS-DAP bench test using Python with
 `pyserial` and `pyelftools` installed:
 
