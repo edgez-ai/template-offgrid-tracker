@@ -108,7 +108,7 @@ config OFFGRID_NRF54_SENSOR_PS_PROBE
 
 config OFFGRID_NRF54_SENSOR_RX_SLEEP_COMPARE
     bool "Compare awake, ordinary PS, and long-sleep reception once at boot"
-    depends on OFFGRID_NRF54_SENSOR_PS_PROBE && LOG
+    depends on OFFGRID_NRF54_SENSOR_PS_PROBE
     default n
     help
       Hold the factory test radio awake for ten seconds, try an additional
@@ -117,7 +117,8 @@ config OFFGRID_NRF54_SENSOR_RX_SLEEP_COMPARE
       sleeping, or shut down the radio if its removal fails.
       Received test wakes are discarded before the normal sensor loop resumes.
       Read power-save and wake parameters in global and station scope while
-      the host is awake, without writing their values.
+      the host is awake, without writing their values. Logging is optional:
+      the factory PAwR/TWT test also uses these receive helpers in quiet builds.
 
 config OFFGRID_NRF54_SENSOR_TWT_PROBE
     bool "Probe raw TWT agreements on the unassociated factory STA"
@@ -151,6 +152,15 @@ config OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
       Remove monitor/scan before a 30-second lease. Never use long sleep with
       TWT. Reject stale/mismatched replies and excessive timing uncertainty.
       Shut down the radio at expiry or failure. Does not prove RF sleep.
+
+config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST
+    bool "Use an unannounced agreement in the factory PAwR/TWT experiment"
+    depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
+    default n
+    help
+      Set only the unannounced bit in the installed requester agreement.
+      Compare firmware service-period counters with the announced baseline;
+      command acceptance and application RX do not establish RF sleep.
 
 config OFFGRID_NRF54_SENSOR_TWT_BEACON_SYNC_TEST
     bool "Allow native BSS timing seed before installing TWT (factory test)"

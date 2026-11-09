@@ -271,6 +271,93 @@ the `edgez-nrf54l15-fgh200m-companion` image or a sensor source build with
 logging enabled for runtime diagnostics; use a current meter rather than RTT
 to validate the sensor image.
 
+### Automated factory PAwR/TWT wake tests
+
+The HC33 `ht-hc33-halow-wake-test` and nRF
+`edgez-nrf54l15-fgh200m-sensor-debug` images implement the factory
+`edgez-wake-test` experiment on US channel 25 (914.5 MHz / 1 MHz). Build and
+flash them sequentially with `EDGEZ_HALOW_MESH_SOURCE_ROOT` set to the source
+checkout. Preserve the flashed nRF ELF before changing PlatformIO configuration
+or building another environment: PlatformIO can remove an earlier environment's
+build output. Keep the nRF factory partition and HC33 NVS intact.
+
+With both images flashed, run the CMSIS-DAP bench test using Python with
+`pyserial` and `pyelftools` installed:
+
+```sh
+python scripts/test_pawr_twt_openocd.py \
+  --elf /path/to/exact-flashed-nrf.elf --probe CMSIS_DAP_SERIAL \
+  --mode stateless --log /tmp/pawr-stateless.log
+```
+
+The runner manages OpenOCD, resets both test boards, waits for HC33's negotiated
+session, and sends two serial `w` commands through the application wake handler. It
+archives the ELF, logs and JSON result beside the chosen log file. It checks
+passive nRF counters for the same session, received commands, completed ACK
+transmissions, complete LED cycles, and released host wake. Queued HC33 TX alone
+cannot pass. The nRF's test counters do not require RTT log delivery or periodic
+polling. OpenOCD and serial are closed at the end; the firmware keeps running.
+
+Serial `w` bypasses GPIO interrupt delivery and button debounce. These automated
+results therefore do not verify a physical USER press. Verify that separately
+after radio/interface changes. The ESP32-S3 HAL preserves application interrupts
+on warm radio restarts; its global stale-interrupt cleanup runs only before the
+first GPIO ISR-service installation.
+
+Use `--mode ap` for the explicit AP timing control. It switches only the HC33
+test radio to its native AP interface and starts the existing 30-second S1G
+beacon test. Resetting HC33 restores its default stateless test mode.
+`--keep-beacons` refreshes that bounded test every 24 seconds when a longer
+control is needed. `--snapshot-after-user` optionally collects MAC statistics
+after actual USER traffic, while that traffic already holds host wake. Without
+that flag, the existing single snapshot runs 15 seconds after setup.
+With the updated HC33 test image, `--mesh-after-seed 18` sends its lab serial
+`m` control after timing setup. That stops the temporary beacons and recreates
+HC33's mesh interface while retaining the application session and host clock
+mapping. The test requires a successful interface change with the same RF MAC,
+and waits at least five seconds before the first USER command. The nRF still
+retains its manually configured firmware STA context; no on-air association or
+mesh peering is performed by this experiment.
+
+For a longer test with no debugger connection during boot or USER commands:
+
+```sh
+python scripts/test_pawr_twt_openocd.py \
+  --elf /path/to/exact-flashed-nrf.elf --probe CMSIS_DAP_SERIAL \
+  --mode stateless --normal-boot --duration 140 --wake-delays 24,130 \
+  --log /tmp/pawr-normal-boot.log
+```
+
+This requires the probe's nRESET wire. The runner clears the Arm debug/system
+power requests, pulses nRESET, and closes OpenOCD before firmware
+boot. It observes ACKs through HC33 alone, then reattaches without reset to read
+the retained test counters and verify the pin-reset reason. Alternatively,
+`--detach-after 18 --wake-delays 24,130 --duration 140` closes the debugger after
+negotiation; that variant does not perform the subsequent pin reset required
+by Nordic's [debug-exit guidance](https://docs.nordicsemi.com/r/bundle/ps_nrf54l15/page/debug.html-debuginterfacemode).
+Probe wiring remains connected in both tests. Neither test measures current
+or proves RF sleep; use an external meter with the probe physically disconnected
+for that acceptance criterion.
+After a verified run, `--normal-boot --leave-running` can prepare a fresh session
+without the final debugger reattachment. That mode reports only HC33 ACK
+observations, sets `functional_pass` to null, and does not claim that nRF LED
+counters were checked. It avoids returning the device to Debug Interface mode
+just to collect counters before a separate current measurement.
+
+`edgez-nrf54l15-fgh200m-twt-unannounced-test` layers only the unannounced request
+bit onto the debug profile for an isolated firmware capability comparison.
+It is an experiment, not a low-power image. Native TWT service-period counters
+must be checked separately from command acceptance and application reception.
+
+`edgez-nrf54l15-fgh200m-twt-quiet-test` explicitly enables the same announced
+factory TWT experiment with LOG, RTT, console, printk and the MAC snapshot
+disabled. Its normal-boot test uses HC33 ACKs and passive nRF counters instead
+of an RTT connection. Check the generated `.config` before flashing: the TWT
+symbols must remain enabled when LOG is disabled. The receive helpers no longer
+depend on LOG, which previously caused this entire experiment to disappear
+silently from a quiet build. The ordinary production sensor profile remains
+separate and does not enable this TWT experiment.
+
 ### ESP-IDF CLI
 
 Use ESP-IDF 5.5 or newer:

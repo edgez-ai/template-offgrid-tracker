@@ -41,13 +41,16 @@ void mmhal_init(void)
 
     /*
      * GPIO interrupt routing survives an ESP32 software reset. Disable every
-     * GPIO source before installing the MCU-global ISR service; limiting this
-     * to IRQ/BUSY is insufficient when a previously flashed application left
-     * another level interrupt enabled.
+     * GPIO source before first installing the MCU-global ISR service; limiting
+     * this to IRQ/BUSY is insufficient when a previously flashed application
+     * left another level interrupt enabled. Once the service is installed,
+     * application handlers are live: a radio restart must preserve them.
      */
-    for (gpio_num_t pin = GPIO_NUM_0; pin < GPIO_NUM_MAX; ++pin) {
-        if (GPIO_IS_VALID_GPIO(pin)) {
-            ESP_ERROR_CHECK(gpio_intr_disable(pin));
+    if (!gpio_isr_service_installed) {
+        for (gpio_num_t pin = GPIO_NUM_0; pin < GPIO_NUM_MAX; ++pin) {
+            if (GPIO_IS_VALID_GPIO(pin)) {
+                ESP_ERROR_CHECK(gpio_intr_disable(pin));
+            }
         }
     }
 
@@ -59,8 +62,11 @@ void mmhal_init(void)
     ESP_ERROR_CHECK(gpio_intr_disable((gpio_num_t)CONFIG_MM_SPI_IRQ));
     ESP_ERROR_CHECK(gpio_intr_disable((gpio_num_t)CONFIG_MM_BUSY));
 
-    REG_WRITE(GPIO_STATUS_W1TC_REG, UINT32_MAX);
-    REG_WRITE(GPIO_STATUS1_W1TC_REG, UINT32_MAX);
+    const uint64_t pending_mask = gpio_isr_service_installed ?
+        ((UINT64_C(1) << CONFIG_MM_SPI_IRQ) | (UINT64_C(1) << CONFIG_MM_BUSY)) :
+        UINT64_MAX;
+    REG_WRITE(GPIO_STATUS_W1TC_REG, (uint32_t)pending_mask);
+    REG_WRITE(GPIO_STATUS1_W1TC_REG, (uint32_t)(pending_mask >> 32));
 
     if (!gpio_isr_service_installed) {
         const esp_err_t err = gpio_install_isr_service(0);

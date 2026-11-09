@@ -6,6 +6,7 @@
 
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "soc/gpio_struct.h"
 #include "edgez_pawr_protocol.h"
 #include "edgez_pawr_twt.h"
 #include "edgez_mesh_s1g.h"
@@ -39,6 +40,19 @@ static const uint8_t wake_payload[] = {'E', 'Z', 'W', 'A', 'K', 'E', '0', '1'};
 static struct edgez_umac wake_umac;
 static struct edgez_umac_radio_info radio_info;
 static SemaphoreHandle_t button_sem;
+static volatile uint32_t button_irq_edges;
+static uint32_t button_sem_events;
+static uint64_t button_audit_until;
+static int button_audit_level = -1;
+
+static void log_button_state(const char *stage)
+{
+    const gpio_num_t pin = (gpio_num_t)CONFIG_OFFGRID_HT_HC33_HALOW_WAKE_TEST_BUTTON_GPIO;
+    ESP_LOGI("hc33_wake_test", "USER_PIN stage=%s gpio=%d level=%d int_type=%u int_ena=%u edges=%lu sem_events=%lu",
+        stage, pin, gpio_get_level(pin), (unsigned)GPIO.pin[pin].int_type,
+        (unsigned)GPIO.pin[pin].int_ena, (unsigned long)button_irq_edges,
+        (unsigned long)button_sem_events);
+}
 static uint16_t sequence_number;
 static uint32_t request_id;
 static uintptr_t tx_token;
@@ -580,6 +594,7 @@ static esp_err_t start_radio(void)
              "ready: USER button or serial 'w' sends a wake only with an active agreement on %s %lu kHz/%u MHz",
              WAKE_TEST_COUNTRY, (unsigned long)WAKE_TEST_FREQUENCY_KHZ,
              WAKE_TEST_BANDWIDTH_MHZ);
+    if (button_sem) log_button_state("radio-start");
     return ESP_OK;
 }
 
@@ -603,11 +618,43 @@ static void switch_to_ap_test(void)
     ESP_LOGI(TAG, "TWT_AP_MODE start rc=%d; raw PAwR retained; reset HC33 to restore mesh", rc);
 }
 
+/* Lab control: remove the temporary AP interface after timing is seeded.
+ * Keep the application session and host clock mapping, but require the same
+ * RF MAC so the receiver's installed peer/BSSID remains valid. */
+static void switch_to_mesh_test(void)
+{
+    if (!sync_ap_mode) {
+        ESP_LOGW(TAG, "TWT_MESH_MODE requires AP timing mode first");
+        return;
+    }
+    sync_beacon_stop();
+    if (sync_beacon_until) return;
+    uint8_t previous_mac[6];
+    memcpy(previous_mac, radio_info.mac_addr, sizeof(previous_mac));
+    int rc = edgez_umac_stop(&wake_umac);
+    if (rc != EDGEZ_UMAC_OK) {
+        ESP_LOGE(TAG, "TWT_MESH_MODE stop failed rc=%d", rc);
+        return;
+    }
+    edgez_rf_unbind_umac();
+    sync_ap_mode = false;
+    rc = start_radio();
+    bool same_mac = rc == ESP_OK && !memcmp(previous_mac, radio_info.mac_addr, 6);
+    ESP_LOGI(TAG, "TWT_MESH_MODE start rc=%d same_mac=%u active=%u session=%lu",
+        rc, same_mac, twt_active, (unsigned long)twt_session);
+    if (!same_mac) {
+        twt_active = twt_pending = false;
+        pending_probe_us = user_wake_at = 0;
+        user_wake_pending = false;
+    }
+}
+
 static void IRAM_ATTR button_isr(void *arg)
 {
     (void)arg;
     BaseType_t task_woken = pdFALSE;
 
+    ++button_irq_edges;
     xSemaphoreGiveFromISR(button_sem, &task_woken);
     if (task_woken == pdTRUE) {
         portYIELD_FROM_ISR();
@@ -643,10 +690,24 @@ static void wake_sender_task(void *arg)
         if (command == 'B') sync_beacon_stop();
         if (command == 'd') capture_mac_diagnostics();
         if (command == 'a') switch_to_ap_test();
+        if (command == 'm') switch_to_mesh_test();
+        if (command == 'g') {
+            button_audit_until = esp_timer_get_time() + 30000000;
+            button_audit_level = -1;
+        }
+        if (button_audit_until && (uint64_t)esp_timer_get_time() < button_audit_until) {
+            int level = gpio_get_level(button);
+            if (level != button_audit_level) {
+                button_audit_level = level;
+                log_button_state("audit-level");
+            }
+        }
         bool button_trigger = xSemaphoreTake(button_sem, 0) == pdTRUE;
         if (button_trigger) {
+            ++button_sem_events;
             vTaskDelay(pdMS_TO_TICKS(WAKE_TEST_BUTTON_DEBOUNCE_MS));
             button_trigger = gpio_get_level(button) == 0;
+            log_button_state(button_trigger ? "debounce-pass" : "debounce-rejected");
         }
         now = esp_timer_get_time();
         if (button_trigger || command == 'w') {
@@ -734,6 +795,7 @@ void app_main(void)
         ESP_ERROR_CHECK(err);
     }
     ESP_ERROR_CHECK(gpio_isr_handler_add(button, button_isr, NULL));
+    log_button_state("button-init");
     if (xTaskCreate(wake_sender_task, "halow_wake_tx", 4096, NULL, 6, NULL) !=
         pdPASS) {
         ESP_LOGE(TAG, "could not start wake sender task");

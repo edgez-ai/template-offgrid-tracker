@@ -1,5 +1,23 @@
 /* Factory-only application-thread experiment. RX callbacks only enqueue.
  * Included after raw command helpers to keep the production sensor path small. */
+/* Passive test evidence survives an RTT disconnect. Read these symbols from
+ * the exact flashed ELF after the quiet interval; they never poll or wake RF.
+ * Counts establish application behavior, not radio sleep or supply current. */
+static volatile uint32_t sensor_twt_test_session;
+static volatile uint32_t sensor_twt_test_active;
+static volatile uint32_t sensor_twt_test_user_rx;
+static volatile uint32_t sensor_twt_test_ack_completed;
+static volatile uint32_t sensor_twt_test_ack_failed;
+static volatile uint32_t sensor_twt_test_feedback_skipped;
+static volatile uint32_t sensor_twt_test_led_on;
+static volatile uint32_t sensor_twt_test_led_off;
+static volatile uint32_t sensor_twt_test_host_released;
+/* Opt-in debugger control: capture only after real USER traffic, while that
+ * traffic already holds host wake. Zero leaves the one-shot behavior intact. */
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
+static volatile uint32_t sensor_twt_test_capture_after_user;
+#endif
+
 static uint64_t sensor_twt_now_us(void)
 {
     return k_ticks_to_us_floor64(k_uptime_ticks());
@@ -92,6 +110,8 @@ static bool sensor_twt_send_to(const struct edgez_pawr_twt *msg, const uint8_t p
     bool completed = submitted && k_sem_take(&sensor_twt_tx_done, K_MSEC(200)) == 0;
     atomic_clear(&sensor_twt_tx_armed);
     bool failed = atomic_get(&sensor_twt_tx_failed);
+    if (completed && !failed) ++sensor_twt_test_ack_completed;
+    else ++sensor_twt_test_ack_failed;
     LOG_INF("PAWR_TWT ACK_TX token=%u submitted=%u completed=%u failed=%u",
         (unsigned)tx.token, submitted, completed, failed);
     return completed && !failed;
@@ -294,6 +314,15 @@ static bool sensor_twt_pawr_test(void)
         LOG_INF("PAWR_TWT no session in PAwR ACK; defer until next sensor cycle");
         return false;
     }
+    sensor_twt_test_active = 0;
+    sensor_twt_test_session = event.msg.session;
+    sensor_twt_test_user_rx = 0;
+    sensor_twt_test_ack_completed = 0;
+    sensor_twt_test_ack_failed = 0;
+    sensor_twt_test_feedback_skipped = 0;
+    sensor_twt_test_led_on = 0;
+    sensor_twt_test_led_off = 0;
+    sensor_twt_test_host_released = 0;
     memcpy(sensor_probe_peer_mac, event.peer, 6);
     atomic_set(&sensor_probe_peer_seen, 1);
     offer = (struct edgez_pawr_twt) {
@@ -365,8 +394,12 @@ static bool sensor_twt_pawr_test(void)
     /* Match SDK requester/SUGGEST installation for a negotiated explicit TSF:
      * request=1, setup=SUGGEST(1), implicit=1, announced flow 0, exponent=5.
      * Period remains 62500 << 5 = 2 seconds. */
-    if (!sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, 0x1423, offer.target_tsf)) goto done;
-    installed = sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL, 0x1423, offer.target_tsf);
+    uint16_t request_type = 0x1423;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST)
+    request_type |= BIT(6);
+#endif
+    if (!sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_VALIDATE, request_type, offer.target_tsf)) goto done;
+    installed = sensor_probe_twt_at(MORSE_CMD_ID_TWT_AGREEMENT_INSTALL, request_type, offer.target_tsf);
     if (!installed) goto done;
     offer.kind = EDGEZ_PAWR_TWT_COMMIT;
     bool ready = false;
@@ -380,6 +413,7 @@ static bool sensor_twt_pawr_test(void)
     sensor_led_set_awake(false);
     uint64_t expires = offer.lease_ms ? offered_at + 3000000 + (uint64_t)offer.lease_ms * 1000 : UINT64_MAX;
     uint64_t release_at = sensor_twt_now_us();
+    sensor_twt_test_active = 1;
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
     uint64_t snapshot_at = release_at + 15000000;
 #endif
@@ -401,6 +435,7 @@ static bool sensor_twt_pawr_test(void)
             sensor_led_set_awake(false);
             LOG_INF("PAWR_TWT LED off; five-second USER wake window ended");
             led_until = 0;
+            ++sensor_twt_test_led_off;
         }
         if (now >= expires) break;
         if (!host_released && now >= release_at) {
@@ -409,6 +444,7 @@ static bool sensor_twt_pawr_test(void)
 #endif
             if (mmdrv_set_wake_enabled(false) != MMWLAN_SUCCESS) goto done;
             sensor_halow_sleep_allowed = host_released = true;
+            sensor_twt_test_host_released = 1;
             LOG_INF("PAWR_TWT host wake released; subsequent calibration runs only after RX");
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
             sensor_twt_log_busy("host-release");
@@ -430,9 +466,11 @@ static bool sensor_twt_pawr_test(void)
         if (offer.lease_ms) expires = sensor_twt_now_us() + (uint64_t)offer.lease_ms * 1000;
         if ((event.msg.sequence & 0x7fffffffU) >= 30U ||
             !(event.msg.sequence & 0x80000000U)) continue;
+        ++sensor_twt_test_user_rx;
         if (event.msg.sequence & 0x80000000U) {
             sensor_led_set_awake(true);
             led_until = sensor_twt_now_us() + 5000000;
+            ++sensor_twt_test_led_on;
             LOG_INF("PAWR_TWT LED on P2.05; USER wake sequence=%u duration_ms=5000", event.msg.sequence);
         }
         bool off_window = event.msg.sequence & 1U;
@@ -440,7 +478,9 @@ static bool sensor_twt_pawr_test(void)
         LOG_INF("PAWR_TWT RX sequence=%u planned=%s host_us=%llu host_released=%u", event.msg.sequence,
             off_window ? "outside" : "inside", (unsigned long long)event.received_us, host_released);
         {
+            bool feedback_sent = false;
             if (host_released && mmdrv_set_wake_enabled(true) != MMWLAN_SUCCESS) goto done;
+            sensor_twt_test_host_released = 0;
             uint64_t before = sensor_twt_now_us(), tsf;
             if (!sensor_probe_get_tsf(&tsf)) goto done;
             uint64_t after = sensor_twt_now_us();
@@ -461,10 +501,15 @@ static bool sensor_twt_pawr_test(void)
                     feedback.phase_error_us = error;
                     feedback.processing_us = (uint32_t)processing;
                     if (!sensor_twt_send(&feedback)) goto done;
+                    feedback_sent = true;
                 }
 
             }
+            if (!feedback_sent) ++sensor_twt_test_feedback_skipped;
         }
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)
+        if (sensor_twt_test_capture_after_user) sensor_twt_capture_mac();
+#endif
         if (host_released) {
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_FORCE_SNOOZE)
             sensor_twt_force_snooze();
@@ -472,12 +517,15 @@ static bool sensor_twt_pawr_test(void)
             enum mmwlan_status released = mmdrv_set_wake_enabled(false);
             LOG_INF("PAWR_TWT POST_TX host_release_sdk=%d", released);
             if (released != MMWLAN_SUCCESS) goto done;
+            sensor_twt_test_host_released = 1;
         }
         /* Timing feedback piggybacks on the USER request hash ACK. Current is measured externally;
          * no GPIO, BUSY or packet counters infer the RF sleep state. */
     }
     LOG_INF("PAWR_TWT EXPIRED received_inside=%u received_outside=%u", inside, outside);
  done:
+    sensor_twt_test_active = 0;
+    sensor_twt_test_host_released = 0;
     sensor_led_set_awake(false);
     (void)mmdrv_set_wake_enabled(true);
     sensor_halow_sleep_allowed = false;
