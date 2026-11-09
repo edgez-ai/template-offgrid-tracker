@@ -18,6 +18,7 @@
 #include "edgez_umac.h"
 #include "common/morse_commands.h"
 #include "common/morse_command_utils.h"
+#include "mmpkt.h"
 extern enum mmwlan_status mmdrv_execute_command(uint8_t *command, uint8_t *response, uint32_t *response_len);
 extern enum mmwlan_status mmdrv_rm_if(uint16_t vif_id);
 #include "esp_err.h"
@@ -107,6 +108,56 @@ static void capture_mac_diagnostics(void)
 /* Explicit lab control only: native S1G timing beacons, never discovery. */
 static uint64_t sync_beacon_until;
 static bool sync_ap_mode;
+static atomic_uint sync_dtim_period = ATOMIC_VAR_INIT(1);
+static unsigned sync_dtim_count;
+static atomic_uint sync_beacons_built;
+static atomic_bool dtim_command_pending;
+static bool dtim40_mode;
+static uint64_t dtim_burst_until, dtim_next_tx;
+static struct edgez_pawr_twt dtim_probe;
+
+/* Mirror the SDK AP beacon builder: count down for each actual driver
+ * beacon request. Updating only the static template would advertise count=0
+ * on every beacon and would not be a DTIM40 comparison. */
+extern struct mmpkt *__real_mmdrv_host_get_beacon(void);
+struct mmpkt *__wrap_mmdrv_host_get_beacon(void)
+{
+    struct mmpkt *packet = __real_mmdrv_host_get_beacon();
+    if (!packet) return NULL;
+    struct mmpktview *view = mmpkt_open(packet);
+    uint8_t *data = mmpkt_get_data_start(view);
+    size_t len = mmpkt_get_data_length(view);
+    unsigned period = atomic_load(&sync_dtim_period);
+    if (len < 15 || (data[0] & 0xfc) != 0x1c) {
+        mmpkt_close(&view);
+        return packet;
+    }
+    for (size_t at = 15; at + 2 <= len;) {
+        size_t end = at + 2 + data[at + 1];
+        if (end > len) break;
+        if (data[at] == 5 && data[at + 1] >= 2) {
+            if (sync_dtim_count >= period) sync_dtim_count = period - 1;
+            data[at + 2] = sync_dtim_count;
+            data[at + 3] = period;
+            if (period == 40 && data[at + 1] == 6) {
+                bool pending = atomic_load(&dtim_command_pending);
+                /* SDK S1G TIM: unsliced page 0, block bitmap, AID 1. */
+                data[at + 4] = 0x3e | (pending && !sync_dtim_count ? 1 : 0);
+                data[at + 5] = 0;
+                data[at + 6] = 1;
+                data[at + 7] = pending ? 2 : 0;
+            }
+            if (period == 40 && sync_dtim_count == 0)
+                ESP_LOGI(TAG, "DTIM40 BEACON count=0 period=40 built=%u", atomic_load(&sync_beacons_built));
+            sync_dtim_count = sync_dtim_count ? sync_dtim_count - 1 : period - 1;
+            atomic_fetch_add(&sync_beacons_built, 1);
+            break;
+        }
+        at = end;
+    }
+    mmpkt_close(&view);
+    return packet;
+}
 
 static void sync_beacon_stop(void)
 {
@@ -135,6 +186,7 @@ static void sync_beacon_start(bool continuous)
     }
     if (sync_beacon_until) sync_beacon_stop();
     if (sync_beacon_until) return;
+    sync_dtim_count = atomic_load(&sync_dtim_period) - 1;
     /* S1G full beacon: 15-byte header, firmware-filled timestamp, no optional
      * header fields. Empty TIM, ESS without privacy, 100-TU beacon interval.
      * Sources: SDK dot11_s1g_beacon_hdr / hostapd S1G beacon construction. */
@@ -148,6 +200,10 @@ static void sync_beacon_start(bool continuous)
         5, 2, 0, 1,                    /* SDK empty S1G TIM: count and period only. */
     };
     memcpy(frame + n, timing_ies, sizeof(timing_ies)); n += sizeof(timing_ies);
+    if (atomic_load(&sync_dtim_period) == 40) {
+        frame[n - 3] = 6; /* TIM length, extended for its pending-traffic bitmap. */
+        frame[n++] = 0x3e; frame[n++] = 0; frame[n++] = 1; frame[n++] = 0;
+    }
     memcpy(frame + n, edgez_mesh_s1g_default_capabilities_ie,
         EDGEZ_MESH_S1G_CAPABILITIES_IE_LEN);
     frame[n + 2 + 4] |= 0x10; /* Non-TIM support. */
@@ -161,7 +217,7 @@ static void sync_beacon_start(bool continuous)
     frame[n++] = 0; frame[n++] = strlen(WAKE_TEST_SSID);
     memcpy(frame + n, WAKE_TEST_SSID, strlen(WAKE_TEST_SSID)); n += strlen(WAKE_TEST_SSID);
     int rc = wake_umac.driver->configure_bss(wake_umac.driver_ctx, wake_umac.vif_id,
-        100, 1, edgez_pawr_compress_ssid((const uint8_t *)WAKE_TEST_SSID, strlen(WAKE_TEST_SSID)));
+        100, atomic_load(&sync_dtim_period), edgez_pawr_compress_ssid((const uint8_t *)WAKE_TEST_SSID, strlen(WAKE_TEST_SSID)));
     if (rc == 0) {
         const struct edgez_rf_beacon_template beacon = {
             .frame = frame, .frame_length = n, .mcs = 0, .bandwidth_mhz = 1,
@@ -173,6 +229,7 @@ static void sync_beacon_start(bool continuous)
     ESP_LOGI(TAG, "TWT_SYNC_BEACON START rc=%d bytes=%u interval_tu=100 duration_ms=%u continuous=%u",
         rc, (unsigned)n, continuous ? 0U : 30000U, continuous);
     if (rc != 0) sync_beacon_stop();
+    ESP_LOGI(TAG, "BEACON_DTIM period=%u interval_us=102400 countdown=driver_requests", atomic_load(&sync_dtim_period));
 }
 
 /* Bounded passive PM audit. Duplicate monitor copies are filtered below. */
@@ -360,6 +417,7 @@ static bool send_twt(const struct edgez_pawr_twt *msg, const uint8_t peer[6])
             ++request_id, 0, ssid, payload, sizeof(payload), &packet_length)) return false;
     if (!edgez_pawr_encode_action_frame(frame, sizeof(frame), sequence_number++,
             radio_info.mac_addr, peer, packet, packet_length, &frame_length)) return false;
+    if (dtim40_mode) memcpy(frame + 16, radio_info.mac_addr, 6);
     const struct edgez_umac_tx_request tx = {
         .token = ++tx_token, .frame = frame, .frame_length = frame_length,
         .frame_type = EDGEZ_UMAC_TX_MANAGEMENT, .tid = 8, .mcs = 0,
@@ -429,6 +487,15 @@ static void twt_receive_pending(void)
                 msg->round_trip_us != schedule.round_trip_us ||
                 msg->sequence != pending_probe_sequence || msg->echo_host_us != pending_probe_us)
                 continue;
+            if (dtim40_mode) {
+                atomic_store(&dtim_command_pending, false);
+                dtim_burst_until = 0;
+                pending_probe_us = 0;
+                user_wake_pending = false;
+                ESP_LOGI(TAG, "DTIM40 ACK sequence=%lu beacons_built=%u", (unsigned long)msg->sequence,
+                    atomic_load(&sync_beacons_built));
+                continue;
+            }
             uint64_t elapsed = event.received_us - pending_probe_us;
             if ((msg->sequence & 0x80000001U) == 0x80000000U) user_wake_pending = false;
             pending_probe_us = 0; /* Duplicate/reordered responses cannot update twice. */
@@ -702,6 +769,11 @@ static void wake_sender_task(void *arg)
         if (command == 'P') pm_audit_stop();
         if (command == 'b') sync_beacon_start(false);
         if (command == 'c') sync_beacon_start(true);
+        if (command == '4' && sync_ap_mode && !sync_beacon_until && !twt_active && !twt_pending) {
+            dtim40_mode = true;
+            atomic_store(&sync_dtim_period, 40);
+            ESP_LOGI(TAG, "DTIM40 MODE native_twt=0 USER_burst_ms=4300 beacon_period=40");
+        }
         if (command == 'B') sync_beacon_stop();
         if (command == 'd') capture_mac_diagnostics();
         if (command == 'a') switch_to_ap_test();
@@ -725,6 +797,31 @@ static void wake_sender_task(void *arg)
             log_button_state(button_trigger ? "debounce-pass" : "debounce-rejected");
         }
         now = esp_timer_get_time();
+        if (dtim40_mode && twt_active) {
+            if (button_trigger || command == 'w') {
+                dtim_probe = schedule;
+                dtim_probe.kind = EDGEZ_PAWR_TWT_PROBE;
+                dtim_probe.sequence = 0x80000000U | ((++user_wake_sequence % 15) * 2);
+                dtim_probe.echo_host_us = now;
+                pending_probe_us = now;
+                pending_probe_sequence = dtim_probe.sequence;
+                dtim_burst_until = now + 4300000;
+                atomic_store(&dtim_command_pending, true);
+                dtim_next_tx = now;
+                ESP_LOGI(TAG, "DTIM40 USER burst sequence=%lu duration_ms=4300", (unsigned long)dtim_probe.sequence);
+            }
+            if (dtim_burst_until && now >= dtim_burst_until) {
+                ESP_LOGW(TAG, "DTIM40 USER timeout without ACK");
+                dtim_burst_until = pending_probe_us = 0;
+                atomic_store(&dtim_command_pending, false);
+            }
+            if (dtim_burst_until && now >= dtim_next_tx) {
+                (void)send_twt(&dtim_probe, twt_peer);
+                /* Leave airtime for native beacons at 1 MHz/MCS0. */
+                dtim_next_tx = now + 8000;
+            }
+            continue;
+        }
         if (button_trigger || command == 'w') {
             ESP_LOGI(TAG, "PAWR_TWT USER trigger source=%s session=%lu active=%u",
                 button_trigger ? "gpio" : "serial", (unsigned long)twt_session, twt_active);

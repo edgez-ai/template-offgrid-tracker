@@ -18,6 +18,9 @@ static volatile uint32_t sensor_twt_test_led_off;
 static volatile uint32_t sensor_twt_test_host_released;
 static volatile uint32_t sensor_twt_test_reports_completed;
 static volatile uint32_t sensor_twt_test_reports_failed;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM40_TEST)
+static volatile uint32_t sensor_dtim40_ready;
+#endif
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
 static volatile uint32_t sensor_twt_native_ps_ready;
 /* SDK status, requester capability, responder capability. */
@@ -83,15 +86,15 @@ static void sensor_twt_set_bssid(void)
 #endif
 
 #if !defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
-static bool sensor_twt_ps_contract(uint16_t command_id)
+static bool sensor_twt_ps_contract_values(uint16_t command_id, uint32_t interval, bool non_tim_mode)
 {
     struct morse_cmd_req_li_sleep li = MORSE_COMMAND_INIT(li,
         MORSE_CMD_ID_LI_SLEEP, mesh_runtime.umac.vif_id,
-        .listen_interval = htole32(2));
+        .listen_interval = htole32(interval));
     struct morse_cmd_req_get_set_generic_param non_tim = MORSE_COMMAND_INIT(non_tim,
         MORSE_CMD_ID_GET_SET_GENERIC_PARAM, mesh_runtime.umac.vif_id,
         .param_id = htole32(MORSE_CMD_PARAM_ID_NON_TIM_MODE),
-        .action = htole32(MORSE_CMD_PARAM_ACTION_SET), .value = htole32(1));
+        .action = htole32(MORSE_CMD_PARAM_ACTION_SET), .value = htole32(non_tim_mode));
     struct { struct morse_cmd_resp resp; uint8_t extra[112]; } reply = {0};
     uint32_t len = sizeof(reply);
     enum mmwlan_status sdk = mmdrv_execute_command(
@@ -105,6 +108,11 @@ static bool sensor_twt_ps_contract(uint16_t command_id)
         command_id, sdk, valid,
         (int)(valid ? (int32_t)le32toh(reply.resp.status) : INT32_MIN), len);
     return valid && sdk == MMWLAN_SUCCESS && le32toh(reply.resp.status) == 0;
+}
+
+static bool sensor_twt_ps_contract(uint16_t command_id)
+{
+    return sensor_twt_ps_contract_values(command_id, 2, true);
 }
 #endif
 
@@ -500,6 +508,7 @@ static bool sensor_twt_pawr_test(void)
         break;
     }
     if (!accepted) { LOG_ERR("PAWR_TWT accept timeout or timing uncertainty"); goto done; }
+#if !defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM40_TEST)
     /* Match SDK requester/SUGGEST installation for a negotiated explicit TSF:
      * request=1, setup=SUGGEST(1), implicit=1, announced flow 0, exponent=7.
      * Period is 39063 << 7 = 5000064 us, matching the PAwR offer. */
@@ -548,6 +557,7 @@ static bool sensor_twt_pawr_test(void)
         request_type, offer.target_tsf, SENSOR_TWT_WAKE_MANTISSA);
 #endif
     if (!installed) goto done;
+#endif /* !DTIM40: no native TWT validate/install commands */
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_NATIVE_MESH_TEST)
     if (!sensor_probe_config_ps(true, true)) goto done;
 #endif
@@ -558,6 +568,16 @@ static bool sensor_twt_pawr_test(void)
         if (sensor_twt_wait(&offer, EDGEZ_PAWR_TWT_READY, &event, 200)) { ready = true; break; }
     }
     if (!ready) { LOG_ERR("PAWR_TWT ready timeout"); goto done; }
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM40_TEST)
+    /* Control exchange is complete before enabling the long beacon sleep.
+     * The PAwR schedule is transport metadata only in this experiment. */
+    if (mesh_runtime.umac.driver->configure_bss(mesh_runtime.umac.driver_ctx,
+            mesh_runtime.umac.vif_id, 100, 40, 0) != 0 ||
+        !sensor_twt_ps_contract_values(MORSE_CMD_ID_LI_SLEEP, 40, false) ||
+        !sensor_twt_ps_contract_values(MORSE_CMD_ID_GET_SET_GENERIC_PARAM, 40, false)) goto done;
+    sensor_dtim40_ready = 1;
+    LOG_INF("DTIM40 ACTIVE beacon_tu=100 dtim=40 listen=40 non_tim=0 native_twt=0 association_frames=0");
+#endif
     edgez_gps_stop();
     /* Release host wake after setup. Only actual PAwR USER traffic supplies
      * timing samples; silence does not expire the installed agreement. */
@@ -656,6 +676,15 @@ static bool sensor_twt_pawr_test(void)
             bool feedback_sent = false;
             if (host_released && mmdrv_set_wake_enabled(true) != MMWLAN_SUCCESS) goto done;
             sensor_twt_test_host_released = 0;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM40_TEST)
+            /* DTIM delivery has no relationship to the old TWT phase. */
+            struct edgez_pawr_twt feedback = event.msg;
+            feedback.kind = EDGEZ_PAWR_TWT_HIT;
+            feedback.processing_us = 1;
+            feedback.phase_error_us = 0;
+            if (!sensor_twt_send(&feedback)) goto done;
+            feedback_sent = true;
+#else
             uint64_t before = sensor_twt_now_us(), tsf;
             if (!sensor_probe_get_tsf(&tsf)) goto done;
             uint64_t after = sensor_twt_now_us();
@@ -680,6 +709,7 @@ static bool sensor_twt_pawr_test(void)
                 }
 
             }
+#endif
             if (!feedback_sent) ++sensor_twt_test_feedback_skipped;
         }
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT)

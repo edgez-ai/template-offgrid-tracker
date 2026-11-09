@@ -326,6 +326,50 @@ it is not an isolated module-current measurement. A serial cancellation alone
 is not a persistent control: a later nRF reset reboots the wake image and
 establishes a new TWT session. The verified 500 µA image was restored after the
 comparison.
+
+The separate `edgez-nrf54l15-fgh200m-dtim40-test` profile compares beacon-based
+sleep with native TWT disabled. Its `-dtim40-audit` counterpart adds the bounded
+firmware-statistics snapshot. HC33 must use serial `a`, then `4`, then `c`
+after a fresh boot: AP mode, DTIM40, continuous 100-TU beacons. The driver beacon
+callback updates the TIM count from 39 down to zero; observed DTIM cadence was
+4.095–4.096 seconds. The nRF uses listen interval 40, TIM mode (`NON_TIM=0`),
+and manually created STA/BSSID/AID state. No authentication/association frames
+are exchanged, but AP beacons and STA firmware context are still required.
+The existing PAwR messages/log labels carry the control session only; this
+profile never validates or installs a native TWT agreement.
+
+DTIM sleep does not create a fixed 50-ms receive window. USER advertises pending
+AID-1/group traffic in the AP's S1G TIM and sends a bounded command burst until
+its ACK or 4.3 seconds. With empty TIMs the initial test slept but received zero
+USER commands; with pending traffic indicated, both commands, ACKs and LED
+cycles passed with the debugger closed. The initial idle diagnostic reported
+13.749152 seconds slept at 16.816702 seconds uptime and zero TWT service
+periods. These are firmware counters, not a current measurement.
+The quiet image then passed another 85-second run: both USER commands were
+acknowledged, both LED cycles ended, and the retained 60-second report passed
+between them. LOG, RTT and the diagnostic snapshot were disabled in that image.
+With the nRF USB/debug cable disconnected and the same separate 5-V supply,
+the user measured a 400 µA sleep floor between DTIM40 wake bursts, versus
+500 µA for the five-second TWT image: 100 µA (20%) lower. This is 2.0 mW
+at the whole-board input, not a full-cycle average or isolated radio power.
+The quiet DTIM40 wake image remains installed for this comparison.
+
+Run the DTIM audit with the exact flashed ELF:
+
+```sh
+python scripts/test_pawr_twt_openocd.py \
+  --elf /path/to/dtim40-audit.elf --probe CMSIS_DAP_SERIAL \
+  --mode ap --keep-beacons --dtim40 --normal-boot \
+  --duration 85 --wake-delays 24,70 --log /tmp/dtim40.log
+```
+
+For comparison, the [Morse MM8108 reference-module datasheet, p. 25](https://www.morsemicro.com/resources/datasheets/modules/MM8108-MF15457_Data_Sheet.pdf#page=25)
+lists DTIM40 standby at 29 µA on VBAT+VBAT_TX and less than 1 µA on VDDIO
+with short beacons, a crystal RTC, a 2-MHz channel, SPI/SDIO, 3.3 V and 25°C.
+That is approximately 0.1 mW for the reference radio module. This experiment
+uses 1-MHz full beacons and a different module/host board; the whole-board 5-V
+sleep-floor reading is not directly comparable with that standby specification.
+
 Clean the nRF build after changing the tick rate: an incremental build can
 retain a timer object compiled with the old value. The clean five-second image
 was checked on hardware: consecutive retained-session reports were 59.999 s apart.

@@ -151,6 +151,7 @@ endif()
 
 # Factory HC33 audit uses SDK command definitions and RF-Morse diagnostics.
 if(CONFIG_OFFGRID_HT_HC33_HALOW_WAKE_TEST)
+    target_link_options(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=mmdrv_host_get_beacon")
     target_include_directories(${COMPONENT_LIB} PRIVATE
         "${CMAKE_CURRENT_LIST_DIR}/../platforms/esp-halow/halow/components/mm-iot-sdk/framework/morselib/src"
         "${CMAKE_CURRENT_LIST_DIR}/../platforms/esp-halow/halow/components/mm-iot-sdk/framework/morselib/include"

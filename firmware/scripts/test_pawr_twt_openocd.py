@@ -55,7 +55,8 @@ def symbols(elf_path):
         wanted += ['_SEGGER_RTT', 'sensor_twt_mac_snapshot', 'sensor_twt_mac_snapshot_length',
                    'sensor_twt_mac_snapshot_status', 'sensor_twt_test_capture_after_user',
                    'sensor_twt_sleep_snapshot', 'sensor_twt_sleep_snapshot_length',
-                   'sensor_twt_sleep_snapshot_status', 'sensor_twt_test_bootstrap_attempts']
+                   'sensor_twt_sleep_snapshot_status', 'sensor_twt_test_bootstrap_attempts',
+                   'sensor_dtim40_ready']
         result = {}
         for name in wanted:
             found = table.get_symbol_by_name(name) or []
@@ -107,6 +108,7 @@ def main():
     parser.add_argument('--physical-button', action='store_true',
                         help='With --leave-running, keep UART control lines deasserted and wait for a real USER press')
     parser.add_argument('--keep-beacons', action='store_true', help='Keep firmware AP beacons running until B, m, or reset, including after handoff')
+    parser.add_argument('--dtim40', action='store_true', help='Use the separate DTIM40 image and HC33 serial 4 mode')
     parser.add_argument('--mesh-after-seed', type=float,
                         help='Send HC33 m after this many ACTIVE seconds to return its radio to mesh')
     parser.add_argument('--snapshot-after-user', action='store_true',
@@ -122,6 +124,8 @@ def main():
         parser.error('Detach after the 15-second snapshot and before the first command (18+ seconds)')
     if args.keep_beacons and args.mode != 'ap':
         parser.error('--keep-beacons requires --mode ap')
+    if args.dtim40 and (args.mode != 'ap' or not args.keep_beacons):
+        parser.error('--dtim40 requires --mode ap --keep-beacons')
     if args.normal_boot and (args.detach_after is not None or args.snapshot_after_user):
         parser.error('--normal-boot cannot use --detach-after or debugger-set --snapshot-after-user')
     if args.leave_running and not args.normal_boot:
@@ -165,7 +169,7 @@ def main():
             text = f'{time.monotonic()-started:.3f} [{name}] {line}'
             output.write(text + '\n')
             output.flush()
-            if name == 'TEST' or any(s in line for s in ['PAWR_TWT', 'TWT_SYNC', 'TWT_AP', 'TWT_MESH', 'USER_PIN', '<err>']):
+            if name == 'TEST' or any(s in line for s in ['PAWR_TWT', 'TWT_SYNC', 'TWT_AP', 'TWT_MESH', 'DTIM40', 'USER_PIN', '<err>']):
                 print(text, flush=True)
 
         def start_server():
@@ -301,7 +305,12 @@ def main():
                             match = re.search(r'sequence=(\d+).*queued=1', line)
                             if match:
                                 queued_sequences.append(int(match.group(1)))
-                        if active_at is not None and 'PAWR_TWT STATS sequence=' in line:
+                        if args.dtim40 and active_at is not None and 'DTIM40 USER burst sequence=' in line:
+                            match = re.search(r'sequence=(\d+)', line)
+                            if match:
+                                queued_sequences.append(int(match.group(1)))
+                        if active_at is not None and ('PAWR_TWT STATS sequence=' in line or
+                                (args.dtim40 and 'DTIM40 ACK sequence=' in line)):
                             match = re.search(r'sequence=(\d+)', line)
                             if match:
                                 acknowledgements += 1
@@ -314,6 +323,8 @@ def main():
                     reset_at = now + 2
                 if reset_at is not None and not reset_done and now >= reset_at:
                     if args.mode == 'ap':
+                        if args.dtim40:
+                            send('4')
                         send('c' if args.keep_beacons else 'b')
                         beacon_at = now
                     if args.normal_boot:
@@ -394,7 +405,7 @@ def main():
                     checks['physical_gpio_and_ack'] = physical['gpio_trigger'] and physical['acknowledged']
                 if args.mesh_after_seed is not None:
                     checks['returned_to_mesh_with_same_mac'] = mesh_confirmed
-                result = {'mode': args.mode, 'session': session, 'functional_pass': None,
+                result = {'mode': args.mode, 'dtim40': args.dtim40, 'session': session, 'functional_pass': None,
                           'hc33_observation_pass': all(checks.values()), 'checks': checks,
                           'commands': sent, 'hc33_acknowledgements': acknowledgements,
                           'counter_verification': 'skipped to avoid debugger reattachment',
@@ -415,6 +426,8 @@ def main():
             led_out = read_memory(0x50050400, 32, 1)[0]
             led_dir = read_memory(0x50050410, 32, 1)[0]
             checks = assess(session, counters, sent, acknowledgements)
+            if args.dtim40:
+                checks['dtim40_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
             checks['all_commands_queued'] = len(queued_sequences) == sent
             checks['led_pin_off'] = bool(led_out & 32) and not bool(led_dir & 32)
             reset_reason = read_memory(0x5010e600, 32, 1)[0]
@@ -422,7 +435,7 @@ def main():
                 checks['pin_reset_detected'] = bool(reset_reason & 1)
             if args.mesh_after_seed is not None:
                 checks['returned_to_mesh_with_same_mac'] = mesh_confirmed
-            result = {'mode': args.mode, 'session': session, 'debugger_closed_during_commands': detached,
+            result = {'mode': args.mode, 'dtim40': args.dtim40, 'session': session, 'debugger_closed_during_commands': detached,
                       'probe_wiring_connected': True, 'duration_after_active_seconds': args.duration,
                       'snapshot_after_user': args.snapshot_after_user,
                       'mesh_after_seed': args.mesh_after_seed, 'mesh_confirmed': mesh_confirmed,
