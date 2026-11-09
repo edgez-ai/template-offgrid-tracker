@@ -307,6 +307,25 @@ XIAO IMU power-on hog, and holds P0.01 low. IMU INT/SCL/SDA remain disconnected
 without pull-ups; telemetry contains no IMU samples. This also avoids leaving
 TWIM30 enabled after an IMU initialization failure. The TWT interval and
 one-minute report schedule are unchanged.
+With that IMU-off image, the measured low reading remained 670 µA. Removing
+the SPI IRQ pull-up while the SDK masks that interrupt reduced it to 500 µA
+on the same external supply (about 25% lower). The pull-up is restored before
+IRQ sampling/unmasking; BUSY wake remains enabled. Two remote commands, their
+ACKs and LED cycles, and the retained one-minute report passed with the
+debugger disconnected during the commands. The nRF build hook reapplies this
+optional port change after a clean or reverted `mm-iot-zephyr` checkout.
+An additional SPI suspend/resume test verified that SCK/MOSI/MISO became
+disconnected and passed both remote wakes plus the minute report, but the
+measured low reading remained 500 µA. That experiment was removed; the retained
+change is the sleep-only IRQ pull-up fix.
+The persistent all-off System ON benchmark subsequently measured 200 µA at
+the board's 5 V input, with the HaLow enable pin verified low and SPI/UART/I2C
+disabled. The working retained-radio image measured 500 µA at that same input.
+The roughly 300 µA difference includes the powered HaLow/application setup;
+it is not an isolated module-current measurement. A serial cancellation alone
+is not a persistent control: a later nRF reset reboots the wake image and
+establishes a new TWT session. The verified 500 µA image was restored after the
+comparison.
 Clean the nRF build after changing the tick rate: an incremental build can
 retain a timer object compiled with the old value. The clean five-second image
 was checked on hardware: consecutive retained-session reports were 59.999 s apart.
