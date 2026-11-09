@@ -59,6 +59,8 @@ static struct sensor_twt_event sensor_twt_seed;
 static bool sensor_twt_seed_valid;
 static bool sensor_probe_scan_receive(bool enabled);
 static bool sensor_probe_monitor(uint16_t *vif_id, bool enabled);
+static inline void sensor_force_cpu_low_power(void);
+static volatile uint32_t sensor_twt_test_bootstrap_attempts;
 #endif
 #include "edgez_sensor_settings.h"
 #include "edgez_mesh_sae_provider.h"
@@ -1494,7 +1496,14 @@ static int sensor_pawr_exchange(uint32_t wake_interval_ms)
 			&packet_len)) {
 		return -EMSGSIZE;
 	}
-	const uint8_t *destination = provisioning ? broadcast :
+	bool discover_peer = provisioning;
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)
+	/* Factory wake tests learn their peer from the matching PAwR ACK. A
+	 * provisioned device can retain a different gateway after board replacement;
+	 * broadcasting this bootstrap lets the current HC33 answer. */
+	discover_peer = discover_peer || sensor_factory_wake_mode;
+#endif
+	const uint8_t *destination = discover_peer ? broadcast :
 		persisted_profile.gateway_mac;
 	if (!edgez_pawr_encode_action_frame(
 			frame, sizeof(frame), pawr_sequence_number++,
@@ -1520,7 +1529,7 @@ static int sensor_pawr_exchange(uint32_t wake_interval_ms)
 		.attempts = 1U,
 		.bandwidth_mhz = mesh_runtime.config.channel.operating_bw_mhz,
 		.short_guard = mesh_runtime.config.short_guard,
-		.no_ack = provisioning,
+		.no_ack = discover_peer,
 		.immediate_status = true,
 	};
 	k_sem_reset(&sensor_pawr_response_sem);
@@ -3346,11 +3355,10 @@ static void sensor_finish_cycle(uint32_t now)
 static inline void sensor_force_cpu_low_power(void)
 {
 #if defined(CONFIG_SOC_COMPATIBLE_NRF54LX) && !defined(CONFIG_NRF_SYS_EVENT)
-	/* The Nordic Bluetooth controller selects constant-latency mode while its
-	 * radio timer is active. Sensor sleep is entered only after bt_disable(),
-	 * HaLow shutdown, SPI suspend and radio-pin isolation, so no low-latency
-	 * client remains. Explicitly restore variable-latency low-power mode in
-	 * case a previous BLE session did not complete that transition. */
+	/* The Nordic Bluetooth controller can select constant-latency mode. The
+	 * sensor build excludes it; restore variable latency before tickless idle.
+	 * The ordinary path has shut down HaLow/SPI. The TWT path instead releases
+	 * host wake and leaves RF scheduling to MM8108, retaining GPIO wake IRQs. */
 	NRF_POWER->TASKS_LOWPWR = 1U;
 	__DSB();
 	__ISB();
@@ -3434,6 +3442,9 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 	if (sensor_power.phase != SENSOR_POWER_TRANSMIT) {
 		return;
 	}
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)
+	if (sensor_factory_wake_mode) ++sensor_twt_test_bootstrap_attempts;
+#endif
 	const bool provisioning_cycle = !edgez_config_should_autostart();
 
 	/* The reporting timer is the only periodic MCU wake source in the power
@@ -3610,6 +3621,15 @@ static void sensor_power_tick(const struct edgez_halow_profile *profile,
 		LOG_WRN("sensor battery refresh failed rc=%d", battery_rc);
 	}
 	sensor_finish_cycle(k_uptime_get_32());
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)
+	if (sensor_factory_wake_mode) {
+		/* Active TWT waits inside its RX handler. If setup/retention failed,
+		 * cleanup above has stopped the radio. Do not turn a timer retry and
+		 * its sensor report into apparent HC33 wake evidence. Reset to retry. */
+		sensor_force_cpu_low_power();
+		for (;;) k_sleep(K_FOREVER);
+	}
+#endif
 }
 
 int main(void)
@@ -3635,7 +3655,8 @@ int main(void)
 		LOG_ERR("factory discovery country/channel unavailable or invalid");
 	}
 #if DT_NODE_HAS_STATUS(EDGEZ_SENSOR_LED_NODE, okay)
-	if (sensor_role && sensor_factory_wake_mode && sensor_led_ready) {
+	if (sensor_role && sensor_factory_wake_mode && sensor_led_ready &&
+	    !IS_ENABLED(CONFIG_OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST)) {
 		LOG_INF("LED boot self-test on P2.05 for 5000 ms; periodic LED disabled");
 		sensor_led_set_awake(true);
 		k_msleep(5000);

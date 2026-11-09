@@ -53,7 +53,9 @@ def symbols(elf_path):
             raise ValueError('ELF has no symbol table')
         wanted = ['sensor_twt_test_' + name for name in COUNTERS]
         wanted += ['_SEGGER_RTT', 'sensor_twt_mac_snapshot', 'sensor_twt_mac_snapshot_length',
-                   'sensor_twt_mac_snapshot_status', 'sensor_twt_test_capture_after_user']
+                   'sensor_twt_mac_snapshot_status', 'sensor_twt_test_capture_after_user',
+                   'sensor_twt_sleep_snapshot', 'sensor_twt_sleep_snapshot_length',
+                   'sensor_twt_sleep_snapshot_status', 'sensor_twt_test_bootstrap_attempts']
         result = {}
         for name in wanted:
             found = table.get_symbol_by_name(name) or []
@@ -66,13 +68,16 @@ def symbols(elf_path):
 
 
 def read_counters(table):
-    return {name: read_memory(table['sensor_twt_test_' + name][0], 32, 1)[0]
-            for name in COUNTERS}
+    result = {name: read_memory(table['sensor_twt_test_' + name][0], 32, 1)[0]
+              for name in COUNTERS}
+    if 'sensor_twt_test_bootstrap_attempts' in table:
+        result['bootstrap_attempts'] = read_memory(table['sensor_twt_test_bootstrap_attempts'][0], 32, 1)[0]
+    return result
 
 
 def assess(session, counters, sent, acknowledgements):
     """Separate queued TX, application delivery, and returned ACK evidence."""
-    return {
+    result = {
         'same_session': counters['session'] == session,
         'still_active': counters['active'] == 1,
         'all_delivered': sent > 0 and counters['user_rx'] == sent,
@@ -81,6 +86,9 @@ def assess(session, counters, sent, acknowledgements):
         'led_cycles_complete': counters['led_on'] == sent and counters['led_off'] == sent,
         'host_released': counters['host_released'] == 1,
     }
+    if 'bootstrap_attempts' in counters:
+        result['single_bootstrap'] = counters['bootstrap_attempts'] == 1
+    return result
 
 
 def main():
@@ -98,7 +106,7 @@ def main():
                         help='With --normal-boot, skip final debug reattachment; report HC33 observations only')
     parser.add_argument('--physical-button', action='store_true',
                         help='With --leave-running, keep UART control lines deasserted and wait for a real USER press')
-    parser.add_argument('--keep-beacons', action='store_true', help='Refresh AP test beacons every 24 seconds')
+    parser.add_argument('--keep-beacons', action='store_true', help='Keep firmware AP beacons running until B, m, or reset, including after handoff')
     parser.add_argument('--mesh-after-seed', type=float,
                         help='Send HC33 m after this many ACTIVE seconds to return its radio to mesh')
     parser.add_argument('--snapshot-after-user', action='store_true',
@@ -230,6 +238,15 @@ def main():
             raw = bytes(read_memory(table[prefix][0], 8, length))
             args.log.with_suffix('.mac.bin').write_bytes(raw)
             record('TEST', f'Saved existing MAC snapshot bytes={length}; no RF query')
+            prefix = 'sensor_twt_sleep_snapshot'
+            if prefix in table:
+                status = read_memory(table[prefix + '_status'][0], 32, 1)[0]
+                length = read_memory(table[prefix + '_length'][0], 32, 1)[0]
+                if status != 0 or not 16 <= length <= table[prefix][1]:
+                    raise ValueError(f'Sleep snapshot not ready: status={status} length={length}')
+                raw = bytes(read_memory(table[prefix][0], 8, length))
+                args.log.with_suffix('.sleep.bin').write_bytes(raw)
+                record('TEST', f'Saved existing Apps-core sleep snapshot bytes={length}; no RF query')
 
         def send(command):
             port.write(command.encode())
@@ -297,7 +314,7 @@ def main():
                     reset_at = now + 2
                 if reset_at is not None and not reset_done and now >= reset_at:
                     if args.mode == 'ap':
-                        send('b')
+                        send('c' if args.keep_beacons else 'b')
                         beacon_at = now
                     if args.normal_boot:
                         # Nordic requires normal mode followed by a pin reset
@@ -327,6 +344,9 @@ def main():
                         snapshot_file = args.log.with_suffix('.mac.bin')
                         if snapshot_file.exists():
                             shutil.copy2(snapshot_file, args.log.with_suffix('.before-detach.mac.bin'))
+                        sleep_file = args.log.with_suffix('.sleep.bin')
+                        if sleep_file.exists():
+                            shutil.copy2(sleep_file, args.log.with_suffix('.before-detach.sleep.bin'))
                         record('TEST', 'BEFORE_DETACH ' + json.dumps(pre_detach))
                         debug_power = release_debug_power()
                         stop_server()
@@ -338,9 +358,6 @@ def main():
                     if args.mesh_after_seed is not None and not mesh_requested and elapsed >= args.mesh_after_seed:
                         send('m')
                         mesh_requested = True
-                if args.keep_beacons and beacon_at is not None and now - beacon_at >= 24:
-                    send('b')
-                    beacon_at = now
                 time.sleep(0.005)
             if args.leave_running:
                 physical = None

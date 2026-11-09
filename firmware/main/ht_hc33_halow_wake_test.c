@@ -127,8 +127,12 @@ static void sync_beacon_stop(void)
     ESP_LOGI(TAG, "TWT_SYNC_BEACON restore_bss rc=%d", rc);
 }
 
-static void sync_beacon_start(void)
+static void sync_beacon_start(bool continuous)
 {
+    if (continuous && !sync_ap_mode) {
+        ESP_LOGW(TAG, "TWT_SYNC_BEACON continuous timing requires AP mode");
+        return;
+    }
     if (sync_beacon_until) sync_beacon_stop();
     if (sync_beacon_until) return;
     /* S1G full beacon: 15-byte header, firmware-filled timestamp, no optional
@@ -165,8 +169,9 @@ static void sync_beacon_start(void)
         rc = edgez_umac_enable_beaconing(&wake_umac, &beacon);
     }
     /* Arm cleanup even on error, so partially applied BSS settings are restored. */
-    sync_beacon_until = esp_timer_get_time() + 30000000;
-    ESP_LOGI(TAG, "TWT_SYNC_BEACON START rc=%d bytes=%u interval_tu=100 duration_ms=30000", rc, (unsigned)n);
+    sync_beacon_until = continuous && rc == 0 ? UINT64_MAX : esp_timer_get_time() + 30000000;
+    ESP_LOGI(TAG, "TWT_SYNC_BEACON START rc=%d bytes=%u interval_tu=100 duration_ms=%u continuous=%u",
+        rc, (unsigned)n, continuous ? 0U : 30000U, continuous);
     if (rc != 0) sync_beacon_stop();
 }
 
@@ -686,7 +691,8 @@ static void wake_sender_task(void *arg)
         if (command == 'p') pm_audit_start(true);
         if (command == 'o') pm_audit_start(false);
         if (command == 'P') pm_audit_stop();
-        if (command == 'b') sync_beacon_start();
+        if (command == 'b') sync_beacon_start(false);
+        if (command == 'c') sync_beacon_start(true);
         if (command == 'B') sync_beacon_stop();
         if (command == 'd') capture_mac_diagnostics();
         if (command == 'a') switch_to_ap_test();

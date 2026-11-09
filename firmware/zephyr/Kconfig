@@ -6,6 +6,13 @@ config MBEDTLS_ZEPHYR_ENTROPY
 
 source "Kconfig.zephyr"
 
+config OFFGRID_NRF54_ALL_OFF_SYSTEM_ON
+    bool "Use System ON idle in the all-off hardware benchmark"
+    default n
+    help
+      Isolate every external rail and peripheral, then enter tickless System
+      ON idle instead of System OFF to compare the MCU/application baseline.
+
 config WIFI_SSID
     string "Wi-Fi SSID of the AP we want to connect to"
     default "MorseMicro"
@@ -149,9 +156,10 @@ config OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
     help
       Factory-only one-shot experiment with HC33. Bootstrap using monitor RX,
       authorize the peer locally, query radio TSF, negotiate and install flow 0.
-      Remove monitor/scan before a 30-second lease. Never use long sleep with
-      TWT. Reject stale/mismatched replies and excessive timing uncertainty.
-      Shut down the radio at expiry or failure. Does not prove RF sleep.
+      Remove monitor/scan before the retained session. Reject stale/mismatched
+      replies and excessive timing uncertainty. No sensor reports or timed
+      retries after the initial exchange; reset to retry after failure.
+      Shut down the radio at failure. Does not prove RF sleep.
 
 config OFFGRID_NRF54_SENSOR_TWT_UNANNOUNCED_TEST
     bool "Use an unannounced agreement in the factory PAwR/TWT experiment"
@@ -181,12 +189,12 @@ config OFFGRID_NRF54_SENSOR_TWT_AP_BSSID_TEST
       the factory experiment with HC33's explicit native AP timing mode.
 
 config OFFGRID_NRF54_SENSOR_TWT_MAC_SNAPSHOT
-    bool "Capture MAC protocol diagnostics once after TWT setup"
+    bool "Capture MAC and Apps-core sleep diagnostics once after TWT setup"
     depends on OFFGRID_NRF54_SENSOR_PAWR_TWT_TEST
     default n
     help
-      After 15 quiet seconds, request MAC statistics once and retain the raw
-      response in RAM for debugger retrieval. This command wakes the host
+      After 15 quiet seconds, request MAC and Apps-core statistics once and
+      retain the raw responses in RAM for debugger retrieval. These commands wake the host
       transport; it is not a sleep-current measurement. No counter reset,
       USER packets, repeated polling, or changes to the STA/TWT configuration.
 

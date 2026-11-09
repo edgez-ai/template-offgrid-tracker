@@ -281,6 +281,17 @@ checkout. Preserve the flashed nRF ELF before changing PlatformIO configuration
 or building another environment: PlatformIO can remove an earlier environment's
 build output. Keep the nRF factory partition and HC33 NVS intact.
 
+The factory TWT bootstrap broadcasts its PAwR request and learns the current
+HC33 from the matching ACK. This allows replacing HC33 even when the nRF has
+an older gateway MAC saved in settings. Subsequent TWT traffic addresses the
+negotiated peer; the production sensor's gateway selection is unchanged.
+
+This factory TWT test performs only one bootstrap exchange per boot. It omits
+the boot LED self-test, then waits for received HC33 requests; each accepted
+request lights the LED for five seconds. It does not send periodic sensor
+reports or retry failed setup on a timer. Reset both boards and rerun setup
+after a failure. The retained session still requires the radio to remain powered.
+
 With both images flashed, run the CMSIS-DAP bench test using Python with
 `pyserial` and `pyelftools` installed:
 
@@ -307,8 +318,10 @@ first GPIO ISR-service installation.
 Use `--mode ap` for the explicit AP timing control. It switches only the HC33
 test radio to its native AP interface and starts the existing 30-second S1G
 beacon test. Resetting HC33 restores its default stateless test mode.
-`--keep-beacons` refreshes that bounded test every 24 seconds when a longer
-control is needed. `--snapshot-after-user` optionally collects MAC statistics
+`--keep-beacons` sends serial `c` to keep native AP beacons running until `B`,
+`m`, or HC33 reset, including after a `--leave-running` handoff. This requires
+the updated HC33 test image. No periodic host refresh is needed.
+`--snapshot-after-user` optionally collects MAC statistics
 after actual USER traffic, while that traffic already holds host wake. Without
 that flag, the existing single snapshot runs 15 seconds after setup.
 With the updated HC33 test image, `--mesh-after-seed 18` sends its lab serial
@@ -317,14 +330,18 @@ HC33's mesh interface while retaining the application session and host clock
 mapping. The test requires a successful interface change with the same RF MAC,
 and waits at least five seconds before the first USER command. The nRF still
 retains its manually configured firmware STA context; no on-air association or
-mesh peering is performed by this experiment.
+mesh peering is performed by this experiment. The November 9 sleep-counter
+comparison showed that returning HC33 to mesh, or stopping its AP beacons,
+largely stopped radio sleep even while `twt_sp_entered` kept advancing.
+Use AP mode with `--keep-beacons` for the current sleep test; the mesh handoff
+is a protocol comparison and does not preserve validated sleep behavior.
 
 For a longer test with no debugger connection during boot or USER commands:
 
 ```sh
 python scripts/test_pawr_twt_openocd.py \
   --elf /path/to/exact-flashed-nrf.elf --probe CMSIS_DAP_SERIAL \
-  --mode stateless --normal-boot --duration 140 --wake-delays 24,130 \
+  --mode ap --keep-beacons --normal-boot --duration 140 --wake-delays 24,130 \
   --log /tmp/pawr-normal-boot.log
 ```
 
@@ -357,6 +374,39 @@ symbols must remain enabled when LOG is disabled. The receive helpers no longer
 depend on LOG, which previously caused this entire experiment to disappear
 silently from a quiet build. The ordinary production sensor profile remains
 separate and does not enable this TWT experiment.
+
+For sleep diagnosis, `edgez-nrf54l15-fgh200m-twt-sleep-audit` adds one bounded
+MAC/Apps-core statistics capture at 15 seconds. Apps-core counters include
+`powersave_sleep`, `powersave_wake_from_timer`, `powersave_wake_from_pin`, and
+`powersave_time_slept`; MAC `twt_sp_entered` alone does not establish sleep.
+The bench runner saves `.mac.bin` and `.sleep.bin` responses, including the
+before-detach versions. Decode them against the exact Morse firmware metadata
+with `edgez-halow-mesh/tools/morse_mac_diagnostics.py`. These queries wake the
+transport and are excluded from the ordinary quiet image.
+
+November 9 comparison on the replacement HC33 used the same nRF image and
+one HC33 command after 70 seconds. The table shows deltas between the Apps-core
+snapshots at roughly 15 seconds and just after that command. Metadata was
+checked against the exact loaded Morse firmware. Values are firmware-reported
+sleep residency, not measured board current.
+
+| HC33 timing configuration | Observation interval | Reported sleep | TWT service periods advanced |
+| --- | ---: | ---: | ---: |
+| AP seed, switch to MESH at +18 s | 56.3 s | 3.5 s | 29 |
+| AP retained, beacons stop at 30 s | 56.3 s | 10.5 s | 29 |
+| AP retained, continuous native beacons | 56.3 s | 48.9 s | 29 |
+
+The continuous-native-beacon case delivered its HC33 command on the first
+transmission, completed one LED cycle, and retained exactly one bootstrap
+attempt. CPU inspection separately found Zephyr idle, constant latency off,
+SPI/UART disabled, and zero HAL deep-sleep vetoes. The observed loss of radio
+sleep followed removal of AP timing; adding another CPU sleep call alone does
+not address that dependency. The quiet handoff uses AP/STA context with
+continuous HC33 beacons; fully stateless TWT sleep is still unverified.
+
+An isolated SET_LONG_SLEEP_CONFIG comparison did enter sleep, but reported
+zero TWT service periods and received no later HC33 command. That option is
+excluded from the TWT image. It cannot substitute for scheduled reception.
 
 ### ESP-IDF CLI
 

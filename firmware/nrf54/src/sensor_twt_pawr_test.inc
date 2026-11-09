@@ -144,6 +144,12 @@ static bool sensor_twt_wait(const struct edgez_pawr_twt *offer, uint8_t kind,
 static uint8_t sensor_twt_mac_snapshot[EDGEZ_MORSE_MAC_DIAGNOSTICS_CAPACITY] __aligned(4);
 static volatile uint32_t sensor_twt_mac_snapshot_length;
 static volatile int32_t sensor_twt_mac_snapshot_status = -1;
+/* Apps-core statistics include firmware sleep counts and cumulative sleep
+ * time, unlike MAC-only service-period counters. Read once with the existing
+ * diagnostic snapshot; measurement builds compile both queries out. */
+static uint8_t sensor_twt_sleep_snapshot[4096] __aligned(4);
+static volatile uint32_t sensor_twt_sleep_snapshot_length;
+static volatile int32_t sensor_twt_sleep_snapshot_status = -1;
 
 static const struct gpio_dt_spec sensor_twt_busy_pin =
     GPIO_DT_SPEC_GET(DT_NODELABEL(morse_wifi), busy_gpios);
@@ -189,8 +195,17 @@ static void sensor_twt_capture_mac(void)
         sizeof(sensor_twt_mac_snapshot), &bytes);
     sensor_twt_mac_snapshot_length = bytes;
     sensor_twt_mac_snapshot_status = rc;
+    struct morse_cmd_req cmd = MORSE_COMMAND_INIT(cmd,
+        MORSE_CMD_ID_HOST_STATS_LOG, UINT16_MAX);
+    uint32_t sleep_bytes = sizeof(sensor_twt_sleep_snapshot);
+    enum mmwlan_status status = mmdrv_execute_command((uint8_t *)&cmd,
+        sensor_twt_sleep_snapshot, &sleep_bytes);
+    sensor_twt_sleep_snapshot_length = sleep_bytes <= sizeof(sensor_twt_sleep_snapshot) ? sleep_bytes : 0;
+    sensor_twt_sleep_snapshot_status = status;
     LOG_INF("PAWR_TWT MAC_SNAPSHOT sdk=%d bytes=%u; one-shot protocol diagnostic, not a power measurement",
         rc, bytes);
+    LOG_INF("PAWR_TWT SLEEP_SNAPSHOT sdk=%d bytes=%u; firmware counters, not a current measurement",
+        status, sleep_bytes);
     sensor_twt_log_busy("after-snapshot");
 }
 #endif
@@ -295,8 +310,8 @@ static void sensor_twt_compare_hold(void)
 
 static bool sensor_twt_pawr_test(void)
 {
-    /* Re-enter on the normal sensor retry cycle after a disconnect. A
-     * one-shot boot latch would permanently lose USER wake after expiry. */
+    /* One initial PAwR exchange per boot. The sensor caller parks after
+     * failure; this test never wakes periodically to report or renegotiate. */
     bool installed = false;
     struct sensor_twt_event event;
     struct edgez_pawr_twt offer = {0};
@@ -311,7 +326,7 @@ static bool sensor_twt_pawr_test(void)
     sensor_twt_seed_valid = false;
     k_spin_unlock(&sensor_pawr_lock, key);
     if (!seeded) {
-        LOG_INF("PAWR_TWT no session in PAwR ACK; defer until next sensor cycle");
+        LOG_INF("PAWR_TWT no session in PAwR ACK; reset required to retry");
         return false;
     }
     sensor_twt_test_active = 0;
@@ -408,6 +423,7 @@ static bool sensor_twt_pawr_test(void)
         if (sensor_twt_wait(&offer, EDGEZ_PAWR_TWT_READY, &event, 200)) { ready = true; break; }
     }
     if (!ready) { LOG_ERR("PAWR_TWT ready timeout"); goto done; }
+    edgez_gps_stop();
     /* Release host wake after setup. Only actual PAwR USER traffic supplies
      * timing samples; silence does not expire the installed agreement. */
     sensor_led_set_awake(false);
@@ -455,6 +471,7 @@ static bool sensor_twt_pawr_test(void)
         if (snapshot_at < deadline) deadline = snapshot_at;
 #endif
         if (!host_released && release_at < deadline) deadline = release_at;
+        sensor_force_cpu_low_power();
         if (k_msgq_get(&sensor_twt_queue, &event, (deadline == UINT64_MAX ? K_FOREVER : K_USEC(deadline - now))) != 0) continue;
         if (memcmp(event.peer, sensor_probe_peer_mac, 6) ||
             !edgez_pawr_twt_same_schedule(&offer, &event.msg) ||

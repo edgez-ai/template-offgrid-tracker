@@ -45,6 +45,10 @@ class AssessmentTests(unittest.TestCase):
         self.assertFalse(result['all_delivered'])
         self.assertFalse(result['all_acknowledged'])
 
+    def test_timer_rebootstrap_invalidates_remote_only_test(self):
+        self.assertTrue(capture.assess(123, self.counters(bootstrap_attempts=1), 2, 2)['single_bootstrap'])
+        self.assertFalse(capture.assess(123, self.counters(bootstrap_attempts=2), 2, 2)['single_bootstrap'])
+
 
 if __name__ == '__main__':
     unittest.main()
