@@ -22,6 +22,67 @@ static volatile uint32_t sensor_twt_test_reports_failed;
 static volatile uint32_t sensor_dtim40_ready;
 static volatile uint32_t sensor_dtim_period;
 static volatile uint32_t sensor_dtim_timeout_result[3];
+#if CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS < 20
+/* Global then STA: SDK status, firmware status, value, valid+matches.
+ * Read once during setup, never during the quiet measurement interval. */
+static volatile uint32_t sensor_dtim_timeout_readback[2][4];
+#if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+/* Bounded setup-only probe: requested ms, SDK status, FW status, valid.
+ * The normal setter below restores the selected host/firmware timeout. */
+static volatile uint32_t sensor_dtim_timeout_probe[6][4];
+
+static void sensor_dtim_probe_short_timeouts(void)
+{
+    const uint32_t values[] = {10, 11, 12, 13, 14, 15};
+    for (unsigned i = 0; i < ARRAY_SIZE(values); ++i) {
+        struct morse_cmd_req_get_set_generic_param cmd = MORSE_COMMAND_INIT(cmd,
+            MORSE_CMD_ID_GET_SET_GENERIC_PARAM, UINT16_MAX,
+            .param_id = htole32(MORSE_CMD_PARAM_ID_DYNAMIC_PS_TIMEOUT_MS),
+            .action = htole32(MORSE_CMD_PARAM_ACTION_SET),
+            .value = htole32(values[i]));
+        struct morse_cmd_resp_get_set_generic_param reply = {0};
+        uint32_t len = sizeof(reply);
+        enum mmwlan_status sdk = mmdrv_execute_command((uint8_t *)&cmd,
+            (uint8_t *)&reply, &len);
+        bool valid = (sdk == MMWLAN_SUCCESS || sdk == MMWLAN_COMMAND_ERROR) &&
+            len >= sizeof(struct morse_cmd_resp) && len <= sizeof(reply) &&
+            le16toh(reply.hdr.message_id) == MORSE_CMD_ID_GET_SET_GENERIC_PARAM;
+        sensor_dtim_timeout_probe[i][0] = values[i];
+        sensor_dtim_timeout_probe[i][1] = sdk;
+        sensor_dtim_timeout_probe[i][2] = valid ? le32toh(reply.status) : INT32_MIN;
+        sensor_dtim_timeout_probe[i][3] = valid;
+    }
+}
+#endif
+
+static bool sensor_dtim_verify_short_timeout(void)
+{
+    const uint16_t scopes[] = {UINT16_MAX, mesh_runtime.umac.vif_id};
+    bool matches = true;
+    for (unsigned i = 0; i < ARRAY_SIZE(scopes); ++i) {
+        struct morse_cmd_req_get_set_generic_param cmd = MORSE_COMMAND_INIT(cmd,
+            MORSE_CMD_ID_GET_SET_GENERIC_PARAM, scopes[i],
+            .param_id = htole32(MORSE_CMD_PARAM_ID_DYNAMIC_PS_TIMEOUT_MS),
+            .action = htole32(MORSE_CMD_PARAM_ACTION_GET));
+        struct morse_cmd_resp_get_set_generic_param reply = {0};
+        uint32_t len = sizeof(reply);
+        enum mmwlan_status sdk = mmdrv_execute_command((uint8_t *)&cmd,
+            (uint8_t *)&reply, &len);
+        bool valid = (sdk == MMWLAN_SUCCESS || sdk == MMWLAN_COMMAND_ERROR) &&
+            len == sizeof(reply) &&
+            le16toh(reply.hdr.message_id) == MORSE_CMD_ID_GET_SET_GENERIC_PARAM &&
+            le16toh(reply.hdr.vif_id) == scopes[i];
+        sensor_dtim_timeout_readback[i][0] = sdk;
+        sensor_dtim_timeout_readback[i][1] = valid ? le32toh(reply.status) : INT32_MIN;
+        sensor_dtim_timeout_readback[i][2] = valid ? le32toh(reply.value) : 0;
+        bool match = valid && sdk == MMWLAN_SUCCESS && le32toh(reply.status) == 0 &&
+            le32toh(reply.value) == CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS;
+        sensor_dtim_timeout_readback[i][3] = match;
+        matches &= match;
+    }
+    return matches;
+}
+#endif
 #endif
 
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
@@ -619,12 +680,21 @@ static bool sensor_twt_pawr_test(void)
     /* Record support for the old zero-timeout request in diagnostic builds.
      * The factory path previously ignored that request's failure. */
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
+#if CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS < 20
+    sensor_dtim_probe_short_timeouts();
+#endif
     sensor_dtim_timeout_result[2] = mmdrv_set_dynamic_ps_timeout(0);
 #endif
     sensor_dtim_timeout_result[0] = mmdrv_set_dynamic_ps_timeout(
         CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS);
     if (sensor_dtim_timeout_result[0] != MMWLAN_SUCCESS) goto done;
     sensor_dtim_timeout_result[1] = CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS;
+#if CONFIG_OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS < 20
+    if (!sensor_dtim_verify_short_timeout()) {
+        LOG_ERR("DTIM short PS timeout readback failed; test inactive");
+        goto done;
+    }
+#endif
 #if defined(CONFIG_OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT)
     sensor_dtim_read_ps_params();
 #endif

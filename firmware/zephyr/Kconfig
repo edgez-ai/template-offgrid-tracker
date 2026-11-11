@@ -203,8 +203,12 @@ config OFFGRID_NRF54_SENSOR_DTIM_PERIOD
 config OFFGRID_NRF54_SENSOR_DTIM_DYNAMIC_PS_TIMEOUT_MS
     int "Dynamic PS timeout for the DTIM comparison (ms)"
     depends on OFFGRID_NRF54_SENSOR_DTIM40_TEST
-    range 20 1000
+    range 13 1000
     default 100
+    help
+      Experimental timeout sent to the radio firmware. Values below 20 ms
+      require a successful setter and matching global/STA readback before
+      the factory DTIM test becomes active. Zero was rejected on this radio.
 
 config OFFGRID_NRF54_SENSOR_DTIM_PS_AUDIT
     bool "Capture DTIM PS parameters and a second sleep snapshot"

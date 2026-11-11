@@ -62,6 +62,7 @@ def symbols(elf_path):
                    'sensor_dtim_first_mac', 'sensor_dtim_first_mac_length',
                    'sensor_dtim_params', 'sensor_dtim_audit_count']
         wanted += ['sensor_spi_sleep_state', 'sensor_spi_sleep_diagnostics']
+        wanted += ['sensor_dtim_timeout_readback', 'sensor_dtim_timeout_probe']
         result = {}
         for name in wanted:
             found = table.get_symbol_by_name(name) or []
@@ -118,6 +119,8 @@ def main():
     parser.add_argument('--keep-beacons', action='store_true', help='Keep firmware AP beacons running until B, m, or reset, including after handoff')
     parser.add_argument('--dtim20', action='store_true', help='Use DTIM20 image and HC33 serial 2 mode')
     parser.add_argument('--dtim40', action='store_true', help='Use the separate DTIM40 image and HC33 serial 4 mode')
+    parser.add_argument('--expected-dynamic-ps-ms', type=int,
+                        help='Expected DTIM timeout; defaults to 20 ms for DTIM20, 100 ms for DTIM40')
     parser.add_argument('--mesh-after-seed', type=float,
                         help='Send HC33 m after this many ACTIVE seconds to return its radio to mesh')
     parser.add_argument('--snapshot-after-user', action='store_true',
@@ -127,6 +130,12 @@ def main():
     if args.dtim20 and args.dtim40:
         parser.error('Choose one DTIM period')
     dtim_period = 20 if args.dtim20 else 40 if args.dtim40 else 0
+    if args.expected_dynamic_ps_ms is not None and (
+            not dtim_period or not 1 <= args.expected_dynamic_ps_ms <= 1000):
+        parser.error('--expected-dynamic-ps-ms requires DTIM mode and a value from 1 to 1000')
+    expected_timeout_ms = args.expected_dynamic_ps_ms
+    if expected_timeout_ms is None:
+        expected_timeout_ms = 20 if args.dtim20 else 100
     delays = sorted(float(value) for value in args.wake_delays.split(','))
     if not delays or delays[0] < 1 or any(b-a < 8 for a, b in zip(delays, delays[1:])):
         parser.error('Wake delays must be at least one second and eight seconds apart')
@@ -345,6 +354,8 @@ def main():
                                 acknowledged_sequences.append(int(match.group(1)))
                         if active_at is not None and ('*** Booting' in line or 'ESP-ROM:' in line):
                             raise RuntimeError('HC33 reset during the active test')
+                        if active_at is not None and 'PAWR_TWT cancelled by receiver' in line:
+                            raise RuntimeError('nRF cancelled setup/session; this is not a valid sleep comparison')
                 if ready_at is not None and reset_at is None and now - ready_at >= 1:
                     if args.mode == 'ap':
                         send('a')
@@ -461,13 +472,31 @@ def main():
                 if 'sensor_spi_sleep_diagnostics' in table:
                     spi_sleep['stage_errors_and_already_released_count'] = read_memory(table['sensor_spi_sleep_diagnostics'][0], 32, 6)
                 checks['spi_suspend_restore_pass'] = suspend_count > 0 and resume_count > 0 and errors == 0 and suspended == 1
+            dynamic_ps = None
             if dtim_period:
                 checks['dtim_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
                 if 'sensor_dtim_period' in table:
                     checks['dtim_period_matches'] = read_memory(table['sensor_dtim_period'][0], 32, 1)[0] == dtim_period
                 if 'sensor_dtim_timeout_result' in table:
                     timeout_status, timeout_ms = read_memory(table['sensor_dtim_timeout_result'][0], 32, 2)
-                    checks['dynamic_ps_timeout_configured'] = timeout_status == 0 and timeout_ms >= 20
+                    dynamic_ps = dict(set_status=timeout_status, requested_ms=timeout_ms,
+                                      expected_ms=expected_timeout_ms)
+                    if 'sensor_dtim_timeout_probe' in table:
+                        address, size = table['sensor_dtim_timeout_probe']
+                        probe = read_memory(address, 32, size // 4)
+                        dynamic_ps['setup_timeout_probe'] = [
+                            dict(timeout_ms=probe[i], sdk_status=probe[i+1],
+                                 firmware_status=probe[i+2] - (1 << 32) if probe[i+2] & (1 << 31) else probe[i+2],
+                                 valid=bool(probe[i+3]))
+                            for i in range(0, len(probe), 4)]
+                    checks['dynamic_ps_timeout_configured'] = timeout_status == 0 and timeout_ms == expected_timeout_ms
+                    if expected_timeout_ms < 20:
+                        checks['short_timeout_readback_matches'] = False
+                        if 'sensor_dtim_timeout_readback' in table:
+                            values = read_memory(table['sensor_dtim_timeout_readback'][0], 32, 8)
+                            dynamic_ps['global_then_sta_readback'] = [values[:4], values[4:]]
+                            checks['short_timeout_readback_matches'] = (
+                                values == [0, 0, expected_timeout_ms, 1] * 2)
                 if args.duration >= 70 and 'reports_completed' in counters:
                     checks['minute_report_retained'] = counters['reports_completed'] > 0 and counters['reports_failed'] == 0
             checks['all_commands_queued'] = len(queued_sequences) == sent
@@ -483,6 +512,7 @@ def main():
                       'mesh_after_seed': args.mesh_after_seed, 'mesh_confirmed': mesh_confirmed,
                       'normal_boot': args.normal_boot, 'debug_power': debug_power,
                       'spi_sleep': spi_sleep,
+                      'dynamic_ps': dynamic_ps,
                       'reset_reason_after_test': reset_reason,
                       'wake_delays': delays, 'commands': sent, 'hc33_acknowledgements': acknowledgements,
                       'queued_sequences': queued_sequences, 'acknowledged_sequences': acknowledged_sequences,

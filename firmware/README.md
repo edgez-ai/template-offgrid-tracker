@@ -391,6 +391,78 @@ The user subsequently reported 600 µA again at the same external 5-V input.
 Neither DTIM20 nor the checked 20-ms timeout established a lower sleep-floor
 reading than the later 600 µA DTIM40 reading.
 
+The later USB/power-bank comparison reports an approximately 120-µA all-off
+board baseline and 600 µA with DTIM20. The USB/debug chip sleeps on a power
+bank according to the board design; its standby current remains part of the
+measurement. Treat 120 µA as the user's comparison baseline, not an isolated
+MCU measurement. A 300-µA target leaves approximately 180 µA of additional
+5-V input current for the retained-radio application. Neither this target nor
+the radio's isolated sleep current has been measured. The attempted 64-MHz
+comparison was reverted; no comparison image was flashed.
+
+`edgez-nrf54l15-fgh200m-dtim20-fast-ps-test` is a 13-ms
+dynamic-timeout candidate based on the GPS-off/SPI-isolation image. The period
+remains DTIM20 (2.048 seconds), reports remain once a minute, and the CPU clock
+is unchanged. The earlier 20-ms minimum was a test Kconfig limit; the SDK
+setter forwards the value to firmware without enforcing that minimum. Zero
+failed previously. A live setup-only probe then found 5 and 10 ms rejected
+(SDK 14, FW -32768), while 15 and 20 ms were accepted (SDK/FW 0). The follow-up
+10–15-ms sweep rejected 10/11/12 ms (SDK 14, FW -32768) and accepted 13/14/15 ms
+(SDK/FW 0); all six responses were valid. Thirteen ms is the lowest accepted
+integer value in that tested interval. The sweep restored 15 ms and passed
+two remote ACK/LED cycles before selecting 13 ms for a separate functional
+test. The initial 5-ms image cancelled setup, remained inactive,
+and supplied no valid current result. After a successful setter, the candidate
+requires matching global and STA parameter readbacks
+before marking the DTIM test active. Rejection aborts the test; do not measure
+an inactive/failed setup as a low-power result.
+
+Build `edgez-nrf54l15-fgh200m-dtim20-fast-ps-audit` for diagnostic snapshots.
+Use `--dtim20 --expected-dynamic-ps-ms 13` in the bench runner with its exact
+flashed ELF; it checks both readbacks, remote-command ACKs/LED cycles, SPI
+restore and the minute report. Use the quiet `fast-ps-test` image only after
+those checks pass. A shorter timeout can reduce active tails, but does not
+guarantee a lower current plateau. The diagnostic variant probes 10–15 ms
+once during setup, then applies the selected timeout through the SDK setter
+to keep the host's tracked value consistent. Quiet images omit that probe.
+The 15-ms diagnostic completed an 85-second normal-boot run with the debugger
+closed during both remote commands: global/STA readbacks were both 15, both
+ACK/LED cycles completed, the minute report succeeded, and SPI suspend/resume
+had zero errors. A subsequent active-session resource audit found constant
+latency disabled, no explicit PLL task request, DC/DC enabled, host wake
+released, SPI/UART/I2C disabled, and the SPI port suspended. These register
+checks were made with debug attached and are not a current measurement or
+proof of every clock/power domain's state during detached sleep.
+The quiet 15-ms image also passed the full 85-second run: two delivered remote
+commands, two completed ACK/LED cycles, one successful retained minute report,
+matching global/STA readbacks, and 95 SPI suspends / 94 resumes with zero errors.
+Its ELF SHA256 is
+`38ff951788b56be4b00534f9db89ba24169dd9ab827f79a39896813430ce83f9`.
+The user subsequently reported 500 µA on the USB/power-bank measurement,
+100 µA below the preceding 600-µA report. Repeatability and waveform/average
+current were not established; this result does not demonstrate the 300-µA
+target or attribute the entire difference to timeout tuning.
+The 15-ms quiet-image handoff cleared debug power requests, disconnected DAP,
+verified a normal pin reset, and established a fresh retained DTIM20 session
+while HC33's AP beacons and UART monitor remained running.
+The follow-up 13-ms diagnostic passed its 40-second normal-boot run, including
+matching global/STA readbacks of 13 ms, two completed ACK/LED cycles, and
+114 SPI suspends / 113 resumes with zero errors. This shorter run did not
+cover the minute report; that check belongs to the quiet-image run. No current
+comparison for 13 versus 15 ms has been recorded yet.
+The quiet 13-ms image then passed an 85-second run with the debugger closed
+during both commands: two complete ACK/LED cycles, one successful minute
+report, both readbacks equal to 13, and 93 SPI suspends / 92 resumes with zero
+errors. Its ELF SHA256 is
+`2e2462d0715d8753772e0d5479e24546f53bc8070f24cd5367b6990aaed2ea29`.
+
+The BCF investigation found the SDK's `bcf_mf15457.mbin` and
+`bcf_boardtype_0804.mbin` byte-identical (SHA256
+`a39b3d3fe1b43ff72400812e1df6da101e7390ba72e099b67122ad7eaba6e8a9`).
+The SPI firmware-loader path clears AON rather than requesting USB-domain
+retention; this rules out those particular source/configuration differences,
+not every possible hardware or firmware source of excess sleep current.
+
 The optional `edgez-nrf54l15-fgh200m-dtim20-spi-sleep-test` repeats SPI
 isolation against this DTIM20 baseline. It retains the same radio supply,
 DTIM/timeout/report settings and GPS handling. When the SDK masks SPI IRQ,
