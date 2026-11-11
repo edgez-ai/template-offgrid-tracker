@@ -387,6 +387,47 @@ The final quiet DTIM20 image also passed an 85-second run with two remote
 commands, completed ACK/LED cycles, one successful report and no failed reports.
 It was left running after debug power requests were cleared and a normal pin
 reset; HC33's continuous AP beacons and UART monitor remain active for measurement.
+The user subsequently reported 600 µA again at the same external 5-V input.
+Neither DTIM20 nor the checked 20-ms timeout established a lower sleep-floor
+reading than the later 600 µA DTIM40 reading.
+
+The optional `edgez-nrf54l15-fgh200m-dtim20-spi-sleep-test` repeats SPI
+isolation against this DTIM20 baseline. It retains the same radio supply,
+DTIM/timeout/report settings and GPS handling. When the SDK masks SPI IRQ,
+the port releases its `SPI_LOCK_ON` context, holds CS inactive, suspends SPIM00
+and disconnects SCK P2.01, MOSI P2.02 and MISO P2.04 without pull resistors,
+matching the all-off benchmark's GPIO configuration. BUSY wake remains enabled.
+The port restores SPI before asserting WAKE, unmasking IRQ, or performing a
+transfer. `sensor_spi_sleep_state[4]` records suspend count, resume count,
+errors and current suspended state. The bench runner checks these alongside
+command/ACK/LED/report counters. The pre-build hook reapplies the opt-in vendor
+port patch idempotently. The initial SPI-only run delivered both commands and
+the minute report; the user reported unchanged current. Its transition error
+counter also counted SPI contexts already released at startup. The port now
+handles `spi_release()` returning `-EALREADY` as an idle context, and records
+per-stage diagnostics separately from that benign count.
+
+The follow-up `edgez-nrf54l15-fgh200m-dtim20-unused-io-test` disables GPS and
+UART22 entirely, retains GPS TX P1.11/RX P1.12 as disconnected inputs, and holds
+GPS enable P1.09 and carrier battery-divider enable P1.14 low. P1.14 was
+previously disconnected rather than driven low. The earlier high GPS TX output
+latch did not mean it was driving the pin: its input-disconnected configuration
+already isolated it after UART suspend. This profile removes GPS initialization
+as well as defining the unused divider enable; it does not establish that GPS
+was the source of the remaining current.
+The combined image passed two remote commands, complete ACK/LED cycles and
+the one-minute report. SPI suspend/resume had zero errors; subsequent register
+inspection showed 98 suspends / 97 resumes and idle suspended state. GPS TX/RX
+and all three SPI signal pins had PIN_CNF=2 (disconnected, no pulls), CS was
+inactive high, radio enable remained high, WAKE was low, and SPI/UART/I2C were
+disabled. The user subsequently reported unchanged power consumption; this
+combined GPS/unused-I/O/SPI isolation test has not demonstrated an improvement
+over the stable 600 µA baseline. No new numeric reading or current waveform was
+provided with that result.
+The probe was disconnected after the register check, before the final reset
+helper could attach. For the next reading, leave HC33 powered with continuous
+beacons and cold-boot only the nRF board from its separate 5-V supply, with
+USB/debug disconnected. This avoids measuring a residual debug-mode state.
 
 Use `--dtim20` in the bench runner for the DTIM20 images. Its `.ps.json`
 records parameter validity/status as well as values; invalid getter responses
@@ -411,6 +452,20 @@ with short beacons, a crystal RTC, a 2-MHz channel, SPI/SDIO, 3.3 V and 25°C.
 That is approximately 0.1 mW for the reference radio module. This experiment
 uses 1-MHz full beacons and a different module/host board; the whole-board 5-V
 sleep-floor reading is not directly comparable with that standby specification.
+The same table specifies 33 µA with long beacons at DTIM40: the published
+short-beacon saving under those conditions is 4 µA at the radio supply, not
+hundreds of microamps at the board's 5-V input. A longer DTIM period can reduce
+beacon-reception energy and average current, but does not inherently lower the
+instantaneous current between wakes. DTIM80 would nominally give an 8.192-second
+receive interval with the current beacon interval, at the cost of a longer
+remote-command delay; it is not implemented or verified in this test. Both the
+HC33 beacon/TIM handling and the nRF listen settings would need to agree.
+Before attributing the remaining current to DTIM configuration, distinguish a
+waveform's sleep plateau from a meter display that includes wake bursts, and
+verify the FGH200M's actual slow-clock source. The AUTO readback alone does not
+establish the datasheet's RTC_XTAL condition. The 200-µA all-off board control
+also includes the host and 5-V power path, so subtracting it does not isolate
+the radio's supply current.
 
 Clean the nRF build after changing the tick rate: an incremental build can
 retain a timer object compiled with the old value. The clean five-second image

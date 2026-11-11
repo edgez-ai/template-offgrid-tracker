@@ -109,6 +109,64 @@ def patch_sensor_sleep_irq_pull(module):
 
 patch_sensor_sleep_irq_pull(mm_root)
 
+def patch_sensor_spi_sleep_pins(module):
+    """Reapply the opt-in SPI PM experiment without changing SDK PS policy."""
+    marker = "CONFIG_OFFGRID_NRF54_SENSOR_SPI_SLEEP_PINS"
+    path = module / "drivers/wifi/morsemicro/morsemicro_spi.c"
+    source = path.read_text(encoding="utf-8")
+    fragment = (PROJECT_DIR / "patches/morsemicro_spi_sleep_pins.inc").read_text(encoding="utf-8")
+    if marker not in source:
+        replacements = {
+            "static uint8_t training_sequence[]": fragment + "static uint8_t training_sequence[]",
+            "void mmhal_wlan_set_spi_irq_enabled(bool enabled)\n{\n\tif (enabled) {\n":
+                "void mmhal_wlan_set_spi_irq_enabled(bool enabled)\n{\n\tif (enabled) {\n"
+                "#if defined(" + marker + ")\n"
+                "\t\tif (morsemicro_sensor_spi_resume() != 0) return;\n#endif\n",
+            "\t\tgpio_pin_configure_dt(&bus_config.spi_irq, GPIO_INPUT);\n#endif\n\t}\n}":
+                "\t\tgpio_pin_configure_dt(&bus_config.spi_irq, GPIO_INPUT);\n#endif\n"
+                "#if defined(" + marker + ")\n"
+                "\t\tmorsemicro_sensor_spi_suspend();\n#endif\n\t}\n}",
+        }
+        for anchor, replacement in replacements.items():
+            if source.count(anchor) != 1:
+                raise RuntimeError("Unsupported Morse SPI layout for sleep-pin experiment: " + anchor[:60])
+            source = source.replace(anchor, replacement, 1)
+        # Resume before every SPI operation as well as before IRQ re-enable.
+        for signature, failure in [
+            ("uint8_t mmhal_wlan_spi_rw(uint8_t data)", "return 0xff;"),
+            ("void mmhal_wlan_spi_read_buf(uint8_t *buf, unsigned len)", "memset(buf, 0xff, len); return;"),
+            ("void mmhal_wlan_spi_write_buf(const uint8_t *buf, unsigned len)", "return;"),
+            ("void mmhal_wlan_send_training_seq(void)", "return;"),
+        ]:
+            anchor = signature + "\n{\n"
+            if source.count(anchor) != 1:
+                raise RuntimeError("Unsupported Morse SPI function: " + signature)
+            source = source.replace(anchor, anchor + "#if defined(" + marker + ")\n"
+                "\tif (morsemicro_sensor_spi_resume() != 0) { " + failure + " }\n#endif\n", 1)
+        path.write_text(source, encoding="utf-8")
+    else:
+        anchor = "#if defined(" + marker + ")\n#include <zephyr/pm/device.h>"
+        start = source.index(anchor)
+        end = source.index("static uint8_t training_sequence[]", start)
+        updated = source[:start] + fragment + source[end:]
+        if updated != source:
+            path.write_text(updated, encoding="utf-8")
+    path = module / "drivers/wifi/morsemicro/shims/mmhal_wlan.c"
+    source = path.read_text(encoding="utf-8")
+    if marker not in source:
+        declaration = "extern const struct device *morsemicro_dev;\n"
+        wake = "void mmhal_wlan_wake_assert(void)\n{\n"
+        if source.count(declaration) != 1 or source.count(wake) != 2:
+            raise RuntimeError("Unsupported Morse wake shim for SPI restore")
+        source = source.replace(declaration, declaration + "#if defined(" + marker + ")\n"
+            "extern int morsemicro_sensor_spi_resume(void);\n#endif\n", 1)
+        source = source.replace(wake, wake + "#if defined(" + marker + ")\n"
+            "\tif (morsemicro_sensor_spi_resume() != 0) return;\n#endif\n", 1)
+        path.write_text(source, encoding="utf-8")
+
+
+patch_sensor_spi_sleep_pins(mm_root)
+
 pio_env = env.get("PIOENV", "")
 edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
 if not edgez_source_option:

@@ -61,6 +61,7 @@ def symbols(elf_path):
                    'sensor_dtim_first_sleep', 'sensor_dtim_first_sleep_length',
                    'sensor_dtim_first_mac', 'sensor_dtim_first_mac_length',
                    'sensor_dtim_params', 'sensor_dtim_audit_count']
+        wanted += ['sensor_spi_sleep_state', 'sensor_spi_sleep_diagnostics']
         result = {}
         for name in wanted:
             found = table.get_symbol_by_name(name) or []
@@ -453,6 +454,13 @@ def main():
             led_out = read_memory(0x50050400, 32, 1)[0]
             led_dir = read_memory(0x50050410, 32, 1)[0]
             checks = assess(session, counters, sent, acknowledgements)
+            spi_sleep = None
+            if 'sensor_spi_sleep_state' in table:
+                suspend_count, resume_count, errors, suspended = read_memory(table['sensor_spi_sleep_state'][0], 32, 4)
+                spi_sleep = dict(suspends=suspend_count, resumes=resume_count, errors=errors, suspended=suspended)
+                if 'sensor_spi_sleep_diagnostics' in table:
+                    spi_sleep['stage_errors_and_already_released_count'] = read_memory(table['sensor_spi_sleep_diagnostics'][0], 32, 6)
+                checks['spi_suspend_restore_pass'] = suspend_count > 0 and resume_count > 0 and errors == 0 and suspended == 1
             if dtim_period:
                 checks['dtim_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
                 if 'sensor_dtim_period' in table:
@@ -474,6 +482,7 @@ def main():
                       'snapshot_after_user': args.snapshot_after_user,
                       'mesh_after_seed': args.mesh_after_seed, 'mesh_confirmed': mesh_confirmed,
                       'normal_boot': args.normal_boot, 'debug_power': debug_power,
+                      'spi_sleep': spi_sleep,
                       'reset_reason_after_test': reset_reason,
                       'wake_delays': delays, 'commands': sent, 'hc33_acknowledgements': acknowledgements,
                       'queued_sequences': queued_sequences, 'acknowledged_sequences': acknowledged_sequences,

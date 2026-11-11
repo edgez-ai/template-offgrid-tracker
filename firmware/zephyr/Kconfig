@@ -91,6 +91,18 @@ config OFFGRID_NRF54_SENSOR_SPI_IRQ_SLEEP_NOPULL
       Remove its pull-up only after the SDK masks IRQ, and restore the pull-up
       before checking/unmasking IRQ on wake. Preserve BUSY wake and polarity.
 
+config OFFGRID_NRF54_SENSOR_SPI_SLEEP_PINS
+    bool "Suspend SPI and disconnect its data pins during retained radio sleep"
+    depends on OFFGRID_NRF54_SENSOR_SPI_IRQ_SLEEP_NOPULL && PM_DEVICE
+    depends on SOC_NRF54L15
+    default n
+    help
+      Carrier-specific experiment for SPI00 P2.01/P2.02/P2.04. Mask IRQ,
+      release SPI, hold CS inactive, suspend the controller and disconnect
+      SCK/MOSI/MISO. Restore pinctrl before asserting WAKE or accessing SPI.
+      Retain radio power and BUSY wake. Passive counters report transitions
+      and failures; validate remote wake before comparing measured current.
+
 config OFFGRID_NRF54_SENSOR_GPS
     bool "Wake GPS during each low-power sensor reporting cycle"
     default n

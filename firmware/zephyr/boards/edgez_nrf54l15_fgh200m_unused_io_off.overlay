@@ -1,0 +1,25 @@
+#include "edgez_nrf54l15_fgh200m_sensor.overlay"
+
+/* Wake/current comparison only: no UART driver may claim GPS TX/RX.
+ * P1.11/P1.12 retain reset-default disconnected-input configuration. */
+&uart22 {
+	status = "disabled";
+};
+
+&gpio1 {
+	fgh200m_gps_supply_off: fgh200m_gps_supply_off {
+		gpio-hog;
+		gpios = <9 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "fgh200m-gps-off";
+	};
+
+	/* The ADC/voltage-divider nodes are disabled in the parent overlay.
+	 * Match the all-off benchmark by defining the carrier divider's EN. */
+	fgh200m_vbat_supply_off: fgh200m_vbat_supply_off {
+		gpio-hog;
+		gpios = <14 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "fgh200m-vbat-divider-off";
+	};
+};
