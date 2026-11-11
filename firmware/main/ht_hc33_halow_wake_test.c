@@ -139,7 +139,7 @@ struct mmpkt *__wrap_mmdrv_host_get_beacon(void)
             if (sync_dtim_count >= period) sync_dtim_count = period - 1;
             data[at + 2] = sync_dtim_count;
             data[at + 3] = period;
-            if ((period == 20 || period == 40) && data[at + 1] == 6) {
+            if ((period == 10 || period == 20 || period == 40) && data[at + 1] == 6) {
                 bool pending = atomic_load(&dtim_command_pending);
                 /* SDK S1G TIM: unsliced page 0, block bitmap, AID 1. */
                 data[at + 4] = 0x3e | (pending && !sync_dtim_count ? 1 : 0);
@@ -147,7 +147,7 @@ struct mmpkt *__wrap_mmdrv_host_get_beacon(void)
                 data[at + 6] = 1;
                 data[at + 7] = pending ? 2 : 0;
             }
-            if ((period == 20 || period == 40) && sync_dtim_count == 0)
+            if ((period == 10 || period == 20 || period == 40) && sync_dtim_count == 0)
                 ESP_LOGI(TAG, "DTIM%u BEACON count=0 period=%u built=%u", period, period, atomic_load(&sync_beacons_built));
             sync_dtim_count = sync_dtim_count ? sync_dtim_count - 1 : period - 1;
             atomic_fetch_add(&sync_beacons_built, 1);
@@ -769,9 +769,9 @@ static void wake_sender_task(void *arg)
         if (command == 'P') pm_audit_stop();
         if (command == 'b') sync_beacon_start(false);
         if (command == 'c') sync_beacon_start(true);
-        if ((command == '4' || command == '2') && sync_ap_mode && !sync_beacon_until && !twt_active && !twt_pending) {
+        if ((command == '4' || command == '2' || command == '1') && sync_ap_mode && !sync_beacon_until && !twt_active && !twt_pending) {
             dtim_mode = true;
-            unsigned period = command == '2' ? 20 : 40;
+            unsigned period = (command - '0') * 10U;
             atomic_store(&sync_dtim_period, period);
             ESP_LOGI(TAG, "DTIM%u MODE native_twt=0 beacon_period=%u", period, period);
         }

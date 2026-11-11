@@ -169,8 +169,13 @@ pio run -e seeed-xiao-nrf54l15-sense
 ```
 
 This source integration enables EdgeZ diagnostics and routes them through the
-Zephyr logging backend. Unset `EDGEZ_HALOW_MESH_SOURCE_ROOT` to return to and
-verify the pinned release prebuilt. Protected release archives continue to
+Zephyr logging backend. In a developer workspace, the nRF hook also detects a
+sibling `edgez-halow-mesh` checkout automatically. Set
+`EDGEZ_HALOW_MESH_PREBUILT_ONLY=1` to explicitly select the packaged nRF
+archives, and clean the target environment when switching between source and
+prebuilt mode so CMake does not retain the previous source graph. ESP builds
+select the prebuilt when `EDGEZ_HALOW_MESH_SOURCE_ROOT` is unset.
+Protected release archives continue to
 exclude the diagnostic implementation.
 
 The FGH200M target is the EdgeZ nRF54L15 board with an MM8108 module. The
@@ -449,12 +454,46 @@ The follow-up 13-ms diagnostic passed its 40-second normal-boot run, including
 matching global/STA readbacks of 13 ms, two completed ACK/LED cycles, and
 114 SPI suspends / 113 resumes with zero errors. This shorter run did not
 cover the minute report; that check belongs to the quiet-image run. No current
-comparison for 13 versus 15 ms has been recorded yet.
+waveform or repeated A/B comparison was captured. The user subsequently
+reported 450 µA with the quiet 13-ms image, versus 500 µA at 15 ms and 600 µA
+with the earlier 20-ms test. These are reported USB/power-bank readings, not
+isolated radio currents or proof that timeout changes explain all variation.
 The quiet 13-ms image then passed an 85-second run with the debugger closed
 during both commands: two complete ACK/LED cycles, one successful minute
 report, both readbacks equal to 13, and 93 SPI suspends / 92 resumes with zero
 errors. Its ELF SHA256 is
 `2e2462d0715d8753772e0d5479e24546f53bc8070f24cd5367b6990aaed2ea29`.
+The DTIM20 optimization keeps the approximately 2.048-second receive interval;
+the user declined increasing it to DTIM40 to pursue the 300-µA target. Potential
+follow-ups at the same interval include faster HC33 beacon modulation or
+proper native short S1G beacons, with remote delivery/link-margin verification,
+and a carrier-schematic audit of remaining radio control-pin pull resistors.
+The current HC33 beacon is 79 bytes at 1 MHz/MCS0. Those follow-ups have not
+been implemented or measured, and changing the interval or removing periodic
+reports is not part of that comparison.
+
+For the subsequently requested DTIM10 comparison, use
+`edgez-nrf54l15-fgh200m-dtim10-test` and select HC33 serial `a`, `1`, `c`
+after a fresh HC33 boot. It changes only the DTIM/listen period to 10 relative
+to the quiet DTIM20/13-ms image: nominal receive interval 1.024 seconds,
+dynamic timeout 13 ms, reports once per minute, GPS/IMU off and the same SPI
+isolation. HC33's TIM countdown and pending-command indication support
+10/20/40; the bench runner selects `1` with `--dtim10`. Remote wake and current
+must be verified before attributing any consumption change to the period.
+Use the prior 450-µA DTIM20/13-ms USB/power-bank report as the comparison point.
+The DTIM10 pair was flashed and the user manually verified remote wake. A
+debugger-detached retained session recorded two complete remote ACK/LED cycles,
+four successful minute reports, global/STA timeout readbacks of 13 ms, and
+zero SPI transition errors. The two serial-triggered ACK delays in that
+session were approximately 0.12 and 0.57 seconds. HC33's DTIM beacon logs were
+approximately 1.024 seconds apart. These are functional/timing observations;
+no DTIM10 current measurement has been recorded.
+The runner now waits for HC33's explicit DTIM-mode confirmation before
+enabling beacons and resetting the nRF. A subsequent 40-second automated run
+confirmed DTIM10/readbacks and delivered three ACK/LED cycles, including an
+extra physical USER press alongside its two scripted commands. Its strict
+exact-count assessment therefore reported failure; it is not an automated
+two-command pass. The user separately confirmed operation manually.
 
 The BCF investigation found the SDK's `bcf_mf15457.mbin` and
 `bcf_boardtype_0804.mbin` byte-identical (SHA256

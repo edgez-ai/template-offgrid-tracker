@@ -117,25 +117,26 @@ def main():
     parser.add_argument('--physical-button', action='store_true',
                         help='With --leave-running, keep UART control lines deasserted and wait for a real USER press')
     parser.add_argument('--keep-beacons', action='store_true', help='Keep firmware AP beacons running until B, m, or reset, including after handoff')
+    parser.add_argument('--dtim10', action='store_true', help='Use DTIM10 image and HC33 serial 1 mode')
     parser.add_argument('--dtim20', action='store_true', help='Use DTIM20 image and HC33 serial 2 mode')
     parser.add_argument('--dtim40', action='store_true', help='Use the separate DTIM40 image and HC33 serial 4 mode')
     parser.add_argument('--expected-dynamic-ps-ms', type=int,
-                        help='Expected DTIM timeout; defaults to 20 ms for DTIM20, 100 ms for DTIM40')
+                        help='Expected DTIM timeout; defaults to 13/20/100 ms for DTIM10/20/40')
     parser.add_argument('--mesh-after-seed', type=float,
                         help='Send HC33 m after this many ACTIVE seconds to return its radio to mesh')
     parser.add_argument('--snapshot-after-user', action='store_true',
                         help='Opt in to RF snapshots after USER traffic, while its host wake is already held')
     parser.add_argument('--log', type=Path, required=True)
     args = parser.parse_args()
-    if args.dtim20 and args.dtim40:
+    if sum([args.dtim10, args.dtim20, args.dtim40]) > 1:
         parser.error('Choose one DTIM period')
-    dtim_period = 20 if args.dtim20 else 40 if args.dtim40 else 0
+    dtim_period = 10 if args.dtim10 else 20 if args.dtim20 else 40 if args.dtim40 else 0
     if args.expected_dynamic_ps_ms is not None and (
             not dtim_period or not 1 <= args.expected_dynamic_ps_ms <= 1000):
         parser.error('--expected-dynamic-ps-ms requires DTIM mode and a value from 1 to 1000')
     expected_timeout_ms = args.expected_dynamic_ps_ms
     if expected_timeout_ms is None:
-        expected_timeout_ms = 20 if args.dtim20 else 100
+        expected_timeout_ms = 13 if args.dtim10 else 20 if args.dtim20 else 100
     delays = sorted(float(value) for value in args.wake_delays.split(','))
     if not delays or delays[0] < 1 or any(b-a < 8 for a, b in zip(delays, delays[1:])):
         parser.error('Wake delays must be at least one second and eight seconds apart')
@@ -177,6 +178,8 @@ def main():
     buffers = {'NRF': '', 'HC33': ''}
     session = None
     active_at = ready_at = reset_at = beacon_at = None
+    dtim_mode_requested_at = None
+    dtim_mode_confirmed = False
     sent = acknowledgements = 0
     detached = False
     pre_detach = None
@@ -331,6 +334,8 @@ def main():
                             mesh_confirmed = True
                         if 'ready: USER' in line and ready_at is None:
                             ready_at = now
+                        if dtim_period and f'DTIM{dtim_period} MODE native_twt=0' in line:
+                            dtim_mode_confirmed = True
                         if reset_done and 'PAWR_TWT ACTIVE' in line:
                             match = re.search(r'session=(\d+)', line)
                             if match and active_at is None:
@@ -363,7 +368,14 @@ def main():
                 if reset_at is not None and not reset_done and now >= reset_at:
                     if args.mode == 'ap':
                         if dtim_period:
-                            send('2' if dtim_period == 20 else '4')
+                            if dtim_mode_requested_at is None:
+                                send(str(dtim_period // 10))
+                                dtim_mode_requested_at = now
+                            if not dtim_mode_confirmed:
+                                if now - dtim_mode_requested_at >= 5:
+                                    raise TimeoutError('HC33 did not confirm the requested DTIM mode')
+                                time.sleep(0.01)
+                                continue
                         send('c' if args.keep_beacons else 'b')
                         beacon_at = now
                     if args.normal_boot:
@@ -474,6 +486,7 @@ def main():
                 checks['spi_suspend_restore_pass'] = suspend_count > 0 and resume_count > 0 and errors == 0 and suspended == 1
             dynamic_ps = None
             if dtim_period:
+                checks['dtim_sender_configured'] = dtim_mode_confirmed
                 checks['dtim_configured'] = read_memory(table['sensor_dtim40_ready'][0], 32, 1)[0] == 1
                 if 'sensor_dtim_period' in table:
                     checks['dtim_period_matches'] = read_memory(table['sensor_dtim_period'][0], 32, 1)[0] == dtim_period

@@ -168,8 +168,11 @@ def patch_sensor_spi_sleep_pins(module):
 patch_sensor_spi_sleep_pins(mm_root)
 
 pio_env = env.get("PIOENV", "")
-edgez_source_option = os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
-if not edgez_source_option:
+edgez_prebuilt_only = os.environ.get("EDGEZ_HALOW_MESH_PREBUILT_ONLY", "").strip().lower() in {
+    "1", "true", "yes"
+}
+edgez_source_option = "" if edgez_prebuilt_only else os.environ.get("EDGEZ_HALOW_MESH_SOURCE_ROOT", "").strip()
+if not edgez_source_option and not edgez_prebuilt_only:
     # A normal developer workspace keeps the template and edgez-halow-mesh as
     # sibling repositories. Prefer that checkout automatically so firmware
     # changes exercise the current mesh sources; release/standalone checkouts

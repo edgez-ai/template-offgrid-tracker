@@ -191,7 +191,7 @@ config OFFGRID_NRF54_SENSOR_DTIM40_TEST
     help
       Factory AP/STA experiment: retain the PAwR control session, but use
       TIM mode and the configured listen interval instead of a TWT agreement.
-      Requires matching HC33 AP beacons: serial '2' (20) or '4' (40), then 'c'.
+      Requires matching HC33 AP beacons: serial '1' (10), '2' (20), or '4' (40), then 'c'.
       This manually creates station state; it is not a full association test.
 
 config OFFGRID_NRF54_SENSOR_DTIM_PERIOD
