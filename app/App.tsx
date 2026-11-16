@@ -35,7 +35,9 @@ import { styles } from "./app-styles";
 import { ProfileForm, validProfileDetails } from "./ProfileScreens";
 import { ProvisioningFlow } from "./ProvisioningFlow";
 import { SettingsPage } from "./SettingsScreens";
-import { HomeMap } from "./HomeMap";
+import { KeepteenApp } from "./keepteen/KeepteenApp";
+import { I18nProvider } from "./keepteen/i18n";
+import { ThemeProvider } from "./keepteen/theme";
 import { CloudLoginModal } from "./CloudLoginModal";
 import {
   cachedCloudSession,
@@ -517,14 +519,38 @@ export default function App() {
     );
   };
 
+  const refreshDevices = async () => {
+    if (!runtimeProfile) return;
+    if (runtimeProfile.connectToCloud) await refreshProvisioningRequests();
+    else {
+      const refreshedDevices = await listProfileDevices(runtimeProfile.id);
+      if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
+    }
+  };
+
+  const currentSharedSettings: SharedProfileSettings | null = runtimeProfile ? sharedSettings ?? {
+    identityName: runtimeProfile.identityName,
+    identityId: runtimeProfile.identityId,
+    identityPrivateKey: runtimeProfile.identityPrivateKey,
+    identityPublicKey: runtimeProfile.identityPublicKey,
+    location: runtimeProfile.location,
+    locationMode: runtimeProfile.location ? "fixed" : "off",
+    iconType: "person",
+    iconColor: "blue",
+    bleDeviceId: runtimeProfile.bleDeviceId,
+    bleDeviceName: runtimeProfile.bleDeviceName,
+  } : null;
+
   return (
+    <ThemeProvider>
+    <I18nProvider>
     <SafeAreaProvider>
       {!profileLoaded ? (
         <SafeAreaView style={styles.loadingPage}>
           <StatusBar style="light" />
           <ActivityIndicator color="#69cfc7" size="large" />
         </SafeAreaView>
-      ) : runtimeProfile ? (
+      ) : runtimeProfile && currentSharedSettings ? (
         <>
           {!provisioningOpen && !runtimeProfile.connectToCloud ? (
             <ActiveProfileBleLink
@@ -538,36 +564,45 @@ export default function App() {
               onProvisioningRequestsChanged={refreshProvisioningRequests}
             />
           ) : null}
-          <HomeMap
-            key={`home:${runtimeProfile.id}:${runtimeProfile.location}`}
-            profile={runtimeProfile}
-            devices={profileDevices}
-            messages={profileMessages}
-            provisioningRequests={provisioningRequests}
-            cloudSensorSamples={cloudSensorSamples}
-            onlineMode={runtimeProfile.connectToCloud}
-            bleStatus={bleStatus}
-            cloudStatus={cloudStatus}
-            meshLink={runtimeProfile.connectToCloud ? null : currentMeshLink}
-            onRemoveDevice={requestRemoveDevice}
-            onMessagesChanged={async () => {
-              await refreshProfileMessages();
+          <KeepteenApp
+            runtime={{
+              profile: runtimeProfile,
+              profiles,
+              sharedSettings: currentSharedSettings,
+              devices: profileDevices,
+              messages: profileMessages,
+              provisioningRequests,
+              cloudSensorSamples,
+              onlineMode: runtimeProfile.connectToCloud,
+              bleStatus,
+              cloudStatus,
+              cloudLoggedIn: cloudSessionLoggedIn,
+              meshLink: runtimeProfile.connectToCloud ? null : currentMeshLink,
+              busy: settingsBusy,
+              error: settingsError,
             }}
-            onDevicesChanged={async () => {
-              if (runtimeProfile.connectToCloud) await refreshProvisioningRequests();
-              else {
-                const refreshedDevices = await listProfileDevices(runtimeProfile.id);
-                if (activeProfileIdRef.current === runtimeProfile.id) setProfileDevices(refreshedDevices);
-              }
+            actions={{
+              removeDevice: requestRemoveDevice,
+              messagesChanged: refreshProfileMessages,
+              devicesChanged: refreshDevices,
+              provisioningRequestsChanged: refreshProvisioningRequests,
+              resendMessage,
+              addDevice: () => setProvisioningOpen(true),
+              cloudAuthenticated: () => {
+                setCloudProfileReady(false);
+                setCloudSessionLoggedIn(true);
+              },
+              cloudLogout: requestCloudLogout,
+              selectProfile: (selected) => void selectManagedProfile(selected),
+              createProfile: () => { setSettingsError(""); setProfileFormMode("create"); },
+              editProfile: () => { setSettingsError(""); setProfileFormMode("edit"); },
+              deleteProfile: requestDeleteProfile,
+              saveSharedSettings: saveAppSettings,
+              openAdvancedSettings: () => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); },
             }}
-            onProvisioningRequestsChanged={refreshProvisioningRequests}
-            onResendMessage={resendMessage}
-            onCloudPress={() => { if (cloudStatus === "login") setCloudLoginOpen(true); }}
-            onAddDevice={() => setProvisioningOpen(true)}
-            onOpenSettings={() => { setSettingsError(""); setProfileManagerOpen(false); setSettingsOpen(true); }}
           />
           <Modal
-            visible={settingsOpen}
+            visible={settingsOpen || profileFormMode !== null}
             animationType="slide"
             onRequestClose={() => profileFormMode
               ? setProfileFormMode(null)
@@ -587,18 +622,7 @@ export default function App() {
               <SettingsPage
                 profiles={profiles}
                 currentProfile={runtimeProfile}
-                sharedSettings={sharedSettings ?? {
-                  identityName: runtimeProfile.identityName,
-                  identityId: runtimeProfile.identityId,
-                  identityPrivateKey: runtimeProfile.identityPrivateKey,
-                  identityPublicKey: runtimeProfile.identityPublicKey,
-                  location: runtimeProfile.location,
-                  locationMode: runtimeProfile.location ? "fixed" : "off",
-                  iconType: "person",
-                  iconColor: "blue",
-                  bleDeviceId: runtimeProfile.bleDeviceId,
-                  bleDeviceName: runtimeProfile.bleDeviceName,
-                }}
+                sharedSettings={currentSharedSettings}
                 bleStatus={bleStatus}
                 cloudStatus={cloudStatus}
                 cloudLoggedIn={cloudSessionLoggedIn}
@@ -644,5 +668,7 @@ export default function App() {
         <ProfileForm sharedSettings={sharedSettings ?? undefined} required onSave={saveInitialProfile} />
       )}
     </SafeAreaProvider>
+    </I18nProvider>
+    </ThemeProvider>
   );
 }

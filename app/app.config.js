@@ -31,7 +31,7 @@ module.exports = {
     scheme: "edgez-devtools",
     version: "1.0.0",
     orientation: "portrait",
-    userInterfaceStyle: "light",
+    userInterfaceStyle: "automatic",
     plugins: [
       "expo-status-bar",
       "expo-sqlite",

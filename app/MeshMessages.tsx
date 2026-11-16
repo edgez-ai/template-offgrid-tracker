@@ -22,7 +22,7 @@ import { ProfileLocationPicker } from "./ProfileScreens";
 import { acceptCloudProvisioningRequest, deleteCloudDevice, getCloudSensorHistory } from "./cloud-auth";
 import type { CloudSensorHistorySeries } from "./cloud-auth";
 
-type InboxTab = "channels" | "people" | "gateways" | "sensors" | "discovered";
+export type InboxTab = "channels" | "people" | "gateways" | "sensors" | "discovered";
 type ConversationPeer = { id: string; name: string; serial: string; nodeNum: bigint | null; publicChannel: boolean; device: StoredDevice | null };
 
 const inboxTabStorageKey = "offgrid-tracker:last-inbox-tab:v1";
@@ -51,7 +51,7 @@ const sensorHistoryRanges = [
 ] as const;
 const sensorChartColors = ["#0a8c87", "#d47a1f", "#7c5ce5", "#d14b78", "#3977c3", "#6c8f2d"];
 
-export function MeshMessages({ visible, profile, profileId, session, meshState, devices, messages, provisioningRequests, cloudSensorSamples, onlineMode, initialPeerSerial, onMessagesChanged, onDevicesChanged, onProvisioningRequestsChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
+export function MeshMessages({ visible, profile, profileId, session, meshState, devices, messages, provisioningRequests, cloudSensorSamples, onlineMode, initialPeerSerial, initialTab, onMessagesChanged, onDevicesChanged, onProvisioningRequestsChanged, onResendMessage, onShowDevice, onRemoveDevice, onClose }: {
   visible: boolean;
   profile: StoredProfile;
   profileId: string;
@@ -63,6 +63,8 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   cloudSensorSamples: EdgezSensorSample[];
   onlineMode: boolean;
   initialPeerSerial: string | null;
+  /** Optional tab to open when no peer is preselected (used by the KEEPTEEN shell). */
+  initialTab?: InboxTab;
   onMessagesChanged: () => Promise<void>;
   onDevicesChanged: () => Promise<void>;
   onProvisioningRequestsChanged: () => Promise<void>;
@@ -168,7 +170,7 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
   useEffect(() => {
     let mounted = true;
     void AsyncStorage.getItem(inboxTabStorageKey).then((storedTab) => {
-      if (!mounted) return;
+      if (!mounted || initialTab) return;
       if (onlineMode) setTab(storedTab === "sensors" || storedTab === "discovered" || storedTab === "gateways" ? storedTab : "gateways");
       else if (storedTab === "channels" || storedTab === "people" || storedTab === "sensors" || storedTab === "discovered") setTab(storedTab);
     }).catch(() => undefined);
@@ -179,7 +181,10 @@ export function MeshMessages({ visible, profile, profileId, session, meshState, 
     if (!visible) return;
     setChannelInfo(false);
     setError("");
-    if (!initialPeerSerial) return;
+    if (!initialPeerSerial) {
+      if (initialTab) { setTab(initialTab); setPeerSerial(null); setSensorId(null); setRequestId(null); }
+      return;
+    }
     const sensor = sensors.find((device) => sameSerial(device.meshMacAddress || device.serial, initialPeerSerial));
     if (sensor) {
       setTab("sensors"); setSensorId(sensor.id); setPeerSerial(null); setRequestId(null);
