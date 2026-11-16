@@ -122,6 +122,13 @@ pio run -e seeed-xiao-nrf54l15-hc01
 pio run -e seeed-xiao-nrf54l15-sense
 ```
 
+### Local Jetson AP station test
+
+Use `edgez-nrf54l15-fgh200m-ap-test` for the EdgeZ FGH200M carrier with
+Morse Micro's official SDK station stack. Set literal SSID/password values in
+the gitignored `zephyr/fgh200m_ap_test.local.conf`, equivalent to a local
+`prj.conf` fragment. See [AP test setup](zephyr/AP-TEST.md).
+
 ### HT-HC33 mesh power-save experiment
 
 The `heltec-hc33-mesh-ps` environment waits until the HT-HC33 has established

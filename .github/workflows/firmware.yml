@@ -13,12 +13,6 @@ on:
           - heltec-hc33
           - edgez-nrf54l15-fgh200m-companion
           - edgez-nrf54l15-fgh200m-sensor
-          - edgez-nrf54l15-fgh200m-ap-test
-
-      ap_test_compile_only:
-        description: Compile AP test with a dummy password (cannot join the Jetson AP)
-        type: boolean
-        default: false
 
 # Firmware is intentionally an Actions artifact, never a GitHub Release asset.
 permissions:
@@ -51,10 +45,6 @@ jobs:
             {"environment":"edgez-nrf54l15-fgh200m-companion","label":"nRF54L15 companion","artifact":"nrf54l15-companion","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-companion.hex"},
             {"environment":"edgez-nrf54l15-fgh200m-sensor","label":"nRF54L15 sensor","artifact":"nrf54l15-sensor","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-sensor.hex"}
           ]'
-          # The credential-bearing AP test is opt-in, outside the normal matrix.
-          if [[ "$SELECTED_ENVIRONMENT" == "edgez-nrf54l15-fgh200m-ap-test" ]]; then
-            targets='[{"environment":"edgez-nrf54l15-fgh200m-ap-test","label":"nRF54L15 Jetson AP test","artifact":"nrf54l15-ap-test","image":"firmware.hex","output":"offgrid-tracker-nrf54l15-ap-test.hex"}]'
-          fi
           if [[ "$SELECTED_ENVIRONMENT" == "all" ]]; then
             matrix="$(jq -cn --argjson include "$targets" '{include: $include}')"
           else
@@ -96,8 +86,6 @@ jobs:
           "$system_ninja" --version
           cp "$system_ninja" "$pio_ninja"
       - name: Build ${{ matrix.environment }}
-        env:
-          EDGEZ_HALOW_TEST_PSK: ${{ matrix.environment == 'edgez-nrf54l15-fgh200m-ap-test' && (inputs.ap_test_compile_only && 'compile-only-no-ap-access' || secrets.EDGEZ_HALOW_TEST_PSK) || '' }}
         run: >-
           pio run
           --project-dir firmware
@@ -135,12 +123,11 @@ jobs:
           {
             echo "platformio_environment=$PIO_ENV"
             echo "repository_commit=$(git rev-parse HEAD)"
-            echo "ap_test_compile_only=${{ inputs.ap_test_compile_only }}"
             git submodule status --recursive
           } > "$artifact_dir/SOURCE-MANIFEST.txt"
       - uses: actions/upload-artifact@v6
         with:
-          name: offgrid-tracker-${{ matrix.artifact }}${{ matrix.environment == 'edgez-nrf54l15-fgh200m-ap-test' && inputs.ap_test_compile_only && '-compile-only' || '' }}
+          name: offgrid-tracker-${{ matrix.artifact }}
           path: dist/firmware/${{ matrix.environment }}/
           if-no-files-found: error
           retention-days: 7

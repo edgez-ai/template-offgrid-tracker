@@ -6,3 +6,6 @@
 	path = firmware/platforms/mm-iot-zephyr
 	url = https://github.com/edgez-ai/mm-iot-zephyr.git
 	branch = edgez
+[submodule "firmware/platforms/mm-iot-zephyr-official"]
+	path = firmware/platforms/mm-iot-zephyr-official
+	url = https://github.com/MorseMicro/mm-iot-zephyr.git

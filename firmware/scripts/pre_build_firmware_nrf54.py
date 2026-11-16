@@ -323,17 +323,3 @@ if edgez_source_root is not None:
     print(f"Using EdgeZ HaLow mesh source with diagnostics: {edgez_source_root}")
 else:
     print("Using EdgeZ HaLow mesh release prebuilt")
-
-# Keep AP test credentials out of git, compiler arguments, and build logs.
-if pio_env == "edgez-nrf54l15-fgh200m-ap-test":
-    import json
-    password = os.environ.get("EDGEZ_HALOW_TEST_PSK", "")
-    if not 8 <= len(password.encode("utf-8")) <= 63:
-        print("ERROR: Set EDGEZ_HALOW_TEST_PSK to the Jetson AP passphrase (8-63 bytes)")
-        env.Exit(1)
-    generated = PROJECT_DIR / ".pio" / "ap-test-private"
-    generated.mkdir(parents=True, exist_ok=True)
-    header = generated / "ap_test_credentials.h"
-    header.write_text("#define AP_TEST_PSK " + json.dumps(password) + "\n", encoding="utf-8")
-    header.chmod(0o600)
-    env.AppendUnique(CPPPATH=[str(generated)])

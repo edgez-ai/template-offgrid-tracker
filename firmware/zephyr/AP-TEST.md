@@ -1,27 +1,43 @@
-# Jetson HaLow AP integration test
+# Local Jetson HaLow AP test
 
-`edgez-nrf54l15-fgh200m-ap-test` is a standalone station image for the existing
-EdgeZ nRF54L15 + FGH200M/MM8108 carrier, using its normal SPI/power wiring.
-It uses the reference Morse Wi-Fi station stack through Zephyr's networking API,
-not the production connectionless/mesh protocol. It does not change factory data.
-Do not flash it on a bare Nordic DK or a different carrier without adapting wiring.
+Environment: `edgez-nrf54l15-fgh200m-ap-test`.
+Board: EdgeZ nRF54L15 + FGH200M/MM8108 carrier with the existing SPI/power wiring.
+It uses the unmodified official `MorseMicro/mm-iot-zephyr` integration and its
+pinned `MorseMicro/mm-iot-sdk` 2.13.1 station/supplicant implementation.
+`edgez-halow-mesh`, EdgeZ RF adapters, and the production SDK fork are not
+linked by this environment. The EdgeZ carrier overlay supplies only the wiring.
 
-It joins `EdgeZ-HaLow` using WPA3-SAE in the EU region, obtains a DHCP address,
-and repeatedly checks UDP echo at `10.83.0.1:4242`. RTT logs distinguish radio
-initialization, association, DHCP, and successful round trips. Connection failures
-retry after ten seconds. There is no cloud, MQTT, BLE, or internet dependency.
+It joins `EdgeZ-HaLow` with WPA3-SAE in the EU region, obtains a DHCP address,
+and checks UDP echo at `10.83.0.1:4242`. RTT logs show association, DHCP, and
+`LOCAL ECHO PASS`. No BLE, mesh, PAwR, MQTT, internet, or cloud credentials.
 
-Run the existing **Build firmware** GitHub workflow on the development branch,
-selecting this exact environment. Set `ap_test_compile_only=true` to validate
-the build with a dummy password without sharing any AP credential; that
-artifact is explicitly labeled `compile-only` and cannot join the Jetson AP.
-Leave that option disabled for the real connection test. Configure the repository Actions secret
-`EDGEZ_HALOW_TEST_PSK` with the Jetson AP passphrase first. Never commit it.
-This diagnostic image contains the test AP passphrase: restrict access to its
-Actions artifacts and replace the test password after use. The environment is
-excluded from `all` and is not published as a release.
+Set the literal credentials in `firmware/zephyr/fgh200m_ap_test.local.conf`:
 
-On the Jetson, use a UDP echo receiver bound only to the HaLow address:
+```conf
+CONFIG_WIFI_SSID="EdgeZ-HaLow"
+CONFIG_WIFI_PSK="your-test-ap-password"
+```
+
+This is the credential fragment equivalent to a local `prj.conf`: PlatformIO
+uses `fgh200m_ap_test.conf` as its standalone base and adds the local fragment
+with `EXTRA_CONF_FILE`. Copy `.local.conf.example` when setting up another
+checkout. The local fragment is gitignored. Root `.env` stores the same password
+only as a memo; the firmware build does not load it. Firmware contains the
+password, so keep local build outputs private. No GitHub Actions build is used.
+
+```sh
+git submodule update --init --recursive firmware/platforms/mm-iot-zephyr-official
+cd firmware
+pio run -e edgez-nrf54l15-fgh200m-ap-test
+pio run -e edgez-nrf54l15-fgh200m-ap-test -t upload
+python scripts/nrf54_openocd.py serve --elf .pio/build/edgez-nrf54l15-fgh200m-ap-test/firmware.elf
+```
+
+Use a CMSIS-DAP probe attached by SWD to the nRF54L15. The existing uploader
+verifies writes and does not automatically recover or mass erase a device.
+Factory identity/configuration partitions are preserved.
+
+On the Jetson, a local UDP echo receiver can confirm data transfer:
 
 ```python
 import socket
@@ -34,8 +50,8 @@ with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as server:
             server.sendto(data, peer)
 ```
 
-Verify `AP-STA-CONNECTED` in `journalctl -u edgez-halow-ap`, a lease in
-`/var/lib/edgez-halow/dnsmasq.leases`, and `LOCAL ECHO PASS` in sensor RTT output.
-A successful compile alone does not verify sensor association or data transfer.
-Use the existing CMSIS-DAP/OpenOCD flashing tools and preserve the factory
-partition; do not mass-erase or unlock a protected target automatically.
+Check `AP-STA-CONNECTED` in `journalctl -u edgez-halow-ap`, a DHCP lease in
+`/var/lib/edgez-halow/dnsmasq.leases`, and sensor RTT `LOCAL ECHO PASS` output.
+
+Pinned upstream integration: `70007b9b9161c62c829d76baf3d022af6c8db2d2`.
+Pinned official SDK: `d63724744b9596decf077a791c760319ebcbee05` (2.13.1).

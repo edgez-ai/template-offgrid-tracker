@@ -13,7 +13,6 @@
 #include <zephyr/net/socket.h>
 #include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/sys/atomic.h>
-#include "ap_test_credentials.h"
 
 LOG_MODULE_REGISTER(halow_ap_test, LOG_LEVEL_INF);
 K_SEM_DEFINE(connect_result, 0, 1);
@@ -74,7 +73,7 @@ static void echo_test(void)
 
 int main(void)
 {
-    LOG_INF("Jetson AP test: SSID=EdgeZ-HaLow region=EU peer=10.83.0.1:4242");
+    LOG_INF("Jetson AP test: SSID=%s region=EU peer=10.83.0.1:4242", CONFIG_WIFI_SSID);
     net_mgmt_init_event_callback(&wifi_cb, wifi_event,
         NET_EVENT_WIFI_CONNECT_RESULT | NET_EVENT_WIFI_DISCONNECT_RESULT);
     net_mgmt_add_event_callback(&wifi_cb);
@@ -91,10 +90,10 @@ int main(void)
     for (;;) {
         k_sem_reset(&connect_result);
         struct wifi_connect_req_params request = {0};
-        request.ssid = (const uint8_t *)"EdgeZ-HaLow";
+        request.ssid = (const uint8_t *)CONFIG_WIFI_SSID;
         request.ssid_length = strlen((const char *)request.ssid);
-        request.sae_password = (const uint8_t *)AP_TEST_PSK;
-        request.sae_password_length = strlen(AP_TEST_PSK);
+        request.sae_password = (const uint8_t *)CONFIG_WIFI_PSK;
+        request.sae_password_length = strlen(CONFIG_WIFI_PSK);
         request.security = WIFI_SECURITY_TYPE_SAE;
         request.mfp = WIFI_MFP_REQUIRED;
         request.channel = WIFI_CHANNEL_ANY;
