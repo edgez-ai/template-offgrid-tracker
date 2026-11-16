@@ -1,5 +1,21 @@
 menu "HaLow initialization"
 
+    config OFFGRID_HT_HC33_AP_TEST
+        bool "Standalone HT-HC33 official SDK AP station test"
+        depends on IDF_TARGET_ESP32S3
+        default n
+
+    config OFFGRID_AP_TEST_SSID
+        string "Local test AP SSID"
+        depends on OFFGRID_HT_HC33_AP_TEST
+        default "EdgeZ-HaLow"
+
+    config OFFGRID_AP_TEST_PSK
+        string "Local test AP SAE passphrase"
+        depends on OFFGRID_HT_HC33_AP_TEST
+        default ""
+
+
     config OFFGRID_HT_HC33_HALOW_WAKE_TEST
         bool "Build the HT-HC33 button-to-HaLow-wake test sender"
         depends on IDF_TARGET_ESP32S3

@@ -1,3 +1,9 @@
+if("$ENV{OFFGRID_HC33_AP_TEST}" STREQUAL "1")
+    idf_component_register(SRCS "ht_hc33_ap_test.c" INCLUDE_DIRS "include"
+        PRIV_REQUIRES esp_event esp_netif halow esp_timer nvs_flash)
+    return()
+endif()
+
 if(CONFIG_DAB_RAW_RF_TEST)
     set(component_sources "raw_rf_main.c")
     set(component_private_dependencies

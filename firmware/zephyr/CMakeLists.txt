@@ -30,15 +30,6 @@ if(OFFGRID_NRF54_ALL_OFF_BENCHMARK)
 	return()
 endif()
 
-if(CONFIG_OFFGRID_NRF54_AP_TEST)
-	# Standalone upstream station stack: no EdgeZ RF/mesh includes or archives.
-	target_sources(app PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ap_test_anchor.c")
-	target_link_libraries(app PRIVATE libmorse_interface)
-	add_custom_target(edgez_ap_test_dependencies)
-	add_dependencies(edgez_ap_test_dependencies libmorse_build firmware)
-	return()
-endif()
-
 if(CONFIG_OFFGRID_NRF54_SENSOR_PS_PROBE)
 	zephyr_include_directories("${MORSE_ZEPHYR_MODULE}/submodules/mm-iot-sdk/framework/morselib/src")
 endif()

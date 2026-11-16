@@ -1,0 +1,2 @@
+CONFIG_OFFGRID_AP_TEST_SSID="EdgeZ-HaLow"
+CONFIG_OFFGRID_AP_TEST_PSK="replace-with-local-ap-password"

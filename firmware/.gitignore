@@ -6,3 +6,6 @@ sdkconfig.old
 sdkconfig.*
 !sdkconfig.defaults
 !sdkconfig.defaults.*
+
+# Local AP test credential literals.
+sdkconfig.defaults.ht-hc33-ap-test.local

@@ -10,5 +10,3 @@ app/signing/
 infra/appwrite.config.json
 site/.next
 site/out
-
-firmware/zephyr/fgh200m_ap_test.local.conf
