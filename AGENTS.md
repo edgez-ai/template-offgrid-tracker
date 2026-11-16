@@ -56,9 +56,13 @@ server-side endpoint.
 - Infrastructure: `cd infra && npm run check`
 - Firmware: `cd firmware && pio run`
 
-`cd app && npm run android` must start Metro and open the project in the remote
-EdgeZ Android DevTools client at `127.0.0.1:5555`. Do not run a local Gradle or
-Expo native build unless the user explicitly requests one.
+`cd app && npm run android` uses the local `expo run:android` workflow: generate
+the native Android project, build and install the development app on a local
+emulator or USB-connected phone, and start Metro. Install a JDK and Android SDK
+first and configure `JAVA_HOME` and `ANDROID_HOME`. Set `ANDROID_SERIAL` when
+multiple devices are attached. Local Gradle and Expo native builds are allowed;
+the remote EdgeZ Android DevTools client is no longer required. Use a physical
+phone to verify BLE provisioning and mesh behavior.
 
 Only run `infra/npm run deploy` when the user explicitly asks to change remote
 Appwrite state.

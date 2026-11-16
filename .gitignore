@@ -5,6 +5,7 @@ dist/
 .env
 .env*.local
 app/android/
+.android-tools/
 app/signing/
 .factory/
 infra/appwrite.config.json

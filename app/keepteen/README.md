@@ -8,6 +8,13 @@ cloud polling and message retries; it now renders `KeepteenApp` instead of the
 old map home screen and hands it a `KeepteenRuntime` + `KeepteenActions`
 (`types.ts`). The demo adapter from the web prototype was not ported.
 
+First launch goes straight to Devices, as specified by the handoff. `profile.ts`
+initializes an internal offline profile only when no saved profile exists;
+network editing remains under Settings → HaLow. Creating this storage profile
+does not pair hardware, enable cloud access or send radio configuration.
+Deleting the last network restores this unpaired local default instead of
+returning to the legacy onboarding form.
+
 ## Structure
 
 | Requirement | Implementation |

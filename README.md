@@ -132,9 +132,11 @@ native BLE, SQLite, location, and Organic Maps integrations and therefore does
 not run in Expo Go. When multiple phones are connected, select one with
 `ANDROID_SERIAL`.
 
-On first launch, create a profile. Country defaults to `US`, the channel
-defaults to `27`, the mesh ID defaults to the profile name, and the passphrase
-may be empty or 8–63 characters. Location mode can be `Off`, `Fixed`, or
+First launch opens KEEPTEEN's Devices screen directly. An internal offline
+storage profile is created automatically; configure it under Settings → HaLow
+before adding a device. Country defaults to `US`, the channel defaults to `27`,
+the initial mesh ID is `KEEPTEEN`, and the passphrase may be empty or
+8–63 characters. Location mode can be `Off`, `Fixed`, or
 `Live`. Live mode uses the phone's current location in periodic self beacons;
 a beacon is still sent when location is temporarily unavailable.
 

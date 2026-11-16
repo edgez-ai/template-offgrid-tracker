@@ -38,9 +38,13 @@ profiles.
 
 ## User interface
 
-If no profile exists, the app opens the profile creation flow. The default
-country is `US`, channel is `27`, and mesh ID follows the profile name. The
-passphrase may be empty or 8–63 characters and has a visibility toggle.
+First launch opens the KEEPTEEN Devices screen directly, with four product
+cards and Devices / Settings navigation. The app creates an internal offline
+storage profile when none exists; no profile setup or login blocks the home
+screen. Existing profiles are retained. Configure the network under
+Settings → HaLow before adding a device. The initial local defaults are country
+`US`, channel `27`, mesh ID `KEEPTEEN`, and an empty passphrase. No device is
+paired automatically. The passphrase may be empty or 8–63 characters.
 
 The Home page provides:
 
@@ -102,8 +106,19 @@ offline map by compatible peers.
 
 ## Development
 
-Requirements include Node.js/npm, Java 17, the Android SDK, and a connected
-Android phone with Bluetooth and location permissions.
+Requirements include Node.js/npm, JDK 17, and the Android SDK (Android 36,
+Build Tools 36.0.0, NDK 27.1.12297006, CMake 3.22.1 and Platform Tools).
+Use a local Android emulator for UI checks or a USB-connected Android phone
+with Bluetooth and location permissions for hardware verification.
+
+On Windows, set `JAVA_HOME` and `ANDROID_HOME`, and add their `bin` and
+`platform-tools` directories to `PATH`. If the workspace toolchain is installed
+in the ignored `.android-tools/` directory, load it from `app/` with:
+
+```powershell
+. ./scripts/android-env.ps1
+adb devices -l
+```
 
 ```sh
 npm ci
@@ -114,6 +129,11 @@ npm run android
 `npm run android` uses the standard `expo run:android` workflow: it generates
 the native project when needed, builds and installs the development app, and
 starts Metro. Set `ANDROID_SERIAL` when multiple phones are attached.
+This is a local native build; it does not use a remote EdgeZ DevTools client.
+The generated `app/android/` directory and workspace toolchain are ignored by
+Git. Native configuration changes belong in Expo config/plugins so they survive
+regeneration. An emulator can check navigation, themes and local storage, but
+real BLE provisioning, mesh, voice and device telemetry require hardware.
 
 BLE, SQLite, location, and Organic Maps require native modules, so the app does
 not run in stock Expo Go. Rebuild after changing a native dependency.

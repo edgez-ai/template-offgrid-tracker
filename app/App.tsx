@@ -5,12 +5,10 @@ import { useNetInfo } from "@react-native-community/netinfo";
 import { fromByteArray } from "base64-js";
 import { rememberedBeaconIcon } from "./halow-provisioning";
 import type { EdgezMeshSession, EdgezMeshState } from "@edgez/react-native-sdk";
-import { StatusBar } from "expo-status-bar";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Modal } from "react-native";
-import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { Alert, Modal } from "react-native";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import {
-  activeProfile,
   adoptCloudProfileId,
   createProfileIdentity,
   createProfile,
@@ -31,11 +29,11 @@ import {
 import type { ProfileDetails, StoredDevice, StoredMessage, StoredProfile, StoredProvisioningRequest, StoredSensorSample } from "./profile-store";
 import { ActiveProfileBleLink } from "./ActiveProfileBleLink";
 import type { BleLinkStatus } from "./ActiveProfileBleLink";
-import { styles } from "./app-styles";
 import { ProfileForm, validProfileDetails } from "./ProfileScreens";
 import { ProvisioningFlow } from "./ProvisioningFlow";
 import { SettingsPage } from "./SettingsScreens";
-import { KeepteenApp } from "./keepteen/KeepteenApp";
+import { KeepteenApp, KeepteenStartup } from "./keepteen/KeepteenApp";
+import { ensureKeepteenProfile } from "./keepteen/profile";
 import { I18nProvider } from "./keepteen/i18n";
 import { ThemeProvider } from "./keepteen/theme";
 import { CloudLoginModal } from "./CloudLoginModal";
@@ -70,6 +68,7 @@ export default function App() {
   const [provisioningRequests, setProvisioningRequests] = useState<StoredProvisioningRequest[]>([]);
   const [cloudSensorSamples, setCloudSensorSamples] = useState<StoredSensorSample[]>([]);
   const [profileLoaded, setProfileLoaded] = useState(false);
+  const [startupAttempt, setStartupAttempt] = useState(0);
   const [sharedSettings, setSharedSettings] = useState<SharedProfileSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [profileManagerOpen, setProfileManagerOpen] = useState(false);
@@ -172,11 +171,14 @@ export default function App() {
   };
 
   const refreshProfiles = async () => {
-    const [availableProfiles, currentProfile] = await Promise.all([listProfiles(), activeProfile()]);
+    const currentProfile = await ensureKeepteenProfile();
+    const availableProfiles = await listProfiles();
+    const settings = await loadSharedProfileSettings(currentProfile);
     const [availableDevices, availableMessages, availableRequests] = currentProfile && !currentProfile.connectToCloud
       ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
       : [[], [], []];
     setProfiles(availableProfiles);
+    setSharedSettings(settings);
     applyProfileData(currentProfile, availableDevices, availableMessages, availableRequests);
     return currentProfile;
   };
@@ -254,6 +256,8 @@ export default function App() {
   }, [cloudProfileReady, networkAvailable, runtimeProfile?.connectToCloud, runtimeProfile?.id]);
 
   useEffect(() => {
+    setProfileLoaded(false);
+    setSettingsError("");
     void (async () => {
       await initializeProfileStore();
       let availableProfiles = await listProfiles();
@@ -274,7 +278,8 @@ export default function App() {
         }
         availableProfiles = await listProfiles();
       }
-      const currentProfile = await activeProfile();
+      const currentProfile = await ensureKeepteenProfile();
+      availableProfiles = await listProfiles();
       const settings = await loadSharedProfileSettings(currentProfile ?? availableProfiles[0]);
       const [availableDevices, availableMessages, availableRequests] = currentProfile && !currentProfile.connectToCloud
         ? await Promise.all([listProfileDevices(currentProfile.id), listProfileMessages(currentProfile.id), listProfileProvisioningRequests(currentProfile.id)])
@@ -289,7 +294,7 @@ export default function App() {
     })()
       .catch((caught) => setSettingsError(caught instanceof Error ? caught.message : "Could not open the local profile database."))
       .finally(() => setProfileLoaded(true));
-  }, []);
+  }, [startupAttempt]);
 
   useEffect(() => {
     if (!profile || profile.connectToCloud || !meshLink || meshLink.profileId !== profile.id) return;
@@ -388,11 +393,6 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [meshLink?.profileId, meshLink?.state.sensorSamples, profile]);
 
-  const saveInitialProfile = async (details: ProfileDetails) => {
-    await createProfile(details);
-    await refreshProfiles();
-  };
-
   const saveManagedProfile = async (details: ProfileDetails) => {
     if (profileFormMode === "edit" && profile) await updateProfile(profile.id, details);
     else {
@@ -469,15 +469,9 @@ export default function App() {
               setSettingsBusy(true);
               setSettingsError("");
               try {
-                const nextProfile = await deleteProfile(profile.id);
+                await deleteProfile(profile.id);
                 resetProfileRuntime();
-                const availableProfiles = await listProfiles();
-                const [availableDevices, availableMessages, availableRequests] = nextProfile && !nextProfile.connectToCloud
-                  ? await Promise.all([listProfileDevices(nextProfile.id), listProfileMessages(nextProfile.id), listProfileProvisioningRequests(nextProfile.id)])
-                  : [[], [], []];
-                setProfiles(availableProfiles);
-                applyProfileData(nextProfile, availableDevices, availableMessages, availableRequests);
-                if (!nextProfile) setSettingsOpen(false);
+                await refreshProfiles();
               } catch (caught) {
                 setSettingsError(caught instanceof Error ? caught.message : "Could not delete the profile.");
               } finally {
@@ -546,10 +540,7 @@ export default function App() {
     <I18nProvider>
     <SafeAreaProvider>
       {!profileLoaded ? (
-        <SafeAreaView style={styles.loadingPage}>
-          <StatusBar style="light" />
-          <ActivityIndicator color="#69cfc7" size="large" />
-        </SafeAreaView>
+        <KeepteenStartup />
       ) : runtimeProfile && currentSharedSettings ? (
         <>
           {!provisioningOpen && !runtimeProfile.connectToCloud ? (
@@ -665,7 +656,7 @@ export default function App() {
           />
         </>
       ) : (
-        <ProfileForm sharedSettings={sharedSettings ?? undefined} required onSave={saveInitialProfile} />
+        <KeepteenStartup error={settingsError} onRetry={() => setStartupAttempt((attempt) => attempt + 1)} />
       )}
     </SafeAreaProvider>
     </I18nProvider>

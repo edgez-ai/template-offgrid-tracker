@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import React, { useEffect, useState } from "react";
-import { BackHandler, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, BackHandler, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { ChatProduct } from "./ChatProduct";
 import { CollarProduct } from "./CollarProduct";
@@ -11,7 +11,23 @@ import type { SettingsPageKey } from "./SettingsPages";
 import { useI18n } from "./i18n";
 import { useTheme } from "./theme";
 import type { KeepteenActions, KeepteenRuntime } from "./types";
-import { Screen } from "./ui";
+import { Button, Notice, Screen } from "./ui";
+
+export function KeepteenStartup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
+  const { colors } = useTheme();
+  const { t } = useI18n();
+  return (
+    <Screen>
+      <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 16 }}>
+        {onRetry ? <>
+          <Text style={{ color: colors.text, fontSize: 20 }}>{t("startupFailed")}</Text>
+          {error ? <Notice tone="danger" text={error} /> : null}
+          <Button label={t("tryAgain")} onPress={onRetry} />
+        </> : <ActivityIndicator color={colors.accent} size="large" />}
+      </View>
+    </Screen>
+  );
+}
 
 type RootTab = "devices" | "settings";
 type Route =
