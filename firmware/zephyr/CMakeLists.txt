@@ -71,6 +71,10 @@ if(CONFIG_WIFI_MORSEMICRO_EDGEZ_JOIN_ONLY)
 	)
 endif()
 
+if(CONFIG_OFFGRID_NRF54_AP_TEST)
+	return()
+endif()
+
 # PlatformIO compiles nrf54/src recursively. nanopb lives outside that source
 # tree so ESP-IDF and Zephyr can share one runtime copy.
 target_sources(app PRIVATE

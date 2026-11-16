@@ -316,3 +316,9 @@ config OFFGRID_NRF54_SENSOR_PAWR_BULK_TEST
       acknowledgements and selective retransmission; ordinary sensor reports
       continue to use the existing per-request payload-hash acknowledgement.
       This is a diagnostic image, not the normal low-power telemetry path.
+
+config OFFGRID_NRF54_AP_TEST
+    bool "Standalone HaLow AP station test"
+    default n
+    help
+      Join the local WPA3 Jetson AP, obtain DHCP, and verify UDP echo.
