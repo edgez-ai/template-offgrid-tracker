@@ -157,6 +157,36 @@ export function ActiveProfileBleLink({
   }, [iconColor, locationMode, profile, session]);
 
   useEffect(() => {
+    if (!configured || !state.bleReady) return;
+    let cancelled = false;
+    let pending = false;
+    const refreshStatus = async () => {
+      if (cancelled || pending) return;
+      pending = true;
+      try {
+        // INIT replies before the RF worker finishes starting/peering. Keep
+        // the displayed link state current without reapplying the profile.
+        await session.sdk.transport.invoke("sendPacket", {
+          label: "Mesh status",
+          packet: Array.from(encodeNetworkPacket({
+            operation: Operation.request,
+            interface: Interface.halow,
+            status: {},
+          })),
+          waitForDrainMs: 1000,
+        });
+      } catch {
+        // The connection effect handles disconnects and reconnect attempts.
+      } finally {
+        pending = false;
+      }
+    };
+    void refreshStatus();
+    const timer = setInterval(() => void refreshStatus(), 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [configured, session, state.bleReady]);
+
+  useEffect(() => {
     if (locationMode !== "live" || !configured || !state.bleReady || !profile.bleDeviceId) return;
     let cancelled = false;
     let polling = false;

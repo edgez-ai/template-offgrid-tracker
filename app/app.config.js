@@ -36,6 +36,7 @@ module.exports = {
       "expo-status-bar",
       "expo-sqlite",
       "@edgez/react-native-sdk",
+      "./plugins/withBleGattRecovery",
       "./plugins/withOrganicMaps",
       "./plugins/withWifiGateway",
       ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
