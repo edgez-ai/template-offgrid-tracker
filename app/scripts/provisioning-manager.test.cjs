@@ -20,7 +20,7 @@ function loadTs(filename, dependencies) {
   return module.exports;
 }
 
-function setup(camera = false, aligned = false) {
+function setup(camera = false, aligned = false, dev01 = false) {
   const calls = [];
   const nativeCalls = [];
   let response = { ok: true, persisted: true };
@@ -33,7 +33,7 @@ function setup(camera = false, aligned = false) {
     ESPProvisionManager: { async searchESPDevices(prefix, transport, security) {
       calls.push(['scan', prefix, transport, security]);
       return [{ name: camera && prefix === 'PROV_' && transport === 'ble' ? 'PROV_CAM95a863' : `${prefix}AABBCCDDEEFF`,
-        getDeviceCapabilities: async () => aligned && prefix === 'EZ_' ? ['wifi_scan', 'ez_wifi_prov', 'mqtt_config'] : [],
+        getDeviceCapabilities: async () => aligned && prefix === 'EZ_' ? ['wifi_scan', 'ez_wifi_prov', 'mqtt_config', ...(dev01 ? ['ez_dev01'] : [])] : [],
         connect: async (...args) => calls.push(['connect', prefix, ...args]),
         sendData: async (endpoint, data) => {
           calls.push(['send', prefix, endpoint, JSON.parse(data)]);
@@ -194,4 +194,20 @@ test('name persistence failure stops Wi-Fi provisioning', async () => {
   setResponse({ ok: true, persisted: false });
   await assert.rejects(manager.configure(devices[0], input), /save its name/);
   assert.equal(calls.some(call => call[0] === 'provision'), false);
+});
+
+
+test('HT-HC33 uses aligned Wi-Fi provisioning while retaining ESP32 identity', async () => {
+  const { manager, calls } = setup(false, true, true);
+  const { devices } = await manager.scan({ esp32BlePrefix: 'EZ_' });
+  const device = devices[0];
+  await manager.connect(device, 'factory-pop');
+  assert.equal(device.kind, 'esp32');
+  assert.equal(device.category, 'tracker');
+  assert.equal(device.firmwareTarget, 'heltec-hc33');
+  assert.equal(device.serial, 'AABBCCDDEEFF');
+  await manager.configure(device, input);
+  assert.equal(calls.find(call => call[0] === 'send')[2], 'mqtt-config');
+  assert.equal(calls.find(call => call[0] === 'send')[3].deviceName, 'Tracker');
+  assert.ok(calls.findIndex(call => call[0] === 'send') < calls.findIndex(call => call[0] === 'provision'));
 });

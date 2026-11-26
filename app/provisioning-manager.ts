@@ -53,9 +53,9 @@ class ProvisioningDevice implements EdgezProvisioningDevice {
       this.supportsMqttConfig = capabilities?.includes("mqtt_config") ?? false;
       if (capabilities?.includes("ez_wifi_prov")) {
         this.standardWifiProvisioning = true;
-        this.kind = "nrf54";
+        this.kind = capabilities.includes("ez_dev01") ? "esp32" : "nrf54";
         this.category = "tracker";
-        this.firmwareTarget = "nrf54l15";
+        this.firmwareTarget = this.kind === "esp32" ? "heltec-hc33" : "nrf54l15";
         this.supportsUpstreamWifi = true;
         this.supportsDeviceGps = false;
       }

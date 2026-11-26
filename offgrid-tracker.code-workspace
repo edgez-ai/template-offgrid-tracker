@@ -1,11 +1,25 @@
 {
   "folders": [
-    { "name": "root", "path": "." },
-    { "name": "site", "path": "site" },
-    { "name": "app", "path": "app" },
-    { "name": "function", "path": "function" },
-    { "name": "infra", "path": "infra" },
-    { "name": "firmware", "path": "firmware" }
+    {
+      "name": "root",
+      "path": "."
+    },
+    {
+      "name": "site",
+      "path": "site"
+    },
+    {
+      "name": "app",
+      "path": "app"
+    },
+    {
+      "name": "function",
+      "path": "function"
+    },
+    {
+      "name": "infra",
+      "path": "infra"
+    }
   ],
   "settings": {
     "files.exclude": {

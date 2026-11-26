@@ -1,3 +1,0 @@
-CompileFlags:
-    Remove: [-f*, -m*]
-    Add: [-Ishared, -Ishared/nanopb, -Inrf54/src, -Inrf54/include]

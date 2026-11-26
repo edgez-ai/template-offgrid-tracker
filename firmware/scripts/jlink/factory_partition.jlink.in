@@ -1,7 +1,0 @@
-// provision_nrf54_factory.sh substitutes @FACTORY_IMAGE@ in a temporary copy.
-r
-loadbin "@FACTORY_IMAGE@", 0x165000
-verifybin "@FACTORY_IMAGE@", 0x165000
-r
-g
-q

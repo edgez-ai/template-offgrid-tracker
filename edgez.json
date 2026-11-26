@@ -35,10 +35,6 @@
     "mobile": {
       "rootDirectory": "app",
       "framework": "expo"
-    },
-    "firmware": {
-      "rootDirectory": "firmware",
-      "framework": "platformio"
     }
   }
 }
