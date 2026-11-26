@@ -20,6 +20,11 @@ on:
         default: true
         type: boolean
 
+      android_architectures:
+        description: Comma-separated Android ABIs to build
+        required: true
+        default: armeabi-v7a,arm64-v8a,x86,x86_64
+        type: string
       attach_to_release:
         description: Attach artifacts to the selected GitHub release
         required: true
@@ -117,7 +122,9 @@ jobs:
       - name: Build unsigned APK
         if: github.event_name != 'workflow_dispatch' || inputs.build_apk
         working-directory: app/android
-        run: ./gradlew assembleRelease --no-daemon
+        env:
+          ANDROID_BUILD_ARCHITECTURES: ${{ inputs.android_architectures || 'armeabi-v7a,arm64-v8a,x86,x86_64' }}
+        run: ./gradlew assembleRelease --no-daemon "-PreactNativeArchitectures=$ANDROID_BUILD_ARCHITECTURES"
       - name: Sign release APK
         if: github.event_name != 'workflow_dispatch' || inputs.build_apk
         env:
