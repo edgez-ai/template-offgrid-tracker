@@ -76,22 +76,29 @@ last-message time.
 The add-device flow discovers supported hardware and provisions only the active
 profile's local HaLow settings; there is no upstream Wi-Fi selection.
 
-- ESP32 advertisements use `EZ_<12-digit HaLow MAC>`; nRF54L15 advertisements
-  use `NRF_<12-digit HaLow MAC>`. Both use the same ESP-IDF Security 1 BLE
-  provisioning flow, proof of possession (`abcd1234` by default), and the
-  compatibility endpoint `mqtt-config`. nRF54L15 retains its device GPS options.
-- BLE discovery also accepts `PROV_` names, including nRF54L15 cameras named
-  `PROV_CAM<6-digit identity hash>`. These cameras use a factory-derived PoP
-  and standard `prov-config` Wi-Fi provisioning. The app sends the profile's
-  SSID/MESH ID and network password through that standard endpoint.
+- EZ-DEV54 and EZ-DEV01/HT-HC33 advertise `EZ_<factory serial>`. Their
+  `ez_wifi_prov` capability selects standard Security 1 Wi-Fi provisioning;
+  `ez_dev01` identifies the ESP32 HT-HC33 target. Use the per-device factory
+  proof of possession. The profile's SSID/MESH ID and password go through
+  `prov-config`, and its device name goes through the existing encrypted
+  `mqtt-config` endpoint.
+- These station images offer a temporary status/settings BLE companion only
+  before provisioning. A connected phone keeps the device awake; subscribing
+  to companion notifications closes provisioning until disconnect. Disconnect
+  restores provisioning for three minutes. Companion settings are read-only;
+  this mode does not forward mesh chat. Provisioned station devices close BLE
+  and register with the current HaLow gateway's LwM2M server.
+- Legacy ESP32 `EZ_`, nRF54L15 `NRF_`, and `PROV_` advertisements remain
+  discoverable. Their provisioning capabilities select the appropriate
+  compatibility or standard Wi-Fi transport.
 
 Offline provisioning never calls Appwrite or requests MQTT credentials. It
 assigns a local device UUID, sends the profile directly to the device, and saves
 the device in local SQLite. Only cloud-enabled profiles create cloud Devices
 and request their credentials.
 
-After provisioning, the active profile reconnects to its selected BLE device
-automatically. The realtime SDK flow first reads device status and initializes
+With legacy mesh companion firmware, the active profile reconnects to its
+selected BLE device automatically after provisioning. The realtime SDK flow first reads device status and initializes
 HaLow when required. Mesh packets then pass transparently between the phone,
 BLE device, and HaLow network.
 
@@ -274,3 +281,6 @@ Every completed capture is saved privately under the app document directory,
 partitioned by camera endpoint. The gallery reloads these JPEGs after restarting
 the app. Tap a thumbnail to view; long press to reveal Delete photo. Deleting
 from this gallery does not delete copies already exported to Photos.
+
+Device source and build instructions are maintained in the independent
+[device-firmware repository](https://github.com/edgez-ai/device-firmware).
