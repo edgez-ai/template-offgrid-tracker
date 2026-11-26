@@ -1,5 +1,14 @@
 package __PACKAGE__
 
+import android.content.pm.ActivityInfo
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import com.facebook.react.uimanager.UIManagerHelper
+import android.content.ContentValues
+import android.os.Build
+import android.provider.MediaStore
+import android.util.Base64
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -36,6 +45,80 @@ class WifiGatewayModule(private val context: ReactApplicationContext) : ReactCon
             }
         }
         throw IllegalStateException("Connect to Wi-Fi to use its local LwM2M gateway.")
+    }
+
+    private var cameraOrientation: Int? = null
+    private val cameraViews = mutableMapOf<View, Int>()
+
+    @ReactMethod
+    fun setCameraFullscreen(enabled: Boolean, reactTag: Double) {
+        val activity = context.currentActivity ?: return
+        activity.runOnUiThread {
+            if (enabled) {
+                if (cameraOrientation == null) cameraOrientation = activity.requestedOrientation
+                activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                val tag = reactTag.toInt()
+                val modalView = if (tag > 0) UIManagerHelper.getUIManagerForReactTag(context, tag)?.resolveView(tag)?.rootView else null
+                for (view in listOfNotNull(activity.window.decorView, modalView)) {
+                    if (!cameraViews.containsKey(view)) cameraViews[view] = view.systemUiVisibility
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        view.windowInsetsController?.apply {
+                            systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                            hide(WindowInsets.Type.systemBars())
+                        }
+                    } else {
+                        view.systemUiVisibility = View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_FULLSCREEN or
+                            View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    }
+                }
+            } else {
+                for ((view, flags) in cameraViews) {
+                    if (Build.VERSION.SDK_INT >= 30) view.windowInsetsController?.show(WindowInsets.Type.systemBars())
+                    view.systemUiVisibility = flags
+                }
+                cameraViews.clear()
+                cameraOrientation?.let { activity.requestedOrientation = it }
+                cameraOrientation = null
+            }
+        }
+    }
+
+    @ReactMethod
+    fun savePicture(dataUri: String, name: String, promise: Promise) {
+        Thread {
+            var uri: Uri? = null
+            val resolver = context.contentResolver
+            try {
+                require(name.matches(Regex("[A-Za-z0-9_-]+\\.jpg"))) { "Invalid photo name." }
+                val prefix = "data:image/jpeg;base64,"
+                require(dataUri.startsWith(prefix) && dataUri.length <= 350000) { "Invalid JPEG data." }
+                val bytes = Base64.decode(dataUri.substring(prefix.length), Base64.DEFAULT)
+                require(bytes.size >= 4 && bytes.size <= 262144 && bytes[0] == 0xff.toByte() &&
+                    bytes[1] == 0xd8.toByte() && bytes[bytes.size - 2] == 0xff.toByte() &&
+                    bytes.last() == 0xd9.toByte()) { "Incomplete JPEG." }
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                    put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Offgrid Tracker")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                    }
+                }
+                val target = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("Could not create the photo.")
+                uri = target
+                val stream = resolver.openOutputStream(target) ?: throw IllegalStateException("Could not write the photo.")
+                stream.use { it.write(bytes) }
+                if (Build.VERSION.SDK_INT >= 29) {
+                    val published = resolver.update(target, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null)
+                    check(published == 1) { "Could not publish the photo." }
+                }
+                promise.resolve(target.toString())
+            } catch (error: Exception) {
+                uri?.let { try { resolver.delete(it, null, null) } catch (_: Exception) {} }
+                promise.reject("SAVE_PHOTO", error.message, error)
+            }
+        }.start()
     }
 
     @ReactMethod

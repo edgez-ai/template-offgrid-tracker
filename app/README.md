@@ -244,3 +244,33 @@ unknown device identities, and reload the local list. Discovery also refreshes
 every 15 seconds while the app is active, on returning to the foreground, and
 when selecting Devices. Overlapping refreshes share their pending operation.
 Cloud profiles refresh their normal device source without contacting LwM2M.
+
+Offline Camera provides an on-demand Take picture action for each registered
+camera endpoint. It executes `/5001/0/0` (30-second REST timeout), then reads
+the cached JPEG from `/5001/0/1` using blockwise transfer (300-second REST
+timeout). One five-minute deadline bounds the whole operation. The UI shows
+capture/download phases, allows cancellation, validates the base64/JPEG, and
+displays the last successful picture while a new one is requested. Leaving
+the page cancels the pending HTTP operation. No cloud connection is used.
+
+The device must run camera hardware mode 1 with factory model `EZ-DEV54-CAM`.
+Existing profile devices are classified by their saved local type; changing
+hardware for a test also requires changing that same local device to camera.
+The endpoint remains its serial, and captures never create another device row.
+
+The Camera screen reads `/5001/0/3` on opening and with **Refresh resolution**.
+Selecting a supported size writes the same resource and reads it back; the next
+capture uses that size. **Save to Photos** saves the displayed JPEG to Android
+MediaStore under `Pictures/Offgrid Tracker` (no photo-library read permission).
+Android 9 and earlier request storage permission when saving. Rebuild the native
+Android app after updating the Wi-Fi gateway module to enable saving.
+
+Tap the picture preview for an immersive landscape viewer with no buttons.
+Pinch to zoom (100%–500%), drag to pan, and tap again to close. Android Back also
+closes the viewer; closing restores the previous orientation and system bars.
+Resolution options use a dropdown.
+
+Every completed capture is saved privately under the app document directory,
+partitioned by camera endpoint. The gallery reloads these JPEGs after restarting
+the app. Tap a thumbnail to view; long press to reveal Delete photo. Deleting
+from this gallery does not delete copies already exported to Photos.

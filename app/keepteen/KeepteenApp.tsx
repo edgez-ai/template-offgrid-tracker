@@ -4,6 +4,7 @@ import { ActivityIndicator, BackHandler, Pressable, StyleSheet, Text, View } fro
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { gatewayProductForModel } from '../gateway-lwm2m';
 import { useGatewayDevices } from './useGatewayDevices';
+import { CameraProduct } from "./CameraProduct";
 import { ChatProduct } from "./ChatProduct";
 import { CollarProduct } from "./CollarProduct";
 import { DevicesHome } from "./DevicesHome";
@@ -75,11 +76,7 @@ export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; ac
     return <CollarProduct runtime={runtime} actions={actions} onClose={() => setRoute({ kind: "root" })} />;
   }
   if (route.kind === "product" && route.product === "camera") {
-    return <Screen><NavHeader title="Camera" onBack={() => setRoute({ kind: 'root' })} /><PageScroll><Card>
-      {cameras.map((client, index) => <ListRow key={client.endpoint} icon="camera-outline" title={client.name || client.serial || client.endpoint}
-        subtitle={client.model} last={index === cameras.length - 1} />)}
-      {!cameras.length ? <Notice text="No camera connected" /> : null}
-    </Card></PageScroll></Screen>;
+    return <CameraProduct cameras={cameras} onClose={() => setRoute({ kind: 'root' })} />;
   }
   if (route.kind === "product" && route.product === "chat") {
     return <ChatProduct runtime={runtime} actions={actions} onClose={() => setRoute({ kind: "root" })} />;
