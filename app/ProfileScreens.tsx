@@ -467,7 +467,7 @@ export function ProfileForm({
             ))}
           </ScrollView>
         ) : null}
-        <Text style={styles.fieldLabel}>MESH ID</Text>
+        <Text style={styles.fieldLabel}>SSID/MESH ID</Text>
         <TextInput
           style={styles.profileInput}
           value={draft.meshId}
@@ -475,7 +475,7 @@ export function ProfileForm({
             setMeshIdEdited(true);
             set("meshId", value);
           }}
-          placeholder="Mesh ID"
+          placeholder="SSID/MESH ID"
           placeholderTextColor="#718a83"
           maxLength={32}
           autoCapitalize="none"

@@ -1,10 +1,12 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { edgezNodeId } from "@edgez/react-native-sdk";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { MeshMessages } from "../MeshMessages";
 import { BleDebugModal } from "../SettingsScreens";
 import { updateCloudDevice } from "../cloud-auth";
+import { refreshGatewayLocation } from '../gateway-location';
+import { updateProfileDeviceLocation } from '../profile-store';
 import { coordinatesFromLocation } from "../mesh-utils";
 import { CollarMap } from "./CollarMap";
 import type { CollarMapMarker } from "./CollarMap";
@@ -42,6 +44,9 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
   const [fences, setFences] = useState<Fence[]>([]);
   const [acknowledged, setAcknowledged] = useState<Set<string>>(new Set());
   const [legacyInbox, setLegacyInbox] = useState<{ peer: string | null; tab: "sensors" | "discovered" } | null>(null);
+  const [mapDeviceId, setMapDeviceId] = useState<string | null>(null);
+  const [mapLocationError, setMapLocationError] = useState('');
+  const [updatedLocations, setUpdatedLocations] = useState<Record<string, { latitude: number; longitude: number }>>({});
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -58,9 +63,11 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
     () => runtime.onlineMode ? groupSamples(runtime.cloudSensorSamples) : meshState?.sensorSamples ?? new Map(),
     [meshState?.sensorSamples, runtime.cloudSensorSamples, runtime.onlineMode],
   );
-  const nodes = useMemo(() => buildCollarNodes(runtime.devices, meshState, samples, now), [meshState, now, runtime.devices, samples]);
+  const nodes = useMemo(() => buildCollarNodes(runtime.devices, meshState, samples, now, runtime.gatewayRegisteredSerials)
+    .map((node) => updatedLocations[node.device.id] ? { ...node, ...updatedLocations[node.device.id] } : node),
+    [meshState, now, runtime.devices, samples, runtime.gatewayRegisteredSerials, updatedLocations]);
   const gateways = runtime.devices.filter(isGateway);
-  const connection = connectionSummary(runtime);
+  const connection = connectionSummary(runtime, true);
   const waiting = runtime.provisioningRequests.filter((request) => request.status !== "accepted").length;
   const { reminders, unevaluated } = useMemo(() => areaReminders(fences, nodes, now), [fences, nodes, now]);
   const openReminders = reminders.filter((item) => !acknowledged.has(item.key));
@@ -84,7 +91,28 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
     await saveNodeAliases(runtime.profile.id, next);
   };
 
-  const markers: CollarMapMarker[] = nodes
+  const showOnMap = async (node: CollarNode, signal: AbortSignal) => {
+    setMapLocationError('');
+    try {
+      if (!runtime.onlineMode) {
+        const location = await refreshGatewayLocation(node.device.serial, signal);
+        if (signal.aborted) return;
+        setUpdatedLocations((current) => ({ ...current, [node.device.id]: location }));
+        setMapDeviceId(node.device.id); setTab('map'); setView({ kind: 'workbench' });
+        // The fresh fix is already in the map state; persistence and list reload
+        // must not hold the user on the acquisition screen.
+        await updateProfileDeviceLocation(runtime.profile.id, node.device.id, location.latitude, location.longitude);
+        await actions.devicesChanged();
+      }
+    } catch (error) {
+      if (!signal.aborted) setMapLocationError(error instanceof Error ? error.message : t('locationUpdateFailed'));
+    } finally {
+      if (!signal.aborted) { setMapDeviceId(node.device.id); setTab('map'); setView({ kind: 'workbench' }); }
+    }
+  };
+
+  const markers: CollarMapMarker[] = [...nodes]
+    .sort((a, b) => Number(b.device.id === mapDeviceId) - Number(a.device.id === mapDeviceId))
     .filter((node) => node.latitude !== null && node.longitude !== null)
     .map((node) => ({ id: node.device.id, label: displayName(node, aliases), latitude: node.latitude!, longitude: node.longitude!, marker: node.device.marker }));
   const fallbackCenter = coordinatesFromLocation(runtime.profile.location);
@@ -124,7 +152,7 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
         onSaveAlias={persistAlias}
         onSharedRenamed={actions.devicesChanged}
         onOpenHistory={(serial) => setLegacyInbox({ peer: serial, tab: "sensors" })}
-        onShowOnMap={() => { setTab("map"); setView({ kind: "workbench" }); }}
+        onShowOnMap={(signal) => node ? showOnMap(node, signal) : Promise.resolve()}
         onRemove={(device) => { actions.removeDevice(device); setView({ kind: "workbench" }); }}
       />
       {legacy}
@@ -168,13 +196,6 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
           </Pressable>
         }
       />
-      <Pressable style={[styles.summary, { backgroundColor: colors.card }]} onPress={() => setView({ kind: "connection" })} accessibilityRole="button">
-        <StatusDot tone={connection.tone} />
-        <Text style={[styles.summaryText, { color: colors.text }]} numberOfLines={1}>
-          {t(connection.label)}{gateways.length ? ` · ${t("gatewayCount", { count: gateways.length })}` : ""} · {t("collarCount", { count: nodes.length })}
-        </Text>
-        <Ionicons name="chevron-forward" size={16} color={colors.secondary} />
-      </Pressable>
       <View style={styles.tabs}>
         <Segmented<Tab>
           options={[{ key: "nodes", label: t("tabNodes") }, { key: "map", label: t("tabMap") }, { key: "fences", label: t("tabFences") }]}
@@ -191,7 +212,8 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
             fallbackCenter={fallbackCenter}
             onSelect={(id) => setView({ kind: "node", id })}
           />
-          {!markers.length ? <View style={styles.mapNotice}><Notice text={t("mapNoLocatedNodes")} /></View> : null}
+          {mapLocationError ? <View style={styles.mapNotice}><Notice tone="warning" text={mapLocationError} /></View> : null}
+          {!markers.length && !mapLocationError ? <View style={styles.mapNotice}><Notice text={t("mapNoLocatedNodes")} /></View> : null}
         </View>
       ) : null}
 
@@ -246,7 +268,7 @@ export function CollarProduct({ runtime, actions, onClose }: { runtime: Keepteen
             />
           )}
           {visible.length > limit ? <Button kind="secondary" label={t("loadMore")} onPress={() => setLimit((value) => value + PAGE_SIZE)} /> : null}
-          {runtime.meshLink === null && !runtime.onlineMode && nodes.length ? <Notice text={t("cachedNodesNotice")} /> : null}
+          {runtime.meshLink === null && !runtime.onlineMode && !nodes.some((node) => node.online) && nodes.length ? <Notice text={t("cachedNodesNotice")} /> : null}
         </PageScroll>
       ) : null}
 
@@ -300,13 +322,13 @@ function NodeRow({ node, name, last, onPress }: { node: CollarNode; name: string
   const { colors } = useTheme();
   const { t, formatAgo } = useI18n();
   const parts = [
-    node.lastReportMs ? formatAgo(node.lastReportMs) : t("freshNever"),
+    node.online ? t("deviceOnline") : node.lastReportMs ? formatAgo(node.lastReportMs) : t("freshNever"),
     node.batteryVolts !== null ? `${node.batteryVolts.toFixed(2)} V` : null,
     node.latitude !== null ? t("hasLocation") : t("noLocation"),
   ].filter(Boolean).join(" · ");
   return (
     <Pressable style={[styles.nodeRow, !last && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.separator }]} onPress={onPress} accessibilityRole="button" accessibilityLabel={name}>
-      <StatusDot tone={freshnessTone[node.freshness]} />
+      <StatusDot tone={node.online ? "online" : freshnessTone[node.freshness]} />
       <View style={styles.nodeBody}>
         <Text style={[styles.nodeName, { color: colors.text }]} numberOfLines={2}>{name}</Text>
         <Text style={[styles.nodeMeta, { color: colors.secondary }]} numberOfLines={1}>{parts}</Text>
@@ -324,11 +346,36 @@ function NodeDetail({ node, runtime, aliases, onBack, onSaveAlias, onSharedRenam
   onSaveAlias: (deviceId: string, alias: string) => Promise<void>;
   onSharedRenamed: () => Promise<void>;
   onOpenHistory: (serial: string) => void;
-  onShowOnMap: () => void;
+  onShowOnMap: (signal: AbortSignal) => Promise<void>;
   onRemove: (device: CollarNode["device"]) => void;
 }) {
   const { colors } = useTheme();
   const { t, formatAgo, formatDateTime } = useI18n();
+  const [locating, setLocating] = useState(false);
+  const [remaining, setRemaining] = useState(300);
+  const locationStarted = useRef(0);
+  useEffect(() => {
+    if (!locating) return;
+    const timer = setInterval(() => setRemaining(Math.max(0, 300 - Math.floor((Date.now() - locationStarted.current) / 1000))), 1000);
+    return () => clearInterval(timer);
+  }, [locating]);
+  const locationRequest = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; locationRequest.current?.abort(); };
+  }, []);
+  const locateAndShow = async () => {
+    if (locating) { locationRequest.current?.abort(); return; }
+    const controller = new AbortController();
+    locationStarted.current = Date.now(); setRemaining(300);
+    locationRequest.current = controller; setLocating(true);
+    try { await onShowOnMap(controller.signal); }
+    finally {
+      if (locationRequest.current === controller) locationRequest.current = null;
+      if (mounted.current) setLocating(false);
+    }
+  };
   const [editing, setEditing] = useState<"alias" | "shared" | null>(null);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
@@ -374,10 +421,10 @@ function NodeDetail({ node, runtime, aliases, onBack, onSaveAlias, onSharedRenam
       <NavHeader title={name} onBack={onBack} />
       <PageScroll>
         <Card style={styles.hero}>
-          <StatusDot tone={freshnessTone[node.freshness]} />
+          <StatusDot tone={node.online ? "online" : freshnessTone[node.freshness]} />
           <View style={styles.flex}>
             <Text style={[styles.heroName, { color: colors.text }]}>{name}</Text>
-            <Text style={[styles.nodeMeta, { color: colors.secondary }]}>{t(freshnessLabel[node.freshness])}</Text>
+            <Text style={[styles.nodeMeta, { color: colors.secondary }]}>{node.online ? t("deviceOnline") : t(freshnessLabel[node.freshness])}</Text>
           </View>
         </Card>
 
@@ -424,7 +471,7 @@ function NodeDetail({ node, runtime, aliases, onBack, onSaveAlias, onSharedRenam
             last
           />
         </Card>
-        {node.latitude !== null ? <Button kind="secondary" icon="map-outline" label={t("showOnMap")} onPress={onShowOnMap} /> : null}
+        {!runtime.onlineMode || node.latitude !== null ? <Button kind="secondary" icon="map-outline" label={locating ? `${t("updatingLocation")} ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')} · ${t("cancel")}` : t("showOnMap")} onPress={() => void locateAndShow()} /> : null}
         <Button kind="secondary" icon="stats-chart-outline" label={t("dataHistory")} onPress={() => onOpenHistory(serial)} />
 
         <Text style={[styles.groupLabel, { color: colors.secondary }]}>{t("details")}</Text>
@@ -482,8 +529,6 @@ function ConnectionPage({ runtime, gatewayCount, onBack, onAddDevice }: { runtim
 const styles = StyleSheet.create({
   flex: { flex: 1 },
   headerIcon: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
-  summary: { marginHorizontal: 16, borderRadius: 14, minHeight: 44, paddingHorizontal: 14, flexDirection: "row", alignItems: "center", gap: 8 },
-  summaryText: { flex: 1, fontSize: 14 },
   tabs: { paddingHorizontal: 16, paddingTop: 12 },
   mapPage: { flex: 1, padding: 16 },
   mapNotice: { position: "absolute", left: 28, right: 28, bottom: 28 },

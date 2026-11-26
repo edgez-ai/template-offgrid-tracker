@@ -1,5 +1,5 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { EdgezProvisioningManager } from "@edgez/react-native-sdk";
+import { ProvisioningManager } from "./provisioning-manager";
 import type { EdgezProvisioningDevice, EdgezProvisioningInput } from "@edgez/react-native-sdk";
 import * as Location from "expo-location";
 import { StatusBar } from "expo-status-bar";
@@ -7,8 +7,7 @@ import React, { useState } from "react";
 import { Alert, Modal, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { styles } from "./app-styles";
-import { prepareDeviceCredential } from "./cloud-auth";
-import type { PreparedDeviceCredential } from "./cloud-auth";
+import { prepareProvisioningIdentity, type ProvisioningIdentity } from "./provisioning-identity";
 import { coordinatesFromLocation } from "./mesh-utils";
 import { ProfileLocationPicker } from "./ProfileScreens";
 import { saveProfileDevice } from "./profile-store";
@@ -19,7 +18,7 @@ import type { BeaconIconColor } from "./beacon-options";
 type DeviceLocationChoice = "none" | "current" | "map" | "gps";
 
 const provisioningPop = "abcd1234";
-const provisioningManager = new EdgezProvisioningManager();
+const provisioningManager = new ProvisioningManager();
 
 function provisioningDeviceLabel(device: EdgezProvisioningDevice) {
   if (device.kind === "nrf54") return "nRF54";
@@ -80,7 +79,7 @@ export function ProvisioningFlow({
   const [selectedDevice, setSelectedDevice] = useState<EdgezProvisioningDevice | null>(null);
   const [busy, setBusy] = useState(false);
   const [connected, setConnected] = useState(false);
-  const [preparedCredential, setPreparedCredential] = useState<PreparedDeviceCredential | null>(null);
+  const [preparedCredential, setPreparedCredential] = useState<ProvisioningIdentity | null>(null);
   const [status, setStatus] = useState("Start by scanning for a device in provisioning mode.");
   const [error, setError] = useState("");
   const [name, setName] = useState("");
@@ -185,17 +184,9 @@ export function ProvisioningFlow({
       : `Connecting to ${selectedDevice.name} over Bluetooth…`);
     try {
       let credential = preparedCredential;
-      if (selectedDevice.kind === "h7608" && !credential) {
+      if (profile.connectToCloud && selectedDevice.kind === "h7608" && !credential) {
         setStatus("Creating the cloud device and MQTT credential…");
-        credential = await prepareDeviceCredential(
-          profile.id,
-          selectedDevice.serial,
-          name.trim() || selectedDevice.serial,
-          selectedDevice.firmwareTarget,
-          true,
-          "gateway",
-          deviceMarkerColor,
-        );
+        credential = await prepareProvisioningIdentity(profile, selectedDevice, name, deviceMarkerColor);
         setPreparedCredential(credential);
       }
       setStatus(selectedDevice.transport === "softap"
@@ -230,15 +221,7 @@ export function ProvisioningFlow({
     setError("");
     setStatus("Saving the local HaLow configuration…");
     try {
-      const credential = preparedCredential ?? await prepareDeviceCredential(
-        profile.id,
-        selectedDevice.serial,
-        name.trim() || selectedDevice.serial,
-        selectedDevice.firmwareTarget,
-        selectedDevice.kind === "h7608",
-        selectedDevice.kind === "h7608" ? "gateway" : "sensor",
-        deviceMarkerColor,
-      );
+      const credential = await prepareProvisioningIdentity(profile, selectedDevice, name, deviceMarkerColor, preparedCredential);
       setPreparedCredential(credential);
       const deviceId = credential.deviceId;
       const localInput = {
@@ -346,7 +329,7 @@ export function ProvisioningFlow({
                 </View>
               </View>
               <Text style={styles.settingsMuted}>Serial {selectedDevice.serial}</Text>
-              <Text style={styles.settingsMuted}>{selectedDevice.kind === "nrf54" ? "Device GPS location supported" : `Firmware target ${selectedDevice.firmwareTarget}`}</Text>
+              <Text style={styles.settingsMuted}>{selectedDevice.supportsDeviceGps ? "Device GPS location supported" : `Firmware target ${selectedDevice.firmwareTarget}`}</Text>
             </View>
             <Text style={styles.provisioningFieldLabel}>NAME</Text>
             <TextInput style={styles.provisioningInput} value={name} onChangeText={(value) => { setName(value); setPreparedCredential(null); }} placeholder="Device name" placeholderTextColor="#829693" maxLength={selectedDevice.deviceNameMaxLength} />
@@ -407,10 +390,10 @@ export function ProvisioningFlow({
               <Text style={styles.currentProfileLabel}>LOCAL PROFILE</Text>
               <Text style={styles.currentProfileName}>{profile.name}</Text>
               <Text style={styles.settingsMuted}>{profile.country} · {profile.halowChannel === 0 ? "Auto channel" : `Channel ${profile.halowChannel}`}</Text>
-              <Text style={styles.settingsMuted}>Mesh ID: {profile.meshId}</Text>
+              <Text style={styles.settingsMuted}>SSID/MESH ID: {profile.meshId}</Text>
               <Text style={styles.settingsMuted}>Device: {selectedDevice.name}</Text>
             </View>
-            <Text style={styles.provisioningHelp}>The app will send the active profile's HaLow mesh settings directly to the device. Upstream network setup is skipped.</Text>
+            <Text style={styles.provisioningHelp}>The app will send the active profile's local network settings directly to the device.</Text>
             <Pressable style={[styles.provisioningPrimary, busy && styles.disabledButton]} onPress={() => void provision()} disabled={busy}>
               <Text style={styles.provisioningPrimaryText}>{busy ? "PROVISIONING…" : "PROVISION DEVICE"}</Text>
             </Pressable>

@@ -76,10 +76,19 @@ last-message time.
 The add-device flow discovers supported hardware and provisions only the active
 profile's local HaLow settings; there is no upstream Wi-Fi selection.
 
-- ESP32 advertisements use `EZ_<12-digit HaLow MAC>` and Espressif secure BLE
-  provisioning with the compatibility endpoint `mqtt-config`.
-- nRF54 advertisements use `NRF_<12-digit HaLow MAC>` and the dedicated EdgeZ
-  chunked GATT provisioning protocol.
+- ESP32 advertisements use `EZ_<12-digit HaLow MAC>`; nRF54L15 advertisements
+  use `NRF_<12-digit HaLow MAC>`. Both use the same ESP-IDF Security 1 BLE
+  provisioning flow, proof of possession (`abcd1234` by default), and the
+  compatibility endpoint `mqtt-config`. nRF54L15 retains its device GPS options.
+- BLE discovery also accepts `PROV_` names, including nRF54L15 cameras named
+  `PROV_CAM<6-digit identity hash>`. These cameras use a factory-derived PoP
+  and standard `prov-config` Wi-Fi provisioning. The app sends the profile's
+  SSID/MESH ID and network password through that standard endpoint.
+
+Offline provisioning never calls Appwrite or requests MQTT credentials. It
+assigns a local device UUID, sends the profile directly to the device, and saves
+the device in local SQLite. Only cloud-enabled profiles create cloud Devices
+and request their credentials.
 
 After provisioning, the active profile reconnects to its selected BLE device
 automatically. The realtime SDK flow first reads device status and initializes
@@ -171,3 +180,67 @@ reconciles a profile-scoped Team and profile row, then reports `ONLINE` after
 the Appwrite data refresh succeeds. The cached session marker preserves login
 state while failed cloud requests keep the visible status `OFFLINE`.
 Authenticated users can log out from the active profile card in Settings.
+
+### Local gateway for offline profiles
+
+With Connect to cloud off, the existing product screens use the
+LwM2M REST API at `http://{current Wi-Fi gateway}:8088/api/clients`
+without Appwrite authentication. Android reads the current Wi-Fi default route
+and lets requests follow Android routing and VPN policy. There is no saved or hardcoded
+gateway destination, and Wi-Fi changes trigger reconnection. The app reads model (`/3/0/1`),
+serial (`/3/0/2`) and provisioned name (`/31029/0/7`). Gateway results stay
+in memory; they are not copied into Appwrite or the local BLE device database.
+Identity reads refresh with gateway discovery.
+
+Cloud-enabled profiles do not mount or poll this local gateway view. Android HTTP exceptions remain limited to the local router addresses
+`192.168.4.1`, `192.168.12.1` and `192.168.1.1`, plus localhost. These are
+security exceptions, not selected gateway destinations; other local router
+addresses require an explicit native network-security exception. No global
+cleartext-HTTP permission is enabled.
+
+New nRF54L15 factory identities use 12 uppercase hex digits, `EZ_{serial}` BLE
+names, and the serial itself as their LwM2M endpoint. After connecting, the
+`ez_wifi_prov` capability selects standard SSID/password provisioning even
+though the BLE name shares the ESP32 prefix. Legacy `PROV_CAM` discovery stays
+available; no existing identity or device database migration is performed.
+
+Factory models `EZ-DEV54-GPS` and `EZ-DEV54-CAM` map local LwM2M clients to
+the Collar and Camera product cards respectively. The app reads model from
+`/3/0/1` and serial from `/3/0/2`; unknown models are not assigned to a product.
+The model label does not change the device hardware selection.
+
+The original home cards, Collar layouts, artwork and styling are preserved.
+For capable firmware, provisioning sends the entered name to the encrypted
+`mqtt-config` endpoint using its existing `deviceName` JSON field and requires persistent confirmation before sending Wi-Fi credentials.
+
+Offline discovery matches each LwM2M endpoint (serial) against the active
+profile's local device records, ignoring hex letter case. Existing records
+retain their ID, name and settings, and section, and the app skips both model and name resource reads.
+Unknown GPS/Camera clients fetch their model and name and are automatically
+inserted into the local list. Insert-only discovery never overwrites a device
+created or renamed concurrently. Failed identity reads are retried on later
+discovery; discovery never creates cloud records or changes the UI layout.
+
+Offline Collar “Show on map” sets GPS acquisition timeout `/31028/0/1` to 300
+seconds, executes `/31028/0/0`, polls state `/31028/0/2` and reads the new fix
+from `/6/0/0` and `/6/0/1`. A single five-minute deadline covers the whole
+operation. The app saves the coordinates locally, then opens the map focused
+on that collar. Failure/timeout opens the map using the last known location
+with an error notice. Leaving the device screen cancels the pending request.
+
+GPS write/execute calls include `?timeout=300`. State and coordinate reads use
+explicit `?timeout=5` and retry transient failures within the same five-minute
+acquisition deadline, so one delayed read cannot block polling for five minutes. JavaScript and Android HTTP waits
+allow the REST timeout plus a small transport margin, while the overall GPS
+flow keeps its five-minute deadline. Gateway read/write timeout limits must
+support 300 seconds; older server packages may cap those requests at 30.
+
+If GPS state is already acquiring, Show on map waits for that acquisition
+instead of writing its timeout or executing again; firmware returns 5.03 for
+those operations while GPS is busy.
+
+The existing Show on map button displays its remaining wait and can be tapped
+again to cancel waiting; this does not restart or change the device acquisition.
+
+A device fix no more than five seconds old is read directly from LwM2M
+without restarting GPS power. Older fixes require a fresh acquisition.

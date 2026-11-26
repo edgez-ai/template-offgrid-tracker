@@ -37,6 +37,7 @@ module.exports = {
       "expo-sqlite",
       "@edgez/react-native-sdk",
       "./plugins/withOrganicMaps",
+      "./plugins/withWifiGateway",
       ["./plugins/withEdgezBundleUpdates", { runtimeVersion: bundleRuntimeVersion }],
       "./plugins/withUnsignedRelease",
     ],

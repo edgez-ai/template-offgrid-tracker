@@ -1,0 +1,107 @@
+package __PACKAGE__
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.Uri
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import java.net.HttpURLConnection
+import java.net.Inet4Address
+import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
+
+class WifiGatewayModule(private val context: ReactApplicationContext) : ReactContextBaseJavaModule(context) {
+    override fun getName() = "WifiGateway"
+    private data class Gateway(val network: Network, val address: String)
+    private val connections = ConcurrentHashMap<String, HttpURLConnection>()
+    private val cancelled = ConcurrentHashMap.newKeySet<String>()
+
+    private fun wifiGateway(): Gateway {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val networks = manager.allNetworks.sortedBy { if (it == manager.activeNetwork) 0 else 1 }
+        for (network in networks) {
+            val capabilities = manager.getNetworkCapabilities(network) ?: continue
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            val routes = manager.getLinkProperties(network)?.routes ?: continue
+            for (route in routes) {
+                val gateway = route.gateway
+                if (route.isDefaultRoute && gateway is Inet4Address && !gateway.isAnyLocalAddress) {
+                    return Gateway(network, gateway.hostAddress ?: continue)
+                }
+            }
+        }
+        throw IllegalStateException("Connect to Wi-Fi to use its local LwM2M gateway.")
+    }
+
+    @ReactMethod
+    fun getGateway(promise: Promise) {
+        try { promise.resolve("http://${wifiGateway().address}:8088") }
+        catch (error: Exception) { promise.reject("WIFI_GATEWAY", error.message, error) }
+    }
+
+    @ReactMethod
+    fun request(origin: String, path: String, requestId: String, promise: Promise) {
+        performRequest(origin, path, "GET", "", requestId, promise)
+    }
+
+    @ReactMethod
+    fun requestOperation(origin: String, path: String, method: String, body: String, requestId: String, promise: Promise) {
+        if (method != "PUT" && method != "POST") {
+            promise.reject("GATEWAY_REQUEST", "Invalid LwM2M operation."); return
+        }
+        performRequest(origin, path, method, body, requestId, promise)
+    }
+
+    private fun performRequest(origin: String, path: String, method: String, payload: String, requestId: String, promise: Promise) {
+        Thread {
+            var connection: HttpURLConnection? = null
+            try {
+                val gateway = wifiGateway()
+                val expectedOrigin = "http://${gateway.address}:8088"
+                if (origin != expectedOrigin) throw IllegalStateException("Wi-Fi changed. Reconnect to the gateway.")
+                if (!(path == "/clients" || path.startsWith("/clients/")) || path.contains('\r') || path.contains('\n')) {
+                    throw IllegalArgumentException("Invalid LwM2M request path.")
+                }
+                // Follow Android routing and VPN policy; never force a physical-network binding.
+                connection = URL("$expectedOrigin/api$path").openConnection() as HttpURLConnection
+                connection.connectTimeout = 8000
+                val timeoutSeconds = Uri.parse(path).getQueryParameter("timeout")?.toIntOrNull()?.coerceIn(1, 300) ?: 5
+                connection.readTimeout = maxOf(8000, timeoutSeconds * 1000 + 3000)
+                connection.instanceFollowRedirects = false
+                connection.requestMethod = method
+                connection.setRequestProperty("Accept", "application/json")
+                connections[requestId] = connection
+                if (cancelled.contains(requestId)) throw IllegalStateException("Request cancelled")
+                if (method != "GET") {
+                    connection.doOutput = true
+                    connection.setRequestProperty("Content-Type", "text/plain; charset=utf-8")
+                    connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+                }
+                val status = connection.responseCode
+                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+                promise.resolve(Arguments.createMap().apply {
+                    putInt("status", status)
+                    putString("body", body)
+                })
+            } catch (error: Exception) {
+                promise.reject("GATEWAY_REQUEST", error.message, error)
+            } finally {
+                connections.remove(requestId)
+                cancelled.remove(requestId)
+                connection?.disconnect()
+            }
+        }.start()
+    }
+
+    @ReactMethod
+    fun cancelRequest(requestId: String) {
+        cancelled.add(requestId)
+        connections[requestId]?.disconnect()
+    }
+}

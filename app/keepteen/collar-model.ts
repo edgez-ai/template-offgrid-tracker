@@ -22,7 +22,7 @@ export function isPerson(device: StoredDevice) {
 
 /** Collar nodes are the non-gateway, non-person mesh devices of the profile. */
 export function collarDevices(devices: StoredDevice[]) {
-  return devices.filter((device) => !isGateway(device) && !isPerson(device));
+  return devices.filter((device) => !isGateway(device) && !isPerson(device) && device.deviceType.trim().toLowerCase() !== "camera");
 }
 
 export type Freshness = "recent" | "stale" | "never";
@@ -35,6 +35,7 @@ export type Freshness = "recent" | "stale" | "never";
 export const RECENT_REPORT_WINDOW_MS = 30 * 60 * 1000;
 
 export type CollarNode = {
+  online: boolean;
   device: StoredDevice;
   nodeNum: bigint | null;
   lastReportMs: number;
@@ -55,7 +56,9 @@ export function buildCollarNodes(
   meshState: EdgezMeshState | null,
   sensorSamples: ReadonlyMap<bigint, ReadonlyArray<EdgezSensorSample>>,
   now = Date.now(),
+  registeredSerials: readonly string[] = [],
 ): CollarNode[] {
+  const registered = new Set(registeredSerials.map((serial) => serial.trim().toUpperCase()));
   return collarDevices(devices).map((device) => {
     const nodeNum = nodeNumFromSerial(device.meshMacAddress || device.serial);
     const live = nodeNum === null ? undefined : meshState?.nodes.get(nodeNum);
@@ -103,6 +106,7 @@ export function buildCollarNodes(
     const locationAtMs = sampleLatitude !== null ? sampleLocationAt : liveLocation ? live!.lastSeenMs : latitude !== null ? storedSeen || 0 : 0;
 
     return {
+      online: registered.has(device.serial.trim().toUpperCase()),
       device,
       nodeNum,
       lastReportMs,

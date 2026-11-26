@@ -1018,6 +1018,37 @@ export async function deleteProfileDevice(profileId: string, deviceId: string): 
   await db.runAsync("DELETE FROM devices WHERE profile_id = ? AND id = ?", profileId, deviceId);
 }
 
+/** Discovery only inserts; an existing local name and settings always win. */
+export async function addDiscoveredProfileDevice(details: DeviceDetails): Promise<StoredDevice> {
+  const db = await database();
+  const now = new Date().toISOString();
+  await db.runAsync(
+    `INSERT INTO devices
+      (id, profile_id, serial, name, kind, firmware_target, location_source, latitude, longitude,
+       device_type, marker, icon_style, user_uuid, last_seen_at, mesh_mac_address, user_public_key, created_at, updated_at)
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE NOT EXISTS (SELECT 1 FROM devices WHERE profile_id = ? AND UPPER(TRIM(serial)) = UPPER(TRIM(?)))`,
+    localUuid(), details.profileId, details.serial, details.name, details.kind, details.firmwareTarget,
+    details.locationSource, details.latitude, details.longitude, details.deviceType, details.marker,
+    details.iconStyle, details.userUuid, details.lastSeenAt, details.meshMacAddress, details.userPublicKey,
+    now, now, details.profileId, details.serial,
+  );
+  const row = await db.getFirstAsync<DeviceRow>(
+    "SELECT * FROM devices WHERE profile_id = ? AND UPPER(TRIM(serial)) = UPPER(TRIM(?))",
+    details.profileId, details.serial,
+  );
+  if (!row) throw new Error("The discovered device could not be saved.");
+  return deviceFromRow(row);
+}
+
+export async function updateProfileDeviceLocation(profileId: string, deviceId: string, latitude: number, longitude: number): Promise<void> {
+  const db = await database();
+  await db.runAsync(
+    "UPDATE devices SET latitude = ?, longitude = ?, location_source = 'gps', updated_at = ? WHERE profile_id = ? AND id = ?",
+    latitude, longitude, new Date().toISOString(), profileId, deviceId,
+  );
+}
+
 export async function saveProfileDevice(details: DeviceDetails, deviceId?: string): Promise<StoredDevice> {
   const db = await database();
   const existing = deviceId

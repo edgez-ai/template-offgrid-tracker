@@ -2,6 +2,8 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import React, { useEffect, useState } from "react";
 import { ActivityIndicator, BackHandler, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { gatewayProductForModel } from '../gateway-lwm2m';
+import { useGatewayDevices } from './useGatewayDevices';
 import { ChatProduct } from "./ChatProduct";
 import { CollarProduct } from "./CollarProduct";
 import { DevicesHome } from "./DevicesHome";
@@ -11,7 +13,7 @@ import type { SettingsPageKey } from "./SettingsPages";
 import { useI18n } from "./i18n";
 import { useTheme } from "./theme";
 import type { KeepteenActions, KeepteenRuntime } from "./types";
-import { Button, Notice, Screen } from "./ui";
+import { Button, Notice, Screen, NavHeader, PageScroll, Card, ListRow } from "./ui";
 
 export function KeepteenStartup({ error, onRetry }: { error?: string; onRetry?: () => void }) {
   const { colors } = useTheme();
@@ -32,7 +34,7 @@ export function KeepteenStartup({ error, onRetry }: { error?: string; onRetry?: 
 type RootTab = "devices" | "settings";
 type Route =
   | { kind: "root" }
-  | { kind: "product"; product: Exclude<ProductKey, "valve" | "camera"> }
+  | { kind: "product"; product: Exclude<ProductKey, "valve"> }
   | { kind: "settings"; page: SettingsPageKey };
 
 /**
@@ -41,6 +43,12 @@ type Route =
  * never from a global tab (R02).
  */
 export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; actions: KeepteenActions }) {
+  const { clients, connected: gatewayConnected } = useGatewayDevices(runtime, actions.devicesChanged);
+  const cameras = clients.filter((client) => (client.product ?? gatewayProductForModel(client.model)) === 'camera');
+  // Known camera registrations belong to Camera; all local rows keep their IDs,
+  // names, location, and other settings unchanged.
+  runtime = { ...runtime, gatewayConnected, gatewayRegisteredSerials: clients.map((client) => client.endpoint), devices: runtime.devices.filter((device) => !cameras.some((client) =>
+    client.endpoint.trim().toUpperCase() === device.serial.trim().toUpperCase())) };
   const [tab, setTab] = useState<RootTab>("devices");
   const [route, setRoute] = useState<Route>({ kind: "root" });
 
@@ -62,6 +70,13 @@ export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; ac
   if (route.kind === "product" && route.product === "collar") {
     return <CollarProduct runtime={runtime} actions={actions} onClose={() => setRoute({ kind: "root" })} />;
   }
+  if (route.kind === "product" && route.product === "camera") {
+    return <Screen><NavHeader title="Camera" onBack={() => setRoute({ kind: 'root' })} /><PageScroll><Card>
+      {cameras.map((client, index) => <ListRow key={client.endpoint} icon="camera-outline" title={client.name || client.serial || client.endpoint}
+        subtitle={client.model} last={index === cameras.length - 1} />)}
+      {!cameras.length ? <Notice text="No camera connected" /> : null}
+    </Card></PageScroll></Screen>;
+  }
   if (route.kind === "product" && route.product === "chat") {
     return <ChatProduct runtime={runtime} actions={actions} onClose={() => setRoute({ kind: "root" })} />;
   }
@@ -73,8 +88,8 @@ export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; ac
     <Screen edges={["top", "left", "right"]}>
       <View style={styles.flex}>
         {tab === "devices"
-          ? <DevicesHome runtime={runtime} onAddDevice={actions.addDevice} onOpenProduct={(product) => {
-              if (product === "collar" || product === "chat") setRoute({ kind: "product", product });
+          ? <DevicesHome runtime={runtime} cameraCount={cameras.length} onAddDevice={actions.addDevice} onOpenProduct={(product) => {
+              if (product === "collar" || product === "chat" || product === "camera") setRoute({ kind: "product", product });
             }} />
           : <SettingsHome runtime={runtime} onOpen={(page) => setRoute({ kind: "settings", page })} />}
       </View>

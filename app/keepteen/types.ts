@@ -16,6 +16,9 @@ export type KeepteenRuntime = {
   /** Profile has "Connect to cloud" enabled: data comes from Appwrite, not BLE. */
   onlineMode: boolean;
   bleStatus: BleLinkStatus;
+  /** Current Wi-Fi gateway API reachability for offline device products. */
+  gatewayConnected?: boolean;
+  gatewayRegisteredSerials?: readonly string[];
   cloudStatus: CloudConnectionState;
   cloudLoggedIn: boolean;
   meshLink: { session: EdgezMeshSession; state: EdgezMeshState } | null;

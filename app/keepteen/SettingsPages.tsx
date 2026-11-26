@@ -158,7 +158,7 @@ function HalowPage({ runtime, actions, onBack }: { runtime: KeepteenRuntime; act
           <InfoLine label={t("country")} value={profile.country} />
           <InfoLine label={t("channel")} value={profile.halowChannel === 0 ? t("auto") : String(profile.halowChannel)} />
           <InfoLine label={t("frequency")} value={channel ? `${channel.frequencyMHz} MHz · ${bandwidthForChannel(channel)} MHz` : t("auto")} />
-          <InfoLine label="Mesh ID" value={profile.meshId} />
+          <InfoLine label="SSID/MESH ID" value={profile.meshId} />
           <InfoLine label={t("networkPassword")} value={profile.meshPassphrase ? t("passwordSet") : t("passwordNone")} />
           <InfoLine label={t("cloud")} value={profile.connectToCloud ? t("on") : t("off")} last />
         </Card>

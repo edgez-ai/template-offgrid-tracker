@@ -8,11 +8,15 @@ import type { StatusTone } from "./ui";
  * cloud profiles read Appwrite. The BLE / HaLow / cloud details stay available
  * separately in the product's connection page.
  */
-export function connectionSummary(runtime: KeepteenRuntime): { tone: StatusTone; label: MessageKey } {
+export function connectionSummary(runtime: KeepteenRuntime, useGateway = false): { tone: StatusTone; label: MessageKey } {
   if (runtime.onlineMode) {
     if (runtime.cloudStatus === "online") return { tone: "online", label: "statusCloudOnline" };
     if (runtime.cloudStatus === "login") return { tone: "warning", label: "statusSignInRequired" };
     return { tone: "warning", label: "statusCloudOffline" };
+  }
+  if (useGateway && runtime.gatewayConnected === true) return { tone: "online", label: "statusGatewayConnected" };
+  if (useGateway && runtime.gatewayConnected === false && runtime.bleStatus.phase !== "ready") {
+    return { tone: "warning", label: "statusGatewayUnavailable" };
   }
   switch (runtime.bleStatus.phase) {
     case "ready":

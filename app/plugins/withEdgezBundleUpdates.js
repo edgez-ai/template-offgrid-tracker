@@ -50,6 +50,8 @@ module.exports = function withEdgezBundleUpdates(config, options = {}) {
     <domain includeSubdomains="false">localhost</domain>
     <domain includeSubdomains="false">127.0.0.1</domain>
     <domain includeSubdomains="false">192.168.4.1</domain>
+    <domain includeSubdomains="false">192.168.12.1</domain>
+    <domain includeSubdomains="false">192.168.1.1</domain>
   </domain-config>
   <domain-config>
     <domain includeSubdomains="false">github.edgez.biz</domain>

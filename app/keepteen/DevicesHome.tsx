@@ -27,8 +27,9 @@ const areas: ReadonlyArray<{ key: Area; label: MessageKey }> = [
  * four product cards under "All". Other areas are display-only and empty —
  * there is no area-assignment service yet.
  */
-export function DevicesHome({ runtime, onOpenProduct, onAddDevice }: {
+export function DevicesHome({ runtime, onOpenProduct, onAddDevice, cameraCount = 0 }: {
   runtime: KeepteenRuntime;
+  cameraCount?: number;
   onOpenProduct: (product: ProductKey) => void;
   onAddDevice: () => void;
 }) {
@@ -36,6 +37,7 @@ export function DevicesHome({ runtime, onOpenProduct, onAddDevice }: {
   const { t } = useI18n();
   const [area, setArea] = useState<Area>("all");
   const connection = connectionSummary(runtime);
+  const collarConnection = connectionSummary(runtime, true);
   const collars = collarDevices(runtime.devices).length;
 
   const cards: ReadonlyArray<{ key: ProductKey; art: ArtworkKey; title: string; status: string; tone: StatusTone }> = [
@@ -43,8 +45,8 @@ export function DevicesHome({ runtime, onOpenProduct, onAddDevice }: {
       key: "collar",
       art: "collar",
       title: t("productCollar"),
-      status: connection.tone === "online" && collars ? t("collarCount", { count: collars }) : t(connection.label),
-      tone: connection.tone,
+      status: collars ? t("collarCount", { count: collars }) : t(collarConnection.label),
+      tone: collarConnection.tone,
     },
     {
       key: "chat",
@@ -54,11 +56,11 @@ export function DevicesHome({ runtime, onOpenProduct, onAddDevice }: {
       tone: runtime.onlineMode ? "idle" : connection.tone,
     },
     { key: "valve", art: "valve", title: t("productValve"), status: t("comingSoon"), tone: "idle" },
-    { key: "camera", art: "camera", title: t("productCamera"), status: t("comingSoon"), tone: "idle" },
+    { key: "camera", art: "camera", title: t("productCamera"), status: cameraCount ? String(cameraCount) : t("comingSoon"), tone: cameraCount ? "online" : "idle" },
   ];
 
   const open = (product: ProductKey) => {
-    if (product === "valve" || product === "camera") {
+    if (product === "valve" || (product === "camera" && runtime.onlineMode)) {
       Alert.alert(t(product === "valve" ? "productValve" : "productCamera"), t("productNotOpen"));
       return;
     }
