@@ -101,3 +101,12 @@ test('long GPS requests include timeout=300 on reads, writes and execution', asy
   assert.ok(calls.every(args => args[1].endsWith('?timeout=300')));
   await assert.rejects(api.readGatewayResource('http://10.20.30.1:8088', 'serial', '/6/0/0', undefined, 301), /REST timeout/);
 });
+
+
+test('Execute carries arguments and returns the deferred payload', async () => {
+  const calls = [], content = { format: 0, value: '{"latitude":59,"longitude":18,"timestamp":1}' };
+  const api = client({ requestOperation: async (...args) => { calls.push(args); return response({ success: true, content }); } });
+  const result = await api.executeGatewayResource('http://10.20.30.1:8088', 'serial', '/31028/0/0', undefined, 300, "0='295'");
+  assert.equal(result.value, content.value); assert.equal(result.format, 0);
+  assert.equal(calls[0][2], 'POST'); assert.equal(calls[0][3], "0='295'");
+});

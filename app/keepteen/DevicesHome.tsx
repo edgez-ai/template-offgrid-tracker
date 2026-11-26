@@ -1,6 +1,6 @@
 import Ionicons from "@expo/vector-icons/Ionicons";
 import React, { useState } from "react";
-import { Alert, Image, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { artwork } from "./assets";
 import type { ArtworkKey } from "./assets";
 import { collarDevices } from "./collar-model";
@@ -27,14 +27,22 @@ const areas: ReadonlyArray<{ key: Area; label: MessageKey }> = [
  * four product cards under "All". Other areas are display-only and empty —
  * there is no area-assignment service yet.
  */
-export function DevicesHome({ runtime, onOpenProduct, onAddDevice, cameraCount = 0 }: {
+export function DevicesHome({ runtime, onOpenProduct, onAddDevice, cameraCount = 0, onRefresh }: {
   runtime: KeepteenRuntime;
+  onRefresh: () => Promise<void>;
   cameraCount?: number;
   onOpenProduct: (product: ProductKey) => void;
   onAddDevice: () => void;
 }) {
   const { colors, mode } = useTheme();
   const { t } = useI18n();
+  const [refreshing, setRefreshing] = useState(false);
+  const refresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try { await onRefresh(); }
+    finally { setRefreshing(false); }
+  };
   const [area, setArea] = useState<Area>("all");
   const connection = connectionSummary(runtime);
   const collarConnection = connectionSummary(runtime, true);
@@ -68,7 +76,7 @@ export function DevicesHome({ runtime, onOpenProduct, onAddDevice, cameraCount =
   };
 
   return (
-    <ScrollView contentContainerStyle={styles.content}>
+    <ScrollView contentContainerStyle={styles.content} alwaysBounceVertical refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void refresh()} tintColor={colors.accent} colors={[colors.accent]} />}>
       <View style={styles.titleRow}>
         <Text style={[styles.title, { color: colors.text }]} accessibilityRole="header">{t("tabDevices")}</Text>
         <Pressable

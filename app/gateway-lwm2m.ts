@@ -97,9 +97,10 @@ export async function writeGatewayResource(baseUrl: string, endpoint: string, pa
   if (data.success !== true) throw new Error('The device did not confirm the resource write.');
 }
 
-export async function executeGatewayResource(baseUrl: string, endpoint: string, path: string, signal?: AbortSignal, timeoutSeconds = 5): Promise<void> {
+export async function executeGatewayResource(baseUrl: string, endpoint: string, path: string, signal?: AbortSignal, timeoutSeconds = 5, args = ""): Promise<{ format?: number; value?: unknown } | undefined> {
   if (!/^\/\d+\/\d+\/\d+$/.test(path)) throw new Error('Invalid resource path.');
   if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 1 || timeoutSeconds > 300) throw new Error("REST timeout must be 1–300 seconds.");
-  const data = await request(baseUrl, `/clients/${encodeURIComponent(endpoint)}${path}?timeout=${timeoutSeconds}`, signal, { method: 'POST', body: '' }) as { success?: boolean };
+  const data = await request(baseUrl, `/clients/${encodeURIComponent(endpoint)}${path}?timeout=${timeoutSeconds}`, signal, { method: 'POST', body: args }) as { success?: boolean; content?: { format?: number; value?: unknown } };
   if (data.success !== true) throw new Error('The device did not confirm the resource execution.');
+  return data.content;
 }

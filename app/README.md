@@ -221,26 +221,26 @@ inserted into the local list. Insert-only discovery never overwrites a device
 created or renamed concurrently. Failed identity reads are retried on later
 discovery; discovery never creates cloud records or changes the UI layout.
 
-Offline Collar “Show on map” sets GPS acquisition timeout `/31028/0/1` to 300
-seconds, executes `/31028/0/0`, polls state `/31028/0/2` and reads the new fix
-from `/6/0/0` and `/6/0/1`. A single five-minute deadline covers the whole
-operation. The app saves the coordinates locally, then opens the map focused
-on that collar. Failure/timeout opens the map using the last known location
-with an error notice. Leaving the device screen cancels the pending request.
+Offline Collar “Show on map” sends one Execute to `/31028/0/0?timeout=300`
+with text argument `0='295'`. Firmware acknowledges receipt immediately with an
+empty CoAP ACK and returns a confirmable response as soon as a fresh fix is
+available. The gateway preserves JSON text (`latitude`, `longitude`, UTC Unix
+`timestamp`) in `content: {format: 0, value: "..."}`. The app validates the result
+and opens the map before saving the coordinates locally. No setup writes,
+status polling, or separate coordinate reads are performed.
 
-GPS write/execute calls include `?timeout=300`. State and coordinate reads use
-explicit `?timeout=5` and retry transient failures within the same five-minute
-acquisition deadline, so one delayed read cannot block polling for five minutes. JavaScript and Android HTTP waits
-allow the REST timeout plus a small transport margin, while the overall GPS
-flow keeps its five-minute deadline. Gateway read/write timeout limits must
-support 300 seconds; older server packages may cap those requests at 30.
+One five-minute deadline covers discovery and the deferred response; the
+295-second device timeout leaves five seconds for transport. The gateway and
+device firmware must both support the deferred Execute result. Errors/timeouts
+open the map with the last known location and a notice. The existing button
+shows the remaining wait and can be tapped again to cancel. Leaving the screen
+also cancels the HTTP request; an already accepted device acquisition continues
+until fix, its own timeout, WNM sleep or context loss. The first-fix extra minute
+of GPS power does not delay the response.
 
-If GPS state is already acquiring, Show on map waits for that acquisition
-instead of writing its timeout or executing again; firmware returns 5.03 for
-those operations while GPS is busy.
-
-The existing Show on map button displays its remaining wait and can be tapped
-again to cancel waiting; this does not restart or change the device acquisition.
-
-A device fix no more than five seconds old is read directly from LwM2M
-without restarting GPS power. Older fixes require a fresh acquisition.
+The Devices tab supports pull-to-refresh. Offline profiles re-query the current
+Wi-Fi gateway's LwM2M registrations, link endpoints to local serials, discover
+unknown device identities, and reload the local list. Discovery also refreshes
+every 15 seconds while the app is active, on returning to the foreground, and
+when selecting Devices. Overlapping refreshes share their pending operation.
+Cloud profiles refresh their normal device source without contacting LwM2M.

@@ -43,12 +43,16 @@ type Route =
  * never from a global tab (R02).
  */
 export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; actions: KeepteenActions }) {
-  const { clients, connected: gatewayConnected } = useGatewayDevices(runtime, actions.devicesChanged);
+  const { clients, connected: gatewayConnected, refresh: refreshGateway } = useGatewayDevices(runtime, actions.devicesChanged);
   const cameras = clients.filter((client) => (client.product ?? gatewayProductForModel(client.model)) === 'camera');
   // Known camera registrations belong to Camera; all local rows keep their IDs,
   // names, location, and other settings unchanged.
   runtime = { ...runtime, gatewayConnected, gatewayRegisteredSerials: clients.map((client) => client.endpoint), devices: runtime.devices.filter((device) => !cameras.some((client) =>
     client.endpoint.trim().toUpperCase() === device.serial.trim().toUpperCase())) };
+  const refreshDevices = async () => {
+    if (!runtime.onlineMode) await refreshGateway();
+    await actions.devicesChanged();
+  };
   const [tab, setTab] = useState<RootTab>("devices");
   const [route, setRoute] = useState<Route>({ kind: "root" });
 
@@ -88,12 +92,12 @@ export function KeepteenApp({ runtime, actions }: { runtime: KeepteenRuntime; ac
     <Screen edges={["top", "left", "right"]}>
       <View style={styles.flex}>
         {tab === "devices"
-          ? <DevicesHome runtime={runtime} cameraCount={cameras.length} onAddDevice={actions.addDevice} onOpenProduct={(product) => {
+          ? <DevicesHome runtime={runtime} onRefresh={refreshDevices} cameraCount={cameras.length} onAddDevice={actions.addDevice} onOpenProduct={(product) => {
               if (product === "collar" || product === "chat" || product === "camera") setRoute({ kind: "product", product });
             }} />
           : <SettingsHome runtime={runtime} onOpen={(page) => setRoute({ kind: "settings", page })} />}
       </View>
-      <TabBar tab={tab} onChange={setTab} />
+      <TabBar tab={tab} onChange={(next) => { setTab(next); if (next === 'devices') void refreshDevices(); }} />
     </Screen>
   );
 }
