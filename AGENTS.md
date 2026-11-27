@@ -13,7 +13,7 @@ under Appwrite permissions. The Function writes application sensor telemetry. Ap
 
 | Path | Responsibility |
 | --- | --- |
-| `site/` | Read-only Next.js telemetry portal. Never create Devices here. |
+| `site/` | Authenticated telemetry/OTA portal and public `/flash/` USB flasher. Never create Devices here. |
 | `app/` | Expo + React Native BLE provisioning client. |
 | `function/` | Appwrite Function; MQTT-to-TablesDB writer and compatibility APIs. |
 | `firmware/` | PlatformIO ESP-IDF and Zephyr firmware for ESP32 and nRF54L15 targets. |
@@ -65,6 +65,16 @@ Appwrite state.
 `cd infra && npm run clean` deletes the template's deterministic remote
 resources but deliberately preserves project users, Devices, and global auth
 method settings. Do not execute it unless the user explicitly requests cleanup.
+
+## Firmware library
+
+The project Storage bucket `device-firmware` has no bucket-wide grants and
+uses file security. Console admins upload private drafts and explicitly publish
+files with `read("any")`. Keep uploads and firmware source separate. Filenames
+are `<target>__<version>.hex|bin`; targets are `heltec-hc33` (BIN OTA) and
+`nrf54l15` (USB HEX/BIN). Website OTA uses a selected `firmwareId`; Function
+status reconciliation uses the server-generated `fw:<fileId>:<nonce>` request ID.
+Never infer the selected target version from a latest GitHub release.
 
 ## Native device state
 

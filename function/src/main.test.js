@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { after, beforeEach, test } from "node:test";
-import { TablesDB } from "node-appwrite";
+import { Storage, TablesDB } from "node-appwrite";
 
 process.env.APPWRITE_FUNCTION_API_ENDPOINT = "https://appwrite.example/v1";
 process.env.APPWRITE_FUNCTION_PROJECT_ID = "project-a";
@@ -8,7 +8,7 @@ process.env.OFFGRID_TRACKER_DATABASE_ID = "database-a";
 process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID = "telemetry-a";
 process.env.OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID = "ota-a";
 process.env.OFFGRID_TRACKER_DOWNLINK_TABLE_ID = "downlink-a";
-process.env.OFFGRID_TRACKER_REPOSITORY_URL = "https://github.example/acme/offgrid-tracker";
+
 const { default: main } = await import("./main.js");
 
 const gatewayId = "11111111-1111-4111-8111-111111111111";
@@ -20,6 +20,7 @@ const devices = new Map([
     $permissions: ['read("team:profile-a")'] }],
 ]);
 const originalFetch = globalThis.fetch;
+const originalGetFile = Storage.prototype.getFile;
 const originalCreateRow = TablesDB.prototype.createRow;
 const originalDeleteRow = TablesDB.prototype.deleteRow;
 const originalListRows = TablesDB.prototype.listRows;
@@ -31,6 +32,10 @@ const timeseriesWrites = [];
 const deviceLocationUpdates = [];
 
 beforeEach(() => {
+  Storage.prototype.getFile = async ({ fileId }) => {
+    if (fileId !== "firmware-v004") throw new Error("missing firmware");
+    return { name: "heltec-hc33__v0.0.4.bin" };
+  };
   delete devices.get(gatewayId).firmwareVersion;
   delete devices.get(gatewayId).location;
   delete devices.get(remoteId).location;
@@ -54,9 +59,6 @@ beforeEach(() => {
   devices.get(remoteId).metadata = { profileId: "profile-a", icon: "tracker", markerColor: "orange" };
   globalThis.fetch = async (url, options = {}) => {
     const href = String(url);
-    if (href === "https://github.example/acme/offgrid-tracker/releases/latest") {
-      return { ok: true, status: 200, url: "https://github.example/acme/offgrid-tracker/releases/tag/v0.0.4" };
-    }
     if (href === "https://appwrite.example/v1/timeseries/stores/project-a/points") {
       timeseriesWrites.push(JSON.parse(options.body));
       return { ok: true, status: 201 };
@@ -132,6 +134,7 @@ beforeEach(() => {
 
 after(() => {
   globalThis.fetch = originalFetch;
+  Storage.prototype.getFile = originalGetFile;
   TablesDB.prototype.createRow = originalCreateRow;
   TablesDB.prototype.deleteRow = originalDeleteRow;
   TablesDB.prototype.listRows = originalListRows;
@@ -253,14 +256,14 @@ test("one MQTT batch saves each clientId under its own device and permissions", 
 });
 
 test("a mesh gateway can relay a remote device in the same access scope", async () => {
-  devices.get(remoteId).gatewayDeviceId = "33333333-3333-4333-8333-333333333333";
+  devices.get(remoteId).gatewayDeviceId = "fw:firmware-v004:12345678";
   const result = await publish([{ clientId: gatewayId }, { clientId: remoteId }]);
   assert.equal(result.status, 201);
   assert.equal(rows.length, 2);
 });
 
 test("a gateway cannot relay a remote device outside its access scope", async () => {
-  devices.get(remoteId).gatewayDeviceId = "33333333-3333-4333-8333-333333333333";
+  devices.get(remoteId).gatewayDeviceId = "fw:firmware-v004:12345678";
   devices.get(remoteId).$permissions = ['read("team:another-profile")'];
   const result = await publish([{ clientId: gatewayId }, { clientId: remoteId }]);
   assert.equal(result.status, 403);
@@ -389,7 +392,7 @@ test("sensor blocks with a corrupt PAwR transport digest are rejected before wri
 });
 
 test("sensor blocks are rejected when the source is not assigned to the publishing gateway", async () => {
-  devices.get(remoteId).gatewayDeviceId = "33333333-3333-4333-8333-333333333333";
+  devices.get(remoteId).gatewayDeviceId = "fw:firmware-v004:12345678";
   devices.get(remoteId).$permissions = ['read("team:another-profile")'];
   const result = await publishImuBlock([
     { accel: [0, 0, 9.8], gyro: [0, 0, 0], gyroValid: true },
@@ -406,7 +409,7 @@ test("partial IMU readings are rejected", async () => {
 });
 
 test("OTA telemetry creates and completes one status row", async () => {
-  const requestId = "33333333-3333-4333-8333-333333333333";
+  const requestId = "fw:firmware-v004:12345678";
   const accepted = await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId, status: "pending", detail: "accepted" } });
   assert.equal(accepted.status, 201);
   assert.equal(otaRows.length, 1);
@@ -421,7 +424,7 @@ test("OTA telemetry creates and completes one status row", async () => {
 });
 
 test("ordinary telemetry completes a pending OTA when the target version is running", async () => {
-  const requestId = "44444444-4444-4444-8444-444444444444";
+  const requestId = "fw:firmware-v004:abcdefgh";
   await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId, status: "pending", detail: "downloading" } });
   assert.equal(otaRows[0].status, "pending");
 
@@ -490,4 +493,12 @@ test("gateway downlink status is stored against the remote nRF device", async ()
   assert.equal(downlinkRows.length, 1);
   assert.equal(downlinkRows[0].status, "applied");
   assert.ok(downlinkRows[0].completedAt);
+});
+
+ test("OTA cannot infer a target from an unrelated latest release", async () => {
+  await publish({ clientId: gatewayId, firmwareVersion: "v0.0.3", ota: { requestId: "legacy-request", status: "pending" } });
+  assert.equal(otaRows[0].targetFirmwareVersion, "");
+  devices.get(gatewayId).firmwareVersion = "0.0.4";
+  await publish({ clientId: gatewayId, firmwareVersion: "0.0.4", status: "online" });
+  assert.equal(otaRows[0].status, "pending");
 });

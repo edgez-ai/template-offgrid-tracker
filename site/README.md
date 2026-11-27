@@ -22,8 +22,40 @@ The authenticated `/topology` page renders those same recent links as an
 interactive force-directed network graph. Operators can pan, zoom, drag and
 inspect devices, filter the graph by profile, compare RF RSSI, and see unresolved
 HaLow peers alongside provisioned devices without requiring a Neo4j database.
-HT-HC33 details also show the running firmware version and offer MQTT OTA from
-the latest release of `APPWRITE_VCS_REPOSITORY_URL`, the repository used for
-the current Appwrite Site deployment.
+HT-HC33 details offer MQTT OTA from a selected published BIN in Appwrite
+Storage. The dashboard no longer discovers firmware through GitHub Releases.
+
+## Firmware library and public USB flasher
+
+The shared Storage bucket is `device-firmware`. Its bucket permissions are
+empty and file security is enabled. Console administrators upload private
+files under **Devices > Firmware**, then explicitly publish individual files
+with `read("any")`. Guests cannot upload, modify, or delete firmware. Running
+the template installer reconciles the bucket without changing file grants.
+
+Filenames encode the board and version: `heltec-hc33__1.2.3.bin` for MQTT OTA,
+and `nrf54l15__1.2.3.hex` or `.bin` for direct USB flashing. Upload dates are
+recorded by Storage; file IDs distinguish uploads of the same version. Uploaded
+files remain immutable versions: upload a new file instead of replacing an
+existing binary. Source code stays in the firmware repository.
+
+The public `/flash/` page requires no account. It lists published nRF54L15
+images and uses desktop Chrome/Edge WebHID with a HID CMSIS-DAP probe. The
+browser downloads the selected file and writes through SWD; it does not flash
+the probe itself. HEX records are validated before programming. This page
+supports English, 简体中文, 日本語, 한국어, and Deutsch with a persisted preference.
+Use HTTPS in deployments and register the Site domain as an Appwrite Web
+platform so anonymous Storage requests pass CORS. A same-origin iframe keeps
+the existing flasher isolated from dashboard styles without granting another
+origin access to the USB device.
+
+Deploy the matching Appwrite Devices backend first: OTA accepts
+`payload: {firmwareId}` and resolves only complete, published HT-HC33 BINs.
+The server generates a `fw:<fileId>:<nonce>` request ID so the ingest Function
+tracks the selected version, even if a different release is uploaded later.
+Older clients may continue using the backend's legacy GitHub OTA URL path.
+Do not treat a successful build as a successful physical flash; validate USB,
+readback, device reboot, and OTA download on the target boards after deployment.
+
 Appwrite filters device reads by the permissions assigned at creation, so the
 portal only lists Devices readable by the signed-in creator.

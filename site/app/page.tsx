@@ -2,6 +2,7 @@
 
 import { Account, Client, ID, Models, Query, TablesDB, Teams } from "appwrite";
 import Link from "next/link";
+import { listFirmware, type Firmware } from "../lib/firmware";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ProfileSelector, { preferredProfileId, selectedProfileStorageKey } from "./ProfileSelector";
 import CameraPanel from "./CameraPanel";
@@ -30,11 +31,6 @@ const telemetryTableId = process.env.NEXT_PUBLIC_TELEMETRY_TABLE_ID!;
 const otaUpdateTableId = process.env.NEXT_PUBLIC_OTA_UPDATE_TABLE_ID!;
 const endpoint = process.env.NEXT_PUBLIC_APPWRITE_ENDPOINT!.replace(/\/+$/, "");
 const projectId = process.env.NEXT_PUBLIC_APPWRITE_PROJECT_ID!;
-const otaRepositoryUrl = (process.env.NEXT_PUBLIC_OTA_REPOSITORY_URL || "").replace(/\.git$/, "").replace(/\/$/, "");
-const otaRepositoryMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+)$/.exec(otaRepositoryUrl);
-const otaImageUrl = otaRepositoryMatch ? `${otaRepositoryUrl}/releases/latest/download/offgrid-tracker-ota.bin` : "";
-const otaLatestReleaseApiUrl = otaRepositoryMatch
-  ? `https://api.github.com/repos/${otaRepositoryMatch[1]}/${otaRepositoryMatch[2]}/releases/latest` : "";
 const historyRanges: { key: HistoryRange; label: string; duration: number }[] = [
   { key: "30m", label: "30 min", duration: 30 * 60 * 1000 },
   { key: "1h", label: "1 hour", duration: 60 * 60 * 1000 },
@@ -252,13 +248,12 @@ async function deleteDevice(deviceId: string) {
   }
 }
 
-async function sendOtaCommand(deviceId: string) {
-  if (!otaImageUrl) throw new Error("This deployment does not expose a supported source repository for OTA.");
+async function sendOtaCommand(deviceId: string, firmwareId: string) {
   const jwt = await account.createJWT();
   const response = await fetch(`${endpoint}/devices/${encodeURIComponent(deviceId)}/commands`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-appwrite-project": projectId, "x-appwrite-jwt": jwt.jwt },
-    body: JSON.stringify({ command: "ota", payload: { url: otaImageUrl, requestId: ID.unique() } }),
+    body: JSON.stringify({ command: "ota", payload: { firmwareId } }),
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { message?: string };
@@ -287,7 +282,11 @@ export default function Home() {
   const [deletingProfile, setDeletingProfile] = useState(false);
   const [otaDeviceId, setOtaDeviceId] = useState("");
   const [otaMessage, setOtaMessage] = useState("");
-  const [latestFirmwareVersion, setLatestFirmwareVersion] = useState("");
+  const [firmware, setFirmware] = useState<Firmware[]>([]);
+  const [firmwareId, setFirmwareId] = useState("");
+  const [firmwareError, setFirmwareError] = useState("");
+  const selectedFirmware = firmware.find((item) => item.id === firmwareId);
+  const targetFirmwareVersion = selectedFirmware?.version || "";
   const [email, setEmail] = useState("");
   const [otpUserId, setOtpUserId] = useState("");
   const [otpCode, setOtpCode] = useState("");
@@ -315,19 +314,13 @@ export default function Home() {
   }, [refresh]);
 
   useEffect(() => {
-    if (!otaLatestReleaseApiUrl) return;
+    if (!user) return;
     let active = true;
-    void fetch(otaLatestReleaseApiUrl, { headers: { Accept: "application/vnd.github+json" } })
-      .then((response) => {
-        if (!response.ok) throw new Error("Could not read the latest firmware release.");
-        return response.json() as Promise<{ tag_name?: unknown }>;
-      })
-      .then((release) => {
-        if (active && typeof release.tag_name === "string") setLatestFirmwareVersion(release.tag_name);
-      })
-      .catch(() => undefined);
+    void listFirmware().then((items) => {
+      if (active) setFirmware(items.filter((item) => item.target === "heltec-hc33" && item.format === "bin"));
+    }).catch((caught) => { if (active) setFirmwareError(errorMessage(caught)); });
     return () => { active = false; };
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     if (!user) return;
@@ -439,19 +432,19 @@ export default function Home() {
   }
 
   async function updateSelectedDevice() {
-    if (!selectedDevice) return;
+    if (!selectedDevice || !selectedFirmware) return;
     if (selectedFirmwareCurrent) {
-      setOtaMessage(`Already running the latest firmware (${latestFirmwareVersion}).`);
+      setOtaMessage(`Already running the selected firmware (${targetFirmwareVersion}).`);
       return;
     }
     if (selectedOtaPending) {
       setOtaMessage("An OTA update is already pending for this device.");
       return;
     }
-    if (!window.confirm(`Install the latest HT-HC33 firmware on ${selectedDevice.name}?`)) return;
+    if (!window.confirm(`Install HT-HC33 firmware ${targetFirmwareVersion} on ${selectedDevice.name}?`)) return;
     setOtaDeviceId(selectedDevice.$id); setOtaMessage(""); setError("");
     try {
-      await sendOtaCommand(selectedDevice.$id);
+      await sendOtaCommand(selectedDevice.$id, selectedFirmware.id);
       setOtaMessage("Update requested. The device will download, install, and restart in the background.");
     } catch (caught) { setError(errorMessage(caught)); }
     finally { setOtaDeviceId(""); }
@@ -477,7 +470,7 @@ export default function Home() {
   const selectedTopology = topology.filter((link) => isRecentTopology(link) && (link.gatewayDeviceId === selectedDeviceId || link.peerDeviceId === selectedDeviceId));
   const selectedOtaUpdate = otaUpdates.find((update) => update.deviceId === selectedDeviceId);
   const selectedOtaPending = otaUpdates.some((update) => update.deviceId === selectedDeviceId && update.status === "pending");
-  const selectedFirmwareCurrent = sameFirmwareVersion(selectedFirmwareVersion, latestFirmwareVersion);
+  const selectedFirmwareCurrent = sameFirmwareVersion(selectedFirmwareVersion, targetFirmwareVersion);
   const selectedTopologyUpdatedAt = selectedTopology.reduce((latest, link) => link.reportedAt > latest ? link.reportedAt : latest, "");
   const activeRange = historyRanges.find((range) => range.key === historyRange)!;
   const selectedHistorySeries = historySeries.filter((series) => selectedSensorFields.includes(series.field));
@@ -496,7 +489,7 @@ export default function Home() {
   }
 
   return <main className={`shell ${mobileDetailOpen ? "mobile-showing-detail" : ""}`}>
-    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && currentProfile && <button className="delete-profile" onClick={() => void removeCurrentProfile()} disabled={deletingProfile}>{deletingProfile ? "Deleting…" : "Delete profile"}</button>}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
+    <header className="topbar"><span className="mark">L</span><strong>Offgrid Tracker</strong>{!user && <Link href="/flash">USB flasher · No login required</Link>}{user && <nav className="topnav" aria-label="Primary navigation"><Link className="active" href="/">Devices</Link><Link href="/topology">Topology</Link><Link href="/flash">USB flasher</Link></nav>}{user && <ProfileSelector profiles={profiles} value={currentProfileId} onChange={setCurrentProfileId} />}{user && currentProfile && <button className="delete-profile" onClick={() => void removeCurrentProfile()} disabled={deletingProfile}>{deletingProfile ? "Deleting…" : "Delete profile"}</button>}{user && <button className="link" onClick={signOut}>Sign out</button>}</header>
     {!user ? <section className="auth-grid">
       <div><p className="eyebrow">NEXT.JS · APPWRITE AUTH · MQTT</p><h1>Devices in.<br /><em>Signals out.</em></h1><p className="lede">Sign in to read device state and mobile-synced sensor history.</p></div>
       <form className="panel" onSubmit={(event) => { event.preventDefault(); void (otpUserId ? verifyOtp() : requestOtp()); }}>
@@ -548,7 +541,7 @@ export default function Home() {
               return <div key={series.field}><span><i style={{ background: series.color }} />{series.label}</span><strong>{latest.value.toFixed(2)}</strong><small>min {Math.min(...values).toFixed(2)} · avg {(values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2)} · max {Math.max(...values).toFixed(2)}</small></div>;
             })}</div>}
             <div className="topology-card"><header><div><h3>HaLow topology</h3><p>Mesh and PAwR gateway links seen within the last 2 minutes</p></div><span>{selectedTopology.length} LINKS{selectedTopologyUpdatedAt ? ` · ${relativeTime(selectedTopologyUpdatedAt)}` : ""}</span></header><TopologyGraph device={selectedDevice} links={selectedTopology} /></div>
-            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33" || selectedFirmwareVersion) && <div className="ota-card"><div><h3>Firmware update</h3><p>Running {selectedFirmwareVersion || "version unknown"}{latestFirmwareVersion ? `; latest ${latestFirmwareVersion}` : ""}. Install <code>offgrid-tracker-ota.bin</code> from the latest release of this deployment&apos;s source repository.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!otaImageUrl || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
+            {(selectedDevice.metadata?.firmwareTarget === "heltec-hc33") && <div className="ota-card"><div><h3>Firmware update</h3><label>Storage version <select value={firmwareId} onChange={(event) => { setFirmwareId(event.target.value); setOtaMessage(""); }}><option value="">Select firmware</option>{firmware.map((item) => <option key={item.id} value={item.id}>{item.version} · {item.name}</option>)}</select></label>{firmwareError && <small role="alert">{firmwareError}</small>}<p>Running {selectedFirmwareVersion || "version unknown"}{targetFirmwareVersion ? `; selected ${targetFirmwareVersion}` : ""}. Install the selected firmware from Appwrite Storage.</p>{selectedOtaUpdate && <small>Latest update: {selectedOtaUpdate.status.toUpperCase()}{selectedOtaUpdate.detail ? ` · ${selectedOtaUpdate.detail}` : ""}{selectedOtaUpdate.reportedAt ? ` · ${relativeTime(selectedOtaUpdate.reportedAt)}` : ""}</small>}{otaMessage && <small>{otaMessage}</small>}</div><button onClick={() => void updateSelectedDevice()} disabled={!selectedFirmware || selectedStatus !== "Online" || selectedOtaPending || selectedFirmwareCurrent || otaDeviceId === selectedDevice.$id}>{otaDeviceId === selectedDevice.$id ? "Sending…" : selectedOtaPending ? "Update pending" : selectedFirmwareCurrent ? "Up to date" : "Update HT-HC33"}</button></div>}
             <div className="recent"><h3>Recent history</h3>{historyReadings.map((reading) => <article key={`${reading.timestamp}-${reading.channel}`}><header><code>{reading.channel}</code><time>{new Date(reading.timestamp).toLocaleString()}</time></header><pre>{prettyPayload(reading.payload)}</pre></article>)}{!historyReadings.length && <p className="empty">No mobile sensor messages in this range.</p>}</div>
           </> : <p className="empty detail-empty">Select a device to see its telemetry.</p>}
         </section>

@@ -315,6 +315,15 @@ firmware README.
   both FGH200M roles, packages licensing/source manifests, and uploads
   short-lived Actions artifacts.
 
+## Storage firmware library
+
+Manage uploaded versions in Appwrite Console under **Devices > Firmware**.
+Files are private until an administrator publishes them. The website uses
+published Storage versions for HT-HC33 OTA and provides an account-free
+[nRF54L15 USB flasher](site/README.md#firmware-library-and-public-usb-flasher)
+at `/flash/`. Firmware binaries are uploaded to Storage, not committed here.
+Deploy the matching Appwrite Devices backend, Console, Function and Site together.
+
 ## Licensing and firmware distribution
 
 The root [Apache-2.0 license](LICENSE) covers only the original Offgrid Tracker

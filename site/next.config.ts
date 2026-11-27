@@ -24,7 +24,6 @@ function publicClientEndpoint(value: string | undefined) {
 }
 
 const localResources = localResourceIds();
-const otaRepositoryUrl = process.env.OFFGRID_TRACKER_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL;
 const required = {
   NEXT_PUBLIC_APPWRITE_ENDPOINT: publicClientEndpoint(
     process.env.OFFGRID_TRACKER_ENDPOINT || process.env.APPWRITE_PUBLIC_ENDPOINT || process.env.APPWRITE_ENDPOINT,
@@ -45,7 +44,7 @@ const missing = Object.entries(required).filter(([, value]) => !value).map(([key
 if (missing.length) throw new Error(`Missing public Appwrite configuration: ${missing.join(", ")}`);
 
 const nextConfig: NextConfig = {
-  env: { ...required, NEXT_PUBLIC_OTA_REPOSITORY_URL: otaRepositoryUrl || "" },
+  env: required,
   output: "export",
   // EdgeZ Sites canonicalizes directory routes with a trailing slash. Emit
   // /topology/index.html instead of /topology.html so the route is served

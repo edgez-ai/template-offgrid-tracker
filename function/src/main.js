@@ -5,7 +5,7 @@ const DATABASE_ID = process.env.OFFGRID_TRACKER_DATABASE_ID || process.env.DATAB
 const TELEMETRY_TABLE_ID = process.env.OFFGRID_TRACKER_TELEMETRY_TABLE_ID || process.env.TELEMETRY_TABLE_ID;
 const OTA_UPDATE_TABLE_ID = process.env.OFFGRID_TRACKER_OTA_UPDATE_TABLE_ID || "ota-updates";
 const DOWNLINK_TABLE_ID = process.env.OFFGRID_TRACKER_DOWNLINK_TABLE_ID || "downlinks";
-const OTA_REPOSITORY_URL = process.env.OFFGRID_TRACKER_REPOSITORY_URL || process.env.APPWRITE_VCS_REPOSITORY_URL || "";
+
 const GEOFENCE_AREA_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID;
 const GEOFENCE_RULE_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_RULE_TABLE_ID;
 const GEOFENCE_ALARM_TABLE_ID = process.env.OFFGRID_TRACKER_GEOFENCE_ALARM_TABLE_ID;
@@ -41,36 +41,18 @@ const SENSOR_FIELD_NAMES = new Map([
 ]);
 const OTA_STATUSES = new Set(["pending", "succeeded", "failed", "busy"]);
 const DOWNLINK_STATUSES = new Set(["cached", "transmitting", "applied", "failed", "expired"]);
-const LATEST_RELEASE_CACHE_MS = 5 * 60 * 1000;
-let latestReleaseCache = { repository: "", version: "", expiresAt: 0 };
-
 function normalizedFirmwareVersion(value) {
   return typeof value === "string" ? value.trim().replace(/^v/i, "") : "";
 }
 
-async function latestReleaseVersion() {
-  const repository = OTA_REPOSITORY_URL.replace(/\.git$/, "").replace(/\/$/, "");
-  if (!repository) return "";
-  const now = Date.now();
-  if (latestReleaseCache.repository === repository && latestReleaseCache.expiresAt > now) {
-    return latestReleaseCache.version;
-  }
-  let version = "";
+async function selectedFirmwareVersion(storage, requestId) {
+  const parts = requestId.split(":");
+  if (parts.length !== 3 || parts[0] !== "fw") return "";
   try {
-    const response = await fetch(`${repository}/releases/latest`, {
-      method: "HEAD",
-      redirect: "follow",
-      signal: AbortSignal.timeout(3000),
-    });
-    if (response.ok && response.url) {
-      const match = /\/releases\/tag\/([^/?#]+)/.exec(new URL(response.url).pathname);
-      if (match) version = decodeURIComponent(match[1]);
-    }
-  } catch {
-    // OTA ingestion must continue even if the release host is temporarily unavailable.
-  }
-  latestReleaseCache = { repository, version, expiresAt: now + LATEST_RELEASE_CACHE_MS };
-  return version;
+    const file = await storage.getFile({ bucketId: "device-firmware", fileId: parts[1] });
+    const match = /^heltec-hc33__([A-Za-z0-9][A-Za-z0-9.+-]{0,63})\.bin$/.exec(file.name);
+    return match?.[1] || "";
+  } catch { return ""; }
 }
 
 function sensorValue(payload, type) {
@@ -325,7 +307,7 @@ function otaStatus(entry) {
   return { requestId: ota.requestId, status: ota.status, detail: ota.detail || "" };
 }
 
-async function syncOtaUpdate(tables, target, entry, readPermissions, reportedAt) {
+async function syncOtaUpdate(tables, storage, target, entry, readPermissions, reportedAt) {
   const update = otaStatus(entry);
   if (!update) return;
   const existing = await tables.listRows({
@@ -336,7 +318,7 @@ async function syncOtaUpdate(tables, target, entry, readPermissions, reportedAt)
   const firmwareVersion = typeof entry.firmwareVersion === "string" && entry.firmwareVersion.length <= 128
     ? entry.firmwareVersion : "";
   const row = existing.rows?.[0];
-  const targetFirmwareVersion = row?.targetFirmwareVersion || await latestReleaseVersion();
+  const targetFirmwareVersion = row?.targetFirmwareVersion || await selectedFirmwareVersion(storage, update.requestId);
   const completed = update.status === "succeeded" || update.status === "failed" || update.status === "busy";
   const data = {
     deviceId: target.$id,
@@ -367,10 +349,8 @@ async function reconcileOtaUpdate(tables, target, entry, readPermissions, report
   });
   const pending = (existing.rows || []).filter((row) => row.status === "pending");
   if (!pending.length) return;
-  const fallbackTargetVersion = pending.some((row) => !row.targetFirmwareVersion)
-    ? await latestReleaseVersion() : "";
   for (const row of pending) {
-    const targetVersion = row.targetFirmwareVersion || fallbackTargetVersion;
+    const targetVersion = row.targetFirmwareVersion;
     if (!targetVersion || normalizedFirmwareVersion(firmwareVersion) !== normalizedFirmwareVersion(targetVersion)) continue;
     await tables.updateRow({
       databaseId: DATABASE_ID,
@@ -770,7 +750,7 @@ export default async function main({ req, res, error, log = () => {} }) {
         ...mapAppearanceOf(target),
       }, readPermissions);
       await evaluateGeofences(tables, target, entry, readPermissions, receivedAt);
-      await syncOtaUpdate(tables, target, entry, readPermissions, receivedAt);
+      await syncOtaUpdate(tables, new Storage(client), target, entry, readPermissions, receivedAt);
       await reconcileOtaUpdate(tables, target, { firmwareVersion: target.firmwareVersion }, readPermissions, receivedAt);
       if (entry.downlink) await syncDownlink(tables, device, target, entry.downlink, readPermissions, receivedAt);
       telemetryIds.push(row.$id || target.$id);

@@ -19,8 +19,6 @@ export function installFunction() {
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_GEOFENCE_AREA_TABLE_ID", config.geofenceAreaTableId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_GEOFENCE_RULE_TABLE_ID", config.geofenceRuleTableId);
   upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_GEOFENCE_ALARM_TABLE_ID", config.geofenceAlarmTableId);
-  if (process.env.APPWRITE_VCS_REPOSITORY_URL) {
-    upsertResourceVariable("functions", "--function-id", id, "OFFGRID_TRACKER_REPOSITORY_URL", process.env.APPWRITE_VCS_REPOSITORY_URL);
-  }
+
   run(["functions", "create-deployment", "--function-id", id, "--code", "../function", "--activate", "true", "--entrypoint", "src/main.js", "--commands", "npm ci"], { cwd: infraDir });
 }

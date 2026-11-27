@@ -6,6 +6,8 @@ import { installSite } from "./site.mjs";
 import { installTimeseries } from "./timeseries.mjs";
 import { installCamera } from "./camera.mjs";
 
+import { installFirmware } from "./firmware.mjs";
+
 configureClient();
 // Reconcile the project-scoped Time Series Store first. This keeps it at the
 // same declarative layer as TablesDB and prevents unrelated Platform or Domain
@@ -14,5 +16,6 @@ await installTimeseries();
 installAuth();
 installDatabase();
 await installCamera();
+await installFirmware();
 installFunction();
 installSite();
