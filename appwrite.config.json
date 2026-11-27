@@ -998,6 +998,21 @@
             "compression": "none",
             "encryption": true,
             "antivirus": true
+        },
+        {
+            "$id": "device-firmware",
+            "name": "Device firmware",
+            "permissions": [],
+            "fileSecurity": true,
+            "enabled": true,
+            "maximumFileSize": 16777216,
+            "allowedFileExtensions": [
+                "hex",
+                "bin"
+            ],
+            "compression": "none",
+            "encryption": true,
+            "antivirus": true
         }
     ]
 }

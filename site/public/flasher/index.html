@@ -1,0 +1,1794 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DAPLink Pro Flasher</title>
+    <meta name="description" content="Driverless WebHID CMSIS-DAP Firmware Flasher and Verification Workbench for Nordic nRF54L15.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 rx=%2222%22 fill=%22%231473E6%22/><path d=%22M25 50h50M50 25v50M32 32l36 36M32 68l36-36%22 stroke=%22%23ffffff%22 stroke-width=%228%22 stroke-linecap=%22round%22/></svg>">
+    <meta property="og:title" content="DAPLink Pro Flasher">
+    <meta property="og:description" content="Driverless WebHID CMSIS-DAP Firmware Flasher and Verification Workbench for Nordic nRF54L15.">
+    <meta property="og:type" content="website">
+    <!-- Bundled DAP.js for direct WebHID / WebUSB CMSIS-DAP browser support -->
+    <script src="dap.umd.js"></script>
+    <script src="firmware-hex.js"></script>
+    <style>
+        :root {
+            --radius-outer: 12px;
+            --radius-inner: 8px;
+        }
+
+        /* Light Mode - Developer Tool / Clean IDE Style (Default) */
+        :root, html[data-theme="light"], html[data-theme="auto"] {
+            --bg: #F1F4F8;
+            --surface: #FFFFFF;
+            --surface-hover: #FFFFFF;
+            --inner-card-bg: #F5F7FA;
+            --drop-bg: #F5F7FA;
+            --drop-dragover-bg: rgba(20, 115, 230, 0.06);
+            --border: #D5DCE5;
+            --border-hover: #B8C3D2;
+            --border-focus: #1473E6;
+            --text-primary: #202938;
+            --text-secondary: #64748B;
+            --text-tertiary: #94A3B8;
+            --apple-blue: #1473E6;
+            --apple-blue-hover: #0D62C9;
+            --apple-green: #28A745;
+            --apple-red: #E53E3E;
+            --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 1px 2px rgba(0, 0, 0, 0.03);
+            --segmented-bg: #E2E8F0;
+            --segmented-btn-active-bg: #FFFFFF;
+            --segmented-btn-active-color: #202938;
+            --segmented-btn-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+            --uid-bg: rgba(20, 115, 230, 0.08);
+            --uid-color: #1473E6;
+            --btn-subtle-bg: #F5F7FA;
+            --btn-subtle-hover: #E2E8F0;
+            --preset-card-bg: #F5F7FA;
+            --preset-card-hover: #FFFFFF;
+            --preset-active-bg: rgba(20, 115, 230, 0.08);
+            --file-loaded-bg: rgba(20, 115, 230, 0.08);
+            --file-loaded-border: rgba(20, 115, 230, 0.35);
+            --pill-bg: #F5F7FA;
+            --btn-disabled-bg: #E2E8F0;
+            --btn-disabled-color: #94A3B8;
+            --terminal-bg: #1E232D;
+            --terminal-bar-bg: #282F3B;
+            --terminal-text: #A6F3A6;
+        }
+
+        /* Dark Mode - Developer Tool / Pro IDE Style (Clear, Stable, Low-Strain) */
+        html[data-theme="dark"] {
+            --bg: #181D26;
+            --surface: #252C37;
+            --surface-hover: #2C3442;
+            --inner-card-bg: #303846;
+            --drop-bg: #303846;
+            --drop-dragover-bg: rgba(40, 120, 229, 0.15);
+            --border: #485466;
+            --border-hover: #5F6F87;
+            --border-focus: #2878E5;
+            --text-primary: #F2F5F9;
+            --text-secondary: #B8C3D2;
+            --text-tertiary: #8E99AA;
+            --apple-blue: #2878E5;
+            --apple-blue-hover: #3A88F2;
+            --apple-green: #34C759;
+            --apple-red: #FF453A;
+            --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+            --segmented-bg: #1C222D;
+            --segmented-btn-active-bg: #303846;
+            --segmented-btn-active-color: #F2F5F9;
+            --segmented-btn-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+            --uid-bg: rgba(40, 120, 229, 0.16);
+            --uid-color: #7EB5FF;
+            --btn-subtle-bg: #303846;
+            --btn-subtle-hover: #3A4352;
+            --preset-card-bg: #303846;
+            --preset-card-hover: #394354;
+            --preset-active-bg: rgba(40, 120, 229, 0.18);
+            --file-loaded-bg: rgba(40, 120, 229, 0.14);
+            --file-loaded-border: rgba(40, 120, 229, 0.45);
+            --pill-bg: #303846;
+            --btn-disabled-bg: #3A4352;
+            --btn-disabled-color: #8E99AA;
+            --terminal-bg: #181D26;
+            --terminal-bar-bg: #212732;
+            --terminal-text: #7EE787;
+        }
+
+        /* Auto Mode follows system appearance */
+        @media (prefers-color-scheme: dark) {
+            html[data-theme="auto"] {
+                --bg: #181D26;
+                --surface: #252C37;
+                --surface-hover: #2C3442;
+                --inner-card-bg: #303846;
+                --drop-bg: #303846;
+                --drop-dragover-bg: rgba(40, 120, 229, 0.15);
+                --border: #485466;
+                --border-hover: #5F6F87;
+                --border-focus: #2878E5;
+                --text-primary: #F2F5F9;
+                --text-secondary: #B8C3D2;
+                --text-tertiary: #8E99AA;
+                --apple-blue: #2878E5;
+                --apple-blue-hover: #3A88F2;
+                --apple-green: #34C759;
+                --apple-red: #FF453A;
+                --card-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+                --segmented-bg: #1C222D;
+                --segmented-btn-active-bg: #303846;
+                --segmented-btn-active-color: #F2F5F9;
+                --segmented-btn-active-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+                --uid-bg: rgba(40, 120, 229, 0.16);
+                --uid-color: #7EB5FF;
+                --btn-subtle-bg: #303846;
+                --btn-subtle-hover: #3A4352;
+                --preset-card-bg: #303846;
+                --preset-card-hover: #394354;
+                --preset-active-bg: rgba(40, 120, 229, 0.18);
+                --file-loaded-bg: rgba(40, 120, 229, 0.14);
+                --file-loaded-border: rgba(40, 120, 229, 0.45);
+                --pill-bg: #303846;
+                --btn-disabled-bg: #3A4352;
+                --btn-disabled-color: #8E99AA;
+                --terminal-bg: #181D26;
+                --terminal-bar-bg: #212732;
+                --terminal-text: #7EE787;
+            }
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text-primary);
+            padding: 32px 20px;
+            line-height: 1.45;
+            -webkit-font-smoothing: antialiased;
+            transition: background 0.3s cubic-bezier(0.4, 0, 0.2, 1), color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        /* Header Navigation */
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            gap: 16px;
+        }
+
+        .brand-title {
+            display: flex;
+            align-items: baseline;
+            gap: 10px;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .brand-name {
+            font-size: 21px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: var(--text-primary);
+            white-space: nowrap;
+        }
+
+        .brand-subtitle {
+            font-size: 14px;
+            font-weight: normal;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .target-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--pill-bg);
+            border: 1px solid var(--border);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .target-pill .dot {
+            width: 7px;
+            height: 7px;
+            border-radius: 50%;
+            background: var(--apple-blue);
+        }
+
+        /* Language Picker */
+        .lang-selector-wrap {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .apple-select {
+            appearance: none;
+            -webkit-appearance: none;
+            background: var(--segmented-bg);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            padding: 5px 26px 5px 12px;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 8px;
+            cursor: pointer;
+            outline: none;
+            font-family: inherit;
+            white-space: nowrap;
+            background-image: url('data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%2386868b%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E');
+            background-repeat: no-repeat;
+            background-position: right 9px top 50%;
+            background-size: 8px auto;
+            transition: border-color 0.15s ease;
+        }
+
+        .apple-select option {
+            background: var(--bg);
+            color: var(--text-primary);
+        }
+
+        .theme-switch-group {
+            display: inline-flex;
+            align-items: center;
+            background: var(--segmented-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2px;
+            white-space: nowrap;
+        }
+
+        .theme-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 4px 10px;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+        }
+
+        .theme-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .theme-btn.active {
+            background: var(--segmented-btn-active-bg);
+            color: var(--segmented-btn-active-color);
+            box-shadow: var(--segmented-btn-active-shadow);
+        }
+
+        @media (max-width: 768px) {
+            header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+            .header-actions {
+                width: 100%;
+                justify-content: space-between;
+            }
+        }
+
+        /* Card Base */
+        .glass-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-outer);
+            padding: 20px 22px;
+            margin-bottom: 18px;
+            box-shadow: var(--card-shadow);
+            transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+        }
+
+        .card-title {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-secondary);
+        }
+
+        /* Hardware Probe Row */
+        .probe-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: var(--inner-card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-inner);
+            padding: 14px 18px;
+        }
+
+        .probe-main {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .status-orb {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--text-tertiary);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            flex-shrink: 0;
+        }
+
+        .status-orb.online {
+            background: var(--apple-green);
+            box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.2);
+        }
+
+        .status-orb.offline {
+            background: var(--apple-red);
+            box-shadow: 0 0 0 4px rgba(255, 59, 48, 0.2);
+        }
+
+        .probe-labels h3 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .probe-labels p {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .uid-tag {
+            font-family: "SF Mono", Menlo, Consolas, monospace;
+            font-size: 14px;
+            font-weight: 500;
+            background: var(--uid-bg);
+            border: 1px solid var(--border);
+            color: var(--uid-color);
+            padding: 4px 10px;
+            border-radius: 6px;
+            white-space: nowrap;
+        }
+
+        .btn-subtle {
+            background: var(--btn-subtle-bg);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+        .btn-subtle:hover {
+            background: var(--btn-subtle-hover);
+            color: var(--text-primary);
+        }
+
+        /* Drag & Drop Surface */
+        .drop-surface {
+            border: 1.5px dashed var(--border);
+            border-radius: var(--radius-inner);
+            padding: 26px 20px;
+            text-align: center;
+            cursor: pointer;
+            background: var(--drop-bg);
+            transition: all 0.2s;
+        }
+
+        .drop-surface:hover, .drop-surface.dragover {
+            border-color: var(--apple-blue);
+            background: var(--drop-dragover-bg);
+        }
+
+        .drop-icon {
+            font-size: 28px;
+            margin-bottom: 6px;
+            color: var(--text-secondary);
+        }
+
+        .drop-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-primary);
+        }
+
+        .drop-hint {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .file-loaded-card {
+            display: none;
+            margin-top: 12px;
+            background: var(--file-loaded-bg);
+            border: 1px solid var(--file-loaded-border);
+            border-radius: var(--radius-inner);
+            padding: 12px 16px;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        /* Preset Card */
+        .presets-label {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin: 18px 0 10px 0;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .presets-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .preset-card {
+            background: var(--preset-card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-inner);
+            padding: 12px 14px;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.15s;
+            max-width: 430px;
+            flex: 1 1 330px;
+        }
+
+        .preset-card:hover {
+            background: var(--preset-card-hover);
+            border-color: var(--border-hover);
+        }
+
+        .preset-card.active {
+            background: var(--preset-active-bg);
+            border-color: var(--apple-blue);
+            box-shadow: 0 0 0 1px var(--apple-blue);
+        }
+
+        .preset-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .preset-sub {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 3px;
+        }
+
+        /* Control Options Row */
+        .controls-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 18px;
+            padding-top: 16px;
+            border-top: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 14px;
+        }
+
+        .segmented-group {
+            display: inline-flex;
+            align-items: center;
+            background: var(--segmented-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 2px;
+            white-space: nowrap;
+        }
+
+        .segmented-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 5px 14px;
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            white-space: nowrap;
+        }
+
+        .segmented-btn:hover {
+            color: var(--text-primary);
+        }
+
+        .segmented-btn.active {
+            background: var(--segmented-btn-active-bg);
+            color: var(--segmented-btn-active-color);
+            box-shadow: var(--segmented-btn-active-shadow);
+        }
+
+        .checkbox-container {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .checkbox-container input {
+            accent-color: var(--apple-blue);
+            width: 15px;
+            height: 15px;
+        }
+
+        /* Progress Bar (Apple HIG Style) */
+        .progress-wrap {
+            margin-top: 16px;
+            background: var(--inner-card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-inner);
+            padding: 12px 16px;
+            animation: fadeIn 0.2s ease;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            white-space: nowrap;
+        }
+
+        .progress-bar-bg {
+            width: 100%;
+            height: 6px;
+            background: var(--segmented-bg);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--apple-blue);
+            border-radius: 3px;
+            transition: width 0.1s linear;
+        }
+
+        .progress-stats {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 14px;
+            color: var(--text-tertiary);
+            font-family: "SF Mono", Menlo, Consolas, monospace;
+            margin-top: 6px;
+            white-space: nowrap;
+        }
+
+        /* Primary Action Button */
+        .btn-action {
+            width: 100%;
+            background: var(--apple-blue);
+            color: #ffffff;
+            border: 1px solid transparent;
+            padding: 13px 20px;
+            border-radius: var(--radius-inner);
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            margin-top: 16px;
+            transition: background 0.15s, border-color 0.15s, transform 0.05s;
+            white-space: nowrap;
+        }
+
+        .btn-action:hover:not(:disabled) {
+            background: var(--apple-blue-hover);
+        }
+
+        .btn-action:active:not(:disabled) {
+            transform: scale(0.992);
+        }
+
+        .btn-action:disabled {
+            background: var(--btn-disabled-bg);
+            color: var(--btn-disabled-color);
+            border: 1px solid var(--border);
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        /* Verdict Notification Banner */
+        .verdict-banner {
+            display: none;
+            border-radius: var(--radius-inner);
+            padding: 14px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 18px;
+            align-items: center;
+            gap: 12px;
+            animation: slideDown 0.25s ease-out;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .verdict-banner.pass {
+            display: flex;
+            background: rgba(52, 199, 89, 0.12);
+            border: 1px solid rgba(52, 199, 89, 0.4);
+            color: var(--apple-green);
+        }
+
+        .verdict-banner.fail {
+            display: flex;
+            background: rgba(255, 59, 48, 0.12);
+            border: 1px solid rgba(255, 59, 48, 0.4);
+            color: var(--apple-red);
+        }
+
+        /* Modern Console Window */
+        .terminal-window {
+            background: var(--terminal-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-inner);
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.18);
+        }
+
+        .terminal-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 9px 14px;
+            background: var(--terminal-bar-bg);
+            border-bottom: 1px solid var(--border);
+        }
+
+        .terminal-title-area {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .terminal-icon {
+            font-family: "SF Mono", Menlo, Consolas, monospace;
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--apple-blue);
+        }
+
+        .terminal-body {
+            height: 250px;
+            overflow-y: auto;
+            padding: 12px 16px;
+            font-family: "SF Mono", Menlo, Consolas, monospace;
+            font-size: 14px;
+            color: var(--terminal-text);
+            white-space: pre-wrap;
+            word-break: break-all;
+            line-height: 1.6;
+        }
+
+        .spinner {
+            width: 15px;
+            height: 15px;
+            border: 2px solid rgba(255, 255, 255, 0.25);
+            border-top-color: #ffffff;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header>
+            <div class="brand-title">
+                <span class="brand-name">DAPLink Pro</span>
+                <span class="brand-subtitle" data-i18n="brand_sub">Firmware Flasher &amp; Verification Workbench</span>
+            </div>
+            <div class="header-actions">
+                <div class="target-pill">
+                    <span class="dot"></span>
+                    <span data-i18n="target_chip">Nordic nRF54L15</span>
+                </div>
+                <div class="lang-selector-wrap">
+                    <select id="lang-select" class="apple-select" title="Language">
+                        <option value="en" selected>🇺🇸 English</option>
+                        <option value="zh">🇨🇳 简体中文</option>
+                        <option value="ja">🇯🇵 日本語</option>
+                        <option value="ko">🇰🇷 한국어</option>
+                        <option value="de">🇩🇪 Deutsch</option>
+                    </select>
+                </div>
+                <div class="theme-switch-group">
+                    <button type="button" class="theme-btn active" data-theme-val="light" data-i18n="theme_light" title="Light Mode">☀️ Light</button>
+                    <button type="button" class="theme-btn" data-theme-val="dark" data-i18n="theme_dark" title="Dark Mode">🌙 Dark</button>
+                    <button type="button" class="theme-btn" data-theme-val="auto" data-i18n="theme_auto" title="Follow System">💻 Auto</button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Hardware Probe Card -->
+        <div class="glass-card">
+            <div class="card-header">
+                <span class="card-title" data-i18n="hw_title">Hardware Connection</span>
+                <button class="btn-subtle" id="btn-connect-usb" type="button" style="background: var(--apple-blue); color: #fff; font-weight: 600;" data-i18n="btn_connect_probe">Connect USB Probe</button>
+            </div>
+            <div class="probe-row">
+                <div class="probe-main">
+                    <div id="status-orb" class="status-orb offline"></div>
+                    <div class="probe-labels">
+                        <h3 id="probe-name" data-i18n="probe_offline">No DAPLink Probe Connected</h3>
+                        <p id="probe-sub" data-i18n="probe_offline_hint">Click 'Connect USB Probe' to pair your DAPLink (Chrome/Edge)</p>
+                    </div>
+                </div>
+                <div>
+                    <span id="probe-uid" class="uid-tag">Disconnected</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Target Firmware Card -->
+        <div class="glass-card">
+            <div class="card-header">
+                <span class="card-title" data-i18n="fw_title">Target Firmware Image</span>
+                <span style="font-size: 14px; color: var(--text-tertiary);" data-i18n="fw_sub">Supports .hex / .bin formats</span>
+            </div>
+
+            <!-- Drag & Drop Zone -->
+            <div class="drop-surface" id="drop-zone">
+                <div class="drop-icon">⤓</div>
+                <div class="drop-title" data-i18n="drop_title">Drag & drop firmware here, or click to browse</div>
+                <div class="drop-hint" data-i18n="drop_hint">Seamlessly parses Intel HEX sector structures</div>
+                <input type="file" id="file-input" accept=".hex,.bin" style="display: none;">
+            </div>
+
+            <!-- Loaded File Banner -->
+            <div class="file-loaded-card" id="file-loaded-card">
+                <div>
+                    <div style="font-size: 14px; font-weight: 600; color: var(--text-primary);" id="file-name">None</div>
+                    <div style="font-size: 14px; color: var(--text-secondary); margin-top: 2px;" id="file-meta">-</div>
+                </div>
+                <button class="btn-subtle" id="btn-clear-file" type="button" data-i18n="btn_reselect">Clear</button>
+            </div>
+
+            <!-- Preset Firmware -->
+            <div class="presets-label" data-i18n="presets_label">Preset Test Firmware (Click to load)</div>
+            <div class="presets-grid" id="presets-grid"></div>
+
+            <!-- SWD Options Row -->
+            <div class="controls-row">
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    <span style="font-size: 14px; color: var(--text-secondary); white-space: nowrap;" data-i18n="swd_speed">SWD Clock</span>
+                    <div class="segmented-group" id="freq-segmented">
+                        <button type="button" class="segmented-btn active" data-freq="4000000" data-i18n="freq_4mhz">4 MHz (Recommended)</button>
+                        <button type="button" class="segmented-btn" data-freq="2000000">2 MHz</button>
+                        <button type="button" class="segmented-btn" data-freq="1000000">1 MHz</button>
+                    </div>
+                </div>
+                <label class="checkbox-container">
+                    <input type="checkbox" id="verify-check" checked>
+                    <span data-i18n="verify_label">Byte-for-byte readback verification (Verify)</span>
+                </label>
+            </div>
+
+            <!-- Real-Time Progress Bar -->
+            <div class="progress-wrap" id="progress-wrap" style="display: none;">
+                <div class="progress-header">
+                    <span id="progress-label" data-i18n="progress_flashing">Flashing RRAM sectors...</span>
+                    <span id="progress-percent">0%</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="progress-bytes">0 / 0 KB</span>
+                    <span id="progress-speed">0.0 KB/s</span>
+                </div>
+            </div>
+
+            <!-- Flash Action Button -->
+            <button class="btn-action" id="btn-flash" type="button" disabled>
+                <span class="spinner" id="flash-spinner" style="display: none;"></span>
+                <span id="flash-btn-text" data-i18n="btn_need_probe">Please connect DAPLink probe first</span>
+            </button>
+        </div>
+
+        <!-- Verdict Banner -->
+        <div class="verdict-banner" id="verdict-banner">
+            <span style="font-size: 18px;" id="verdict-icon">✔</span>
+            <span id="verdict-text" data-i18n="pass_text">Flash Succeeded! 100% byte-for-byte readback verified [PASS]</span>
+        </div>
+
+        <!-- Real-Time Console Window -->
+        <div class="glass-card" style="padding: 0; overflow: hidden;">
+            <div class="terminal-window">
+                <div class="terminal-bar">
+                    <div class="terminal-title-area">
+                        <span class="terminal-icon">&gt;_</span>
+                        <span data-i18n="term_title">Flasher & Verification Console</span>
+                    </div>
+                    <button class="btn-subtle" id="btn-clear-log" type="button" style="font-size: 14px; padding: 3px 8px;" data-i18n="btn_clear_log">Clear Logs</button>
+                </div>
+                <div class="terminal-body" id="terminal" data-i18n="term_ready">Workbench ready. WebHID enabled. Please connect DAPLink probe and select firmware...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var NL = String.fromCharCode(10);
+
+        // Internationalization Dictionary (Default: English)
+        var I18N = {
+            en: {
+                brand_sub: "Firmware Flasher & Verification Workbench",
+                target_chip: "Nordic nRF54L15",
+                theme_light: "☀️ Light",
+                theme_dark: "🌙 Dark",
+                theme_auto: "💻 Auto",
+                hw_title: "Hardware Connection",
+                btn_connect_probe: "Connect USB Probe",
+                probe_offline: "No DAPLink Probe Connected",
+                probe_offline_hint: "Click 'Connect USB Probe' to pair your DAPLink (Chrome/Edge)",
+                probe_online_sub: "Hardware Online · Link to nRF54L15 Ready",
+                uid_disconnected: "Disconnected",
+                fw_title: "Target Firmware Image",
+                fw_sub: "Supports .hex / .bin formats",
+                drop_title: "Drag & drop firmware here, or click to browse",
+                drop_hint: "Seamlessly parses Intel HEX sector structures",
+                btn_reselect: "Clear",
+                presets_label: "Published firmware (nRF54L15)",
+                preset_blink_name: "Hardware Blink Test (Blink LED)",
+                preset_blink_desc: "blink_p205_build/merged.hex (P2.05 LED blink)",
+                preset_lowpower_name: "System OFF Low Power (1.82 µA)",
+                preset_lowpower_desc: "system_off_low_power.hex (Deep sleep 1.82 µA benchmark)",
+                swd_speed: "SWD Clock",
+                freq_4mhz: "4 MHz (Recommended)",
+                verify_label: "Byte-for-byte readback verification (Verify)",
+                btn_need_probe: "Please connect DAPLink probe first",
+                btn_need_file: "Please select or drop a firmware image",
+                btn_flash_prefix: "Flash & Verify -> ",
+                btn_flashing: "Flashing & Verifying sectors...",
+                progress_flashing: "Flashing RRAM sectors...",
+                progress_verifying: "Verifying readback byte-for-byte...",
+                pass_text: "Flash Succeeded! 100% byte-for-byte readback verified [PASS]",
+                fail_text: "Flashing or verification failed. Please inspect terminal logs.",
+                term_title: "Flasher & Verification Console",
+                btn_clear_log: "Clear Logs",
+                term_ready: "Workbench ready. WebHID enabled. Please connect DAPLink probe and select firmware...",
+                file_ready_prefix: "Local file: ",
+                file_size_prefix: "Size: ",
+                file_size_suffix: " KB (Ready)"
+            },
+            zh: {
+                brand_sub: "固件烧录与全量回读校验工作台",
+                target_chip: "Nordic nRF54L15",
+                theme_light: "☀️ 浅色",
+                theme_dark: "🌙 深色",
+                theme_auto: "💻 自动",
+                hw_title: "硬件连接状态",
+                btn_connect_probe: "连接 USB 探针",
+                probe_offline: "未连接 DAPLink 探针",
+                probe_offline_hint: "请点击「连接 USB 探针」配对您的 DAPLink (支持 Chrome/Edge)",
+                probe_online_sub: "硬件在线 · 目标芯片 nRF54L15 链路就绪",
+                uid_disconnected: "未连接",
+                fw_title: "待烧录目标固件",
+                fw_sub: "支持 .hex / .bin 格式",
+                drop_title: "拖拽固件到此处，或点击浏览本地文件",
+                drop_hint: "无缝解析 Intel HEX 扇区结构并预备烧录",
+                btn_reselect: "重选",
+                presets_label: "已公开固件（nRF54L15）",
+                preset_blink_name: "点灯硬件验证 (Blink LED)",
+                preset_blink_desc: "blink_p205_build/merged.hex (P2.05 LED 点灯测试)",
+                preset_lowpower_name: "System OFF 极低功耗验证 (1.82 µA)",
+                preset_lowpower_desc: "system_off_low_power.hex (整机实测 1.82 µA 极限休眠基准)",
+                swd_speed: "SWD 速度",
+                freq_4mhz: "4 MHz (推荐)",
+                verify_label: "逐字节全量回读校验 (Verify)",
+                btn_need_probe: "请先连接 DAPLink 探针",
+                btn_need_file: "请选择或上传固件",
+                btn_flash_prefix: "一键烧录并校验 -> ",
+                btn_flashing: "正在烧录与逐字节校验中...",
+                progress_flashing: "正在写入 RRAM 扇区...",
+                progress_verifying: "正在进行全量逐字节回读校验...",
+                pass_text: "烧录成功！全片 Flash 逐字节回读校验 100% 通过 [PASS]",
+                fail_text: "烧录未成功或校验未通过，请查看控制台日志排查原因。",
+                term_title: "烧录与校验控制台",
+                btn_clear_log: "清空日志",
+                term_ready: "工作台就绪，WebHID 免驱模式已就绪。请连接探针并选择固件...",
+                file_ready_prefix: "本地文件: ",
+                file_size_prefix: "大小: ",
+                file_size_suffix: " KB (就绪)"
+            },
+            ja: {
+                brand_sub: "ファームウェア書き込み＆ベリファイ",
+                target_chip: "Nordic nRF54L15",
+                theme_light: "☀️ ライト",
+                theme_dark: "🌙 ダーク",
+                theme_auto: "💻 自動",
+                hw_title: "ハードウェア接続状態",
+                btn_connect_probe: "USBプローブ接続",
+                probe_offline: "DAPLinkプローブが未接続です",
+                probe_offline_hint: "「USBプローブ接続」をクリックしてDAPLinkをペアリングしてください",
+                probe_online_sub: "オンライン · nRF54L15リンク準備完了",
+                uid_disconnected: "未接続",
+                fw_title: "書き込み対象ファームウェア",
+                fw_sub: ".hex / .bin 形式に対応",
+                drop_title: "ここにファームウェアをドラッグ、または参照",
+                drop_hint: "Intel HEXセクター構造を自動解析して準備",
+                btn_reselect: "クリア",
+                presets_label: "公開ファームウェア（nRF54L15）",
+                preset_blink_name: "LED点灯ハードウェア検証 (Blink LED)",
+                preset_blink_desc: "blink_p205_build/merged.hex (P2.05 LED点滅テスト)",
+                preset_lowpower_name: "System OFF 超低消費電力検証 (1.82 µA)",
+                preset_lowpower_desc: "system_off_low_power.hex (実測 1.82 µA スリープベンチマーク)",
+                swd_speed: "SWDクロック",
+                freq_4mhz: "4 MHz (推奨)",
+                verify_label: "バイト単位の全量ベリファイ照合 (Verify)",
+                btn_need_probe: "先にDAPLinkプローブを接続してください",
+                btn_need_file: "ファームウェアを選択またはアップロードしてください",
+                btn_flash_prefix: "書き込み＆検証実行 -> ",
+                btn_flashing: "書き込み＆ベリファイ実行中...",
+                progress_flashing: "RRAMセクター書き込み中...",
+                progress_verifying: "全量バイト単位ベリファイ中...",
+                pass_text: "書き込み成功！全フラッシュ100%バイト一致検証完了 [PASS]",
+                fail_text: "書き込みまたはベリファイに失敗しました。ログを確認してください。",
+                term_title: "書き込み＆検証コンソール",
+                btn_clear_log: "ログ消去",
+                term_ready: "ワークベンチ準備完了。WebHID対応。プローブを接続してください...",
+                file_ready_prefix: "ローカルファイル: ",
+                file_size_prefix: "サイズ: ",
+                file_size_suffix: " KB (準備完了)"
+            },
+            ko: {
+                brand_sub: "펌웨어 플래시 및 검증 워크벤치",
+                target_chip: "Nordic nRF54L15",
+                theme_light: "☀️ 라이트",
+                theme_dark: "🌙 다크",
+                theme_auto: "💻 자동",
+                hw_title: "하드웨어 연결 상태",
+                btn_connect_probe: "USB 프로브 연결",
+                probe_offline: "DAPLink 프로브 연결 안 됨",
+                probe_offline_hint: "'USB 프로브 연결'을 클릭하여 DAPLink를 페어링하십시오",
+                probe_online_sub: "하드웨어 온라인 · nRF54L15 링크 준비 완료",
+                uid_disconnected: "연결 안 됨",
+                fw_title: "플래시 대상 펌웨어",
+                fw_sub: ".hex / .bin 형식 지원",
+                drop_title: "여기에 펌웨어를 드래그하거나 클릭하여 파일 선택",
+                drop_hint: "Intel HEX 섹터 구조를 자동 분석하여 준비",
+                btn_reselect: "지우기",
+                presets_label: "공개 펌웨어 (nRF54L15)",
+                preset_blink_name: "LED 점등 하드웨어 검증 (Blink LED)",
+                preset_blink_desc: "blink_p205_build/merged.hex (P2.05 LED 점멸 테스트)",
+                preset_lowpower_name: "System OFF 초저전력 검증 (1.82 µA)",
+                preset_lowpower_desc: "system_off_low_power.hex (실측 1.82 µA 슬립 벤치마크)",
+                swd_speed: "SWD 속도",
+                freq_4mhz: "4 MHz (권장)",
+                verify_label: "바이트 단위 전체 검증 (Verify)",
+                btn_need_probe: "먼저 DAPLink 프로브를 연결하십시오",
+                btn_need_file: "펌웨어를 선택하거나 업로드하십시오",
+                btn_flash_prefix: "플래시 및 검증 시작 -> ",
+                btn_flashing: "플래시 및 바이트 검증 진행 중...",
+                progress_flashing: "RRAM 섹터 플래시 중...",
+                progress_verifying: "바이트 단위 전체 검증 중...",
+                pass_text: "플래시 성공! 플래시 100% 바이트 일치 검증 완료 [PASS]",
+                fail_text: "플래시 또는 검증에 실패했습니다. 로그를 확인하십시오.",
+                term_title: "플래시 및 검증 콘솔",
+                btn_clear_log: "로그 지우기",
+                term_ready: "워크벤치 준비 완료. WebHID 지원. 프로브를 연결하십시오...",
+                file_ready_prefix: "로컬 파일: ",
+                file_size_prefix: "크기: ",
+                file_size_suffix: " KB (준비됨)"
+            },
+            de: {
+                brand_sub: "Firmware-Flasher & Verifikations-Workbench",
+                target_chip: "Nordic nRF54L15",
+                theme_light: "☀️ Hell",
+                theme_dark: "🌙 Dunkel",
+                theme_auto: "💻 Auto",
+                hw_title: "Hardware-Verbindungsstatus",
+                btn_connect_probe: "USB-Sonde verbinden",
+                probe_offline: "Keine DAPLink-Sonde verbunden",
+                probe_offline_hint: "Klicken Sie auf 'USB-Sonde verbinden' zum Koppeln (Chrome/Edge)",
+                probe_online_sub: "Hardware online · Verbindung zu nRF54L15 bereit",
+                uid_disconnected: "Getrennt",
+                fw_title: "Ziel-Firmware-Image",
+                fw_sub: "Unterstützt .hex / .bin Formate",
+                drop_title: "Firmware hierher ziehen oder durchsuchen",
+                drop_hint: "Parst Intel-HEX-Sektorstrukturen automatisch",
+                btn_reselect: "Neu wählen",
+                presets_label: "Veröffentlichte Firmware (nRF54L15)",
+                preset_blink_name: "Hardware-LED-Blinktest (Blink LED)",
+                preset_blink_desc: "blink_p205_build/merged.hex (P2.05 LED-Blinktest)",
+                preset_lowpower_name: "System OFF Ultra-Niedrigstrom (1.82 µA)",
+                preset_lowpower_desc: "system_off_low_power.hex (Gemessene 1.82 µA Tiefschlaf-Referenz)",
+                swd_speed: "SWD-Takt",
+                freq_4mhz: "4 MHz (Empfohlen)",
+                verify_label: "Vollständige Byte-für-Byte-Verifikation (Verify)",
+                btn_need_probe: "Bitte zuerst DAPLink-Sonde anschließen",
+                btn_need_file: "Bitte Firmware auswählen oder hochladen",
+                btn_flash_prefix: "Flashen & Verifizieren -> ",
+                btn_flashing: "Flashen & Verifizieren läuft...",
+                progress_flashing: "Flashe RRAM-Sektoren...",
+                progress_verifying: "Verifiziere Byte für Byte...",
+                pass_text: "Erfolgreich geflasht! 100% Byte-für-Byte verifiziert [PASS]",
+                fail_text: "Fehlgeschlagen. Bitte Terminal-Protokoll prüfen.",
+                term_title: "Flasher & Verifikations-Konsole",
+                btn_clear_log: "Protokoll leeren",
+                term_ready: "Workbench bereit. WebHID aktiv. Bitte Sonde verbinden...",
+                file_ready_prefix: "Lokale Datei: ",
+                file_size_prefix: "Größe: ",
+                file_size_suffix: " KB (Bereit)"
+            }
+        };
+
+        var currentLang = localStorage.getItem('daplink_flasher_lang') || 'en';
+
+        function t(key) {
+            var dict = I18N[currentLang] || I18N['en'];
+            return dict[key] || (I18N['en'][key] || key);
+        }
+
+        var activeTransport = null;
+        var activeCmsisDap = null;
+        var activeCortexM = null;
+        var connectedDevice = null;
+
+        var selectedFile = null;
+        var selectedFileContent = null;
+        var selectedPreset = null;
+        var currentFreq = 4000000;
+        var isFlashing = false;
+
+        // CoreSight CSW Constant: 32-bit (0x2), auto-increment (0x10), DeviceEn (0x40), MasterType (0x23000000)
+        var CSW_32BIT_AUTOINC = 0x23000052;
+
+        function log(msg) {
+            var term = document.getElementById('terminal');
+            term.textContent += msg + NL;
+            term.scrollTop = term.scrollHeight;
+        }
+
+        var presets = [];
+        var firmwareLoadToken = 0;
+        function renderPresets() {
+            const grid = document.getElementById('presets-grid');
+            grid.replaceChildren();
+            for (const p of presets) {
+                const el = document.createElement('button');
+                el.type = 'button';
+                el.className = 'preset-card' + (selectedPreset?.id === p.id ? ' active' : '');
+                el.textContent = p.name;
+                el.onclick = () => { if (!isFlashing) selectPreset(p, el); };
+                grid.appendChild(el);
+            }
+        }
+        window.addEventListener('message', async function(event) {
+            if (event.origin !== location.origin || event.source !== parent || event.data?.type !== 'firmware-config') return;
+            try {
+                const endpoint = new URL(event.data.endpoint);
+                if (endpoint.protocol !== 'https:' && !['localhost','127.0.0.1'].includes(endpoint.hostname)) throw new Error('HTTPS required');
+                const project = String(event.data.project);
+                const library = endpoint.href.replace(/\/$/, '') + '/storage/buckets/device-firmware/files';
+                const result = [];
+                let cursor = '';
+                do {
+                    const url = new URL(library);
+                    url.searchParams.set('project', project);
+                    url.searchParams.append('queries[]', JSON.stringify({method:'limit',values:[100]}));
+                    url.searchParams.append('queries[]', JSON.stringify({method:'orderDesc',attribute:'$createdAt'}));
+                    if (cursor) url.searchParams.append('queries[]', JSON.stringify({method:'cursorAfter',values:[cursor]}));
+                    const response = await fetch(url, {credentials:'omit'});
+                    if (!response.ok) throw new Error('Firmware library HTTP ' + response.status);
+                    const batch = await response.json();
+                    for (const file of batch.files) {
+                        if (!/^nrf54l15__[A-Za-z0-9][A-Za-z0-9.+-]{0,63}\.(hex|bin)$/.test(file.name) || file.chunksUploaded !== file.chunksTotal) continue;
+                        result.push({id:file.$id,name:file.name,path:library + '/' + encodeURIComponent(file.$id) + '/download?project=' + encodeURIComponent(project)});
+                    }
+                    cursor = batch.files.length === 100 ? batch.files[99].$id : '';
+                } while (cursor);
+                presets = result;
+                renderPresets();
+                log('>>> Published nRF54L15 firmware versions: ' + result.length);
+            } catch(error) { log('[Error] ' + error.message); }
+        });
+
+        function updateButtonState() {
+            var btn = document.getElementById('btn-flash');
+            var text = document.getElementById('flash-btn-text');
+
+            if (isFlashing) {
+                btn.disabled = true;
+                return;
+            }
+
+            if (!connectedDevice || !activeTransport) {
+                btn.disabled = true;
+                text.textContent = t('btn_need_probe');
+            } else if ((!selectedFile && !selectedPreset) || !selectedFileContent) {
+                btn.disabled = true;
+                text.textContent = t('btn_need_file');
+            } else {
+                btn.disabled = false;
+                var fileName = selectedFile ? selectedFile.name : selectedPreset.name;
+                text.textContent = t('btn_flash_prefix') + fileName;
+            }
+        }
+
+        function applyLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('daplink_flasher_lang', lang);
+            document.getElementById('lang-select').value = lang;
+
+            var elements = document.querySelectorAll('[data-i18n]');
+            for (var i = 0; i < elements.length; i++) {
+                var el = elements[i];
+                var key = el.getAttribute('data-i18n');
+                var val = t(key);
+                if (val) el.textContent = val;
+            }
+
+            renderPresets();
+            updateButtonState();
+
+            // Synchronize loaded file card label if preset is selected
+            if (selectedPreset) {
+                document.getElementById('file-name').textContent = selectedPreset.name;
+            } else if (selectedFile) {
+                document.getElementById('file-name').textContent = t('file_ready_prefix') + selectedFile.name;
+            }
+
+            if (connectedDevice) {
+                document.getElementById('probe-name').textContent = connectedDevice.productName || 'XV-Link CMSIS-DAP';
+                var uidTag = document.getElementById('probe-uid');
+                uidTag.textContent = 'Online';
+                uidTag.style.background = 'rgba(52, 199, 89, 0.12)';
+                uidTag.style.color = 'var(--apple-green)';
+                uidTag.style.borderColor = 'rgba(52, 199, 89, 0.35)';
+            } else {
+                document.getElementById('probe-name').textContent = t('probe_offline');
+                document.getElementById('probe-sub').textContent = t('probe_offline_hint');
+                var uidTag = document.getElementById('probe-uid');
+                uidTag.textContent = t('uid_disconnected');
+                uidTag.style.background = '';
+                uidTag.style.color = '';
+                uidTag.style.borderColor = '';
+            }
+        }
+
+        document.getElementById('lang-select').onchange = function() {
+            applyLanguage(this.value);
+        };
+
+        // Theme management
+        var currentTheme = localStorage.getItem('daplink_flasher_theme') || 'light';
+        function applyTheme(theme) {
+            currentTheme = theme;
+            localStorage.setItem('daplink_flasher_theme', theme);
+            document.documentElement.setAttribute('data-theme', theme);
+
+            var themeBtns = document.querySelectorAll('.theme-btn');
+            for (var i = 0; i < themeBtns.length; i++) {
+                if (themeBtns[i].getAttribute('data-theme-val') === theme) {
+                    themeBtns[i].classList.add('active');
+                } else {
+                    themeBtns[i].classList.remove('active');
+                }
+            }
+        }
+
+        var themeBtns = document.querySelectorAll('.theme-btn');
+        for (var i = 0; i < themeBtns.length; i++) {
+            themeBtns[i].onclick = function() {
+                applyTheme(this.getAttribute('data-theme-val'));
+            };
+        }
+        applyTheme(currentTheme);
+
+        // Native Browser WebHID Transport for CMSIS-DAP
+        class BrowserWebHIDTransport {
+            constructor(device) {
+                this.device = device;
+                this.packetSize = 64;
+                this.queue = [];
+                this.resolveWait = null;
+
+                this.onInputReport = (event) => {
+                    if (this.resolveWait) {
+                        const cb = this.resolveWait;
+                        this.resolveWait = null;
+                        cb(event.data);
+                    } else {
+                        this.queue.push(event.data);
+                    }
+                };
+
+                this.device.addEventListener('inputreport', this.onInputReport);
+            }
+
+            async open() {
+                if (!this.device.opened) {
+                    await this.device.open();
+                }
+            }
+
+            async close() {
+                if (this.device.opened) {
+                    try {
+                        this.device.removeEventListener('inputreport', this.onInputReport);
+                        await this.device.close();
+                    } catch (e) {}
+                }
+            }
+
+            clearQueue() {
+                this.queue = [];
+                this.resolveWait = null;
+            }
+
+            async read() {
+                if (this.queue.length > 0) {
+                    return this.queue.shift();
+                }
+                return new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        this.resolveWait = null;
+                        reject(new Error('WebHID read timeout (5000ms)'));
+                    }, 5000);
+                    this.resolveWait = (data) => {
+                        clearTimeout(timer);
+                        resolve(data);
+                    };
+                });
+            }
+
+            async write(data) {
+                const u8 = new Uint8Array(data.buffer ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data);
+                let sendData = u8;
+                if (u8.length < this.packetSize) {
+                    sendData = new Uint8Array(this.packetSize);
+                    sendData.set(u8);
+                }
+                let reportId = 0;
+                if (this.device.collections && this.device.collections.length > 0) {
+                    const col = this.device.collections[0];
+                    if (col.outputReports && col.outputReports.length > 0 && col.outputReports[0].reportId) {
+                        reportId = col.outputReports[0].reportId;
+                    }
+                }
+                await this.device.sendReport(reportId, sendData);
+            }
+        }
+
+        // Establish probe connection
+        async function connectProbeWithDevice(device) {
+            log('>>> Initializing WebHID transport for ' + (device.productName || 'CMSIS-DAP') + ' (VID: 0x' + device.vendorId.toString(16).toUpperCase() + ', PID: 0x' + device.productId.toString(16).toUpperCase() + ')...');
+
+            if (activeTransport) {
+                await activeTransport.close();
+            }
+
+            activeTransport = new BrowserWebHIDTransport(device);
+            await activeTransport.open();
+
+            var probeSubText = t('probe_online_sub');
+
+            if (window.DAPjs) {
+                activeCmsisDap = new DAPjs.CmsisDAP(activeTransport);
+                activeCortexM = new DAPjs.CortexM(activeCmsisDap);
+                await activeCortexM.connect();
+
+                log('[PASS] CMSIS-DAP protocol handshake successful!');
+
+                // Read CoreSight and Target Identification
+                try {
+                    var dpidr = await activeCortexM.readDP(0x00);
+                    log('>>> CoreSight DPIDR: 0x' + dpidr.toString(16).toUpperCase() + ' (CoreSight SW-DP v2)');
+
+                    // Read FICR Part Number (0x00FFC31C) and factory BLE MAC (0x00FFC3A4)
+                    var partno = await activeCortexM.readMem32(0x00FFC31C);
+                    var partStr = (partno && partno > 0) ? 'nRF' + partno.toString(16).toUpperCase() : 'nRF54L15';
+
+                    var macLow = await activeCortexM.readMem32(0x00FFC3A4);
+                    var macHigh = await activeCortexM.readMem32(0x00FFC3A8);
+                    var macStr = '';
+                    if (macLow !== undefined && macHigh !== undefined && (macLow !== 0 || macHigh !== 0)) {
+                        var b0 = macLow & 0xFF, b1 = (macLow >> 8) & 0xFF, b2 = (macLow >> 16) & 0xFF, b3 = (macLow >>> 24) & 0xFF;
+                        var b4 = macHigh & 0xFF, b5 = ((macHigh >> 8) & 0xFF) | 0xC0;
+                        macStr = [b5, b4, b3, b2, b1, b0].map(x => x.toString(16).padStart(2, '0').toUpperCase()).join(':');
+                        log('>>> Target Hardware: ' + partStr + ' · Factory BLE MAC: ' + macStr);
+                        probeSubText = 'Target: ' + partStr + ' (DPIDR: 0x' + dpidr.toString(16).toUpperCase() + ') · BLE MAC: ' + macStr;
+                    } else {
+                        log('>>> Target Hardware: ' + partStr);
+                        probeSubText = 'Target: ' + partStr + ' (DPIDR: 0x' + dpidr.toString(16).toUpperCase() + ')';
+                    }
+                } catch (e) {
+                    log('>>> CoreSight SWD interface ready. Target: Nordic nRF54L15.');
+                }
+            }
+
+            connectedDevice = device;
+            var orb = document.getElementById('status-orb');
+            orb.className = 'status-orb online';
+            document.getElementById('probe-name').textContent = device.productName || 'XV-Link CMSIS-DAP';
+            document.getElementById('probe-sub').textContent = probeSubText;
+
+            var uidTag = document.getElementById('probe-uid');
+            uidTag.textContent = 'Online';
+            uidTag.style.background = 'rgba(52, 199, 89, 0.12)';
+            uidTag.style.color = 'var(--apple-green)';
+            uidTag.style.borderColor = 'rgba(52, 199, 89, 0.35)';
+
+            var connectBtn = document.getElementById('btn-connect-usb');
+            connectBtn.textContent = 'Connected';
+            connectBtn.style.background = 'var(--apple-green)';
+
+            updateButtonState();
+        }
+
+        // WebHID Connect logic
+        document.getElementById('btn-connect-usb').onclick = async function() {
+            if (window.location.protocol === 'file:') {
+                alert(currentLang === 'zh'
+                    ? '⚠️ WebHID 浏览器安全规范：\n不能直接通过 file:// 双击打开 HTML 文件。\n\n请在浏览器地址栏打开：HTTPS'
+                    : '⚠️ WebHID Security Requirement:\nCannot be accessed via local file:// URI.\nPlease open HTTPS in your browser.');
+                return;
+            }
+
+            if (!navigator.hid) {
+                alert(currentLang === 'zh'
+                    ? '⚠️ 当前浏览器不支持 WebHID 接口！\n\n请使用桌面版 Google Chrome 或 Microsoft Edge 浏览器打开 HTTPS'
+                    : '⚠️ WebHID is not supported in this browser!\nPlease use desktop Google Chrome or Microsoft Edge via HTTPS');
+                return;
+            }
+
+            try {
+                log('>>> Requesting WebHID USB device authorization...');
+                var DAP_FILTERS = [
+                    { vendorId: 0x1A86, productId: 0x5021 }, // CH32V203 DAPLink V1 (HID)
+                    { vendorId: 0x1A86 },                     // WCH / XV-Link / CH32 DAPLink
+                    { vendorId: 0x0D28 },                     // ARM Mbed / DAPLink (0x0D28)
+                    { vendorId: 0x0483 },                     // ST-Link CMSIS-DAP (0x0483)
+                    { vendorId: 0x2E8A },                     // Raspberry Pi Debug Probe (0x2E8A)
+                    { vendorId: 0x1366 },                     // SEGGER J-Link (0x1366)
+                    { vendorId: 0x1915 },                     // Nordic Semiconductor DK Debugger (0x1915)
+                    { usagePage: 0xFF00 }                     // Vendor-defined HID usage page
+                ];
+
+                var devices = await navigator.hid.requestDevice({ filters: DAP_FILTERS });
+                if (!devices || devices.length === 0) {
+                    log('[Info] Device selection cancelled by user.');
+                    return;
+                }
+
+                await connectProbeWithDevice(devices[0]);
+            } catch (err) {
+                activeTransport = null;
+                activeCmsisDap = null;
+                activeCortexM = null;
+                connectedDevice = null;
+                log('[Error] USB connection failed: ' + err.message);
+                console.error(err);
+                alert(currentLang === 'zh'
+                    ? '连接 USB 探针失败: ' + err.message
+                    : 'Failed to connect USB probe: ' + err.message);
+                updateButtonState();
+            }
+        };
+
+        // WebHID Hotplug and Disconnect Handlers
+        if (navigator.hid) {
+            navigator.hid.addEventListener('disconnect', function(event) {
+                if (connectedDevice && event.device === connectedDevice) {
+                    log('[Notice] DAPLink USB Probe disconnected.');
+                    activeTransport = null;
+                    activeCmsisDap = null;
+                    activeCortexM = null;
+                    connectedDevice = null;
+                    document.getElementById('status-orb').className = 'status-orb offline';
+                    document.getElementById('probe-name').textContent = t('probe_offline');
+                    document.getElementById('probe-sub').textContent = t('probe_offline_hint');
+                    var uidTag = document.getElementById('probe-uid');
+                    uidTag.textContent = t('uid_disconnected');
+                    uidTag.style.background = '';
+                    uidTag.style.color = '';
+                    uidTag.style.borderColor = '';
+
+                    var connectBtn = document.getElementById('btn-connect-usb');
+                    connectBtn.textContent = t('btn_connect_probe');
+                    connectBtn.style.background = 'var(--apple-blue)';
+
+                    updateButtonState();
+                }
+            });
+
+            navigator.hid.getDevices().then(function(devices) {
+                if (devices && devices.length > 0) {
+                    for (var i = 0; i < devices.length; i++) {
+                        var d = devices[i];
+                        if (d.vendorId === 0x1A86 || (d.productName && d.productName.toLowerCase().indexOf('dap') !== -1)) {
+                            log('[Info] Previously paired probe detected: ' + (d.productName || 'CMSIS-DAP') + ' (VID: 0x' + d.vendorId.toString(16).toUpperCase() + '). Click "Connect USB Probe" to activate.');
+                            break;
+                        }
+                    }
+                }
+            }).catch(function() {});
+        }
+
+        // File drag and drop
+        var dropZone = document.getElementById('drop-zone');
+        var fileInput = document.getElementById('file-input');
+
+        dropZone.onclick = function() { fileInput.click(); };
+        dropZone.ondragover = function(e) { e.preventDefault(); dropZone.classList.add('dragover'); };
+        dropZone.ondragleave = function() { dropZone.classList.remove('dragover'); };
+        dropZone.ondrop = function(e) {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+        };
+        fileInput.onchange = function(e) {
+            if (e.target.files.length > 0) handleFile(e.target.files[0]);
+        };
+
+        function handleFile(file) {
+            if (isFlashing) return;
+            const token = ++firmwareLoadToken;
+            selectedFileContent = null;
+            selectedFile = file;
+            selectedPreset = null;
+            var isBin = file.name.toLowerCase().endsWith('.bin');
+
+            var banner = document.getElementById('file-loaded-card');
+            banner.style.display = 'flex';
+            document.getElementById('file-name').textContent = t('file_ready_prefix') + file.name;
+            document.getElementById('file-meta').textContent = t('file_size_prefix') + (file.size / 1024).toFixed(1) + t('file_size_suffix');
+
+            if (isBin) {
+                var reader = new FileReader();
+                reader.onload = function(evt) {
+                    if (token !== firmwareLoadToken) return;
+                    var buffer = evt.target.result;
+                    selectedFileContent = {
+                        isBinary: true,
+                        segments: [{ address: 0x00000000, data: new Uint8Array(buffer) }]
+                    };
+                    log('>>> Loaded binary firmware: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB @ 0x00000000)');
+                    updateButtonState();
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                var reader = new FileReader();
+                reader.onload = function(evt) {
+                    if (token !== firmwareLoadToken) return;
+                    selectedFileContent = evt.target.result;
+                    log('>>> Loaded Intel HEX firmware: ' + file.name + ' (' + (file.size / 1024).toFixed(1) + ' KB)');
+                    updateButtonState();
+                };
+                reader.readAsText(file);
+            }
+
+            var all = document.querySelectorAll('.preset-card');
+            for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+            updateButtonState();
+        }
+
+        document.getElementById('btn-clear-file').onclick = function(e) {
+            if (isFlashing) return;
+            ++firmwareLoadToken;
+            e.stopPropagation();
+            selectedFile = null;
+            selectedFileContent = null;
+            selectedPreset = null;
+            document.getElementById('file-input').value = '';
+            document.getElementById('file-loaded-card').style.display = 'none';
+            var all = document.querySelectorAll('.preset-card');
+            for (var i = 0; i < all.length; i++) all[i].classList.remove('active');
+            updateButtonState();
+        };
+
+        async function selectPreset(preset) {
+            if (isFlashing) return;
+            const token = ++firmwareLoadToken;
+            selectedPreset = preset;
+            selectedFile = null;
+            selectedFileContent = null;
+            updateButtonState();
+            renderPresets();
+            document.getElementById('file-loaded-card').style.display = 'flex';
+            document.getElementById('file-name').textContent = preset.name;
+            document.getElementById('file-meta').textContent = 'Appwrite Storage';
+            try {
+                const response = await fetch(preset.path, {credentials:'omit'});
+                if (!response.ok) throw new Error('Firmware download HTTP ' + response.status);
+                const buffer = await response.arrayBuffer();
+                if (token !== firmwareLoadToken) return;
+                if (!buffer.byteLength) throw new Error('Empty firmware');
+                selectedFileContent = preset.name.endsWith('.bin')
+                    ? {isBinary:true,segments:[{address:0,data:new Uint8Array(buffer)}]}
+                    : new TextDecoder().decode(buffer);
+                log('>>> Loaded Storage firmware: ' + preset.name);
+            } catch(error) { if (token === firmwareLoadToken) selectedFileContent = null; log('[Error] ' + error.message); }
+            updateButtonState();
+        }
+
+        // SWD frequency controls
+        var segBtns = document.querySelectorAll('#freq-segmented .segmented-btn');
+        for (var i = 0; i < segBtns.length; i++) {
+            segBtns[i].onclick = function() {
+                for (var j = 0; j < segBtns.length; j++) segBtns[j].classList.remove('active');
+                this.classList.add('active');
+                currentFreq = parseInt(this.getAttribute('data-freq'), 10);
+            };
+        }
+
+        document.getElementById('btn-clear-log').onclick = function() {
+            document.getElementById('terminal').textContent = '';
+        };
+
+        // Intel HEX parser supporting Record Types 00, 01, 02, 04
+        document.getElementById('btn-flash').onclick = async function() {
+            if (isFlashing || !selectedFileContent || !activeTransport || !activeCortexM) return;
+            const prompts={en:'Flash this image to the connected nRF54L15? Existing firmware will be overwritten.',zh:'将所选固件写入 nRF54L15？现有固件将被覆盖。',ja:'nRF54L15 に書き込みますか？既存ファームウェアを上書きします。',ko:'nRF54L15에 기록할까요? 기존 펌웨어를 덮어씁니다.',de:'Image auf nRF54L15 schreiben? Vorhandene Firmware wird überschrieben.'};
+            if (!window.confirm(prompts[currentLang] || prompts.en)) return;
+            isFlashing = true;
+            updateButtonState();
+
+            var spinner = document.getElementById('flash-spinner');
+            var text = document.getElementById('flash-btn-text');
+            var banner = document.getElementById('verdict-banner');
+            var verify = document.getElementById('verify-check').checked;
+
+            spinner.style.display = 'inline-block';
+            text.textContent = t('btn_flashing');
+            banner.style.display = 'none';
+
+            var flashStartTime = Date.now();
+
+            try {
+                if (activeTransport) {
+                    activeTransport.clearQueue();
+                }
+
+                log('=================================================================');
+                log('>>> Target Chip: Nordic nRF54L15 (Cortex-M33 CoreSight)');
+                log('>>> Interface: WebHID direct browser pipeline');
+                log('>>> SWD Frequency: ' + (currentFreq / 1000000) + ' MHz');
+                log('=================================================================');
+
+                if (!selectedFileContent) {
+                    throw new Error('Firmware content is empty or still loading. Please re-select the file or preset.');
+                }
+
+                var segments;
+                if (typeof selectedFileContent === 'object' && selectedFileContent.isBinary) {
+                    segments = selectedFileContent.segments;
+                } else {
+                    log('>>> Parsing Intel HEX records...');
+                    segments = parseIntelHex(selectedFileContent);
+                }
+
+                var totalBytes = segments.reduce(function(acc, s) { return acc + s.data.length; }, 0);
+                if (segments.length === 0 || totalBytes === 0) {
+                    throw new Error('Parsed 0 bytes from firmware image. Please select a valid Intel HEX or binary file.');
+                }
+                for (const segment of segments) {
+                    if (segment.address % 4 || segment.data.length % 4 || segment.address + segment.data.length > 0x17D000) throw new Error('Image must contain aligned nRF54L15 application flash data only');
+                }
+                log('>>> Parsed ' + segments.length + ' contiguous segment(s), total: ' + totalBytes + ' bytes.');
+
+                if (activeCmsisDap && activeCortexM) {
+                    log('>>> Configuring SWD clock: ' + currentFreq + ' Hz...');
+                    await activeCmsisDap.swjClock(currentFreq);
+
+                    log('>>> Halting Cortex-M33 core...');
+                    await activeCortexM.enableDebug();
+                    await activeCortexM.halt();
+
+                    var dpidr = await activeCortexM.readDP(0x00);
+                    log('>>> CoreSight DPIDR: 0x' + dpidr.toString(16).toUpperCase());
+
+                    // 1. UNLOCK NRF54L15 RRAM / NVMC FOR WRITING
+                    log('>>> Unlocking nRF54L15 Non-Volatile Memory (NRF_RRAMC->CONFIG = WEN)...');
+                    await activeCortexM.writeMem32(0x5004B500, 1);
+
+                    var rramReady = false;
+                    for (var attempt = 0; attempt < 50; attempt++) {
+                        var rVal = await activeCortexM.readMem32(0x5004B400);
+                        if (rVal === 1) { rramReady = true; break; }
+                    }
+                    if (!rramReady) throw new Error('Timeout waiting for NRF_RRAMC ready state');
+
+                    // 2. FLASH SEGMENTS IN SAFE 14-WORD CHUNKS WITH TAR UPDATES AND 1KB BOUNDARY PROTECTION
+                    var wordsPerChunk = 14;
+                    var writtenBytes = 0;
+
+                    for (var sIdx = 0; sIdx < segments.length; sIdx++) {
+                        var seg = segments[sIdx];
+                        log('>>> Flashing segment ' + (sIdx + 1) + '/' + segments.length + ' @ 0x' + seg.address.toString(16).toUpperCase() + ' (' + seg.data.length + ' bytes)...');
+
+                        var wordCount = Math.ceil(seg.data.length / 4);
+                        var words = new Uint32Array(wordCount);
+                        new Uint8Array(words.buffer).set(seg.data);
+
+                        var w = 0;
+                        while (w < wordCount) {
+                            var chunkAddr = seg.address + (w * 4);
+
+                            // Calculate safe words remaining before 1KB (0x400) boundary wrap-around
+                            var bytesTo1k = 0x400 - (chunkAddr & 0x3FF);
+                            var wordsUntil1k = Math.floor(bytesTo1k / 4);
+                            var remainingWords = wordCount - w;
+                            var count = Math.min(wordsPerChunk, wordsUntil1k, remainingWords);
+
+                            var chunk = words.subarray(w, w + count);
+
+                            // Set CSW (auto-inc) and TAR explicitly for this chunk
+                            await activeCortexM.transferSequence([
+                                activeCortexM.writeAPCommand(0, CSW_32BIT_AUTOINC),
+                                activeCortexM.writeAPCommand(4, chunkAddr)
+                            ]);
+
+                            // Write block
+                            await activeCortexM.proxy.transferBlock(1, 12, chunk);
+
+                            w += count;
+                            writtenBytes += (count * 4);
+
+                            // Update UI progress
+                            var progressPortion = verify ? 0.5 : 1.0;
+                            var effectiveCurrent = Math.min(totalBytes, writtenBytes);
+                            updateProgress(t('progress_flashing'), effectiveCurrent * progressPortion, totalBytes * progressPortion, flashStartTime);
+                        }
+
+                        // Wait for RRAMC ready after segment write
+                        for (var attempt = 0; attempt < 50; attempt++) {
+                            var r = await activeCortexM.readMem32(0x5004B400);
+                            if (r === 1) break;
+                        }
+                    }
+
+                    // 3. LOCK NRF54L15 RRAM / NVMC BACK TO READ-ONLY
+                    log('>>> Restoring NRF_RRAMC protection (NRF_RRAMC->CONFIG = REN)...');
+                    await activeCortexM.writeMem32(0x5004B500, 0);
+
+                    for (var attempt = 0; attempt < 50; attempt++) {
+                        var r = await activeCortexM.readMem32(0x5004B400);
+                        if (r === 1) break;
+                    }
+
+                    // 4. VERIFY READBACK
+                    if (verify) {
+                        var verifyStartTime = Date.now();
+                        log('>>> Performing 100% byte-for-byte readback verification...');
+                        var verifiedBytes = 0;
+
+                        for (var vIdx = 0; vIdx < segments.length; vIdx++) {
+                            var vSeg = segments[vIdx];
+                            var wordsCount = Math.ceil(vSeg.data.length / 4);
+                            var readbackWords = new Uint32Array(wordsCount);
+
+                            var rw = 0;
+                            while (rw < wordsCount) {
+                                var rAddr = vSeg.address + (rw * 4);
+                                var bytesTo1k = 0x400 - (rAddr & 0x3FF);
+                                var wordsUntil1k = Math.floor(bytesTo1k / 4);
+                                var remainingWords = wordsCount - rw;
+                                var count = Math.min(wordsPerChunk, wordsUntil1k, remainingWords);
+
+                                await activeCortexM.transferSequence([
+                                    activeCortexM.writeAPCommand(0, CSW_32BIT_AUTOINC),
+                                    activeCortexM.writeAPCommand(4, rAddr)
+                                ]);
+
+                                var readChunk = await activeCortexM.proxy.transferBlock(1, 12, count);
+                                readbackWords.set(readChunk, rw);
+
+                                rw += count;
+                                verifiedBytes += (count * 4);
+
+                                // Update UI progress (50% to 100%)
+                                var currentTotal = totalBytes * 0.5 + Math.min(totalBytes * 0.5, (verifiedBytes / totalBytes) * (totalBytes * 0.5));
+                                updateProgress(t('progress_verifying'), currentTotal, totalBytes, verifyStartTime);
+                            }
+
+                            var readbackBytes = new Uint8Array(readbackWords.buffer, 0, vSeg.data.length);
+
+                            for (var b = 0; b < vSeg.data.length; b++) {
+                                if (readbackBytes[b] !== vSeg.data[b]) {
+                                    throw new Error('Mismatch at address 0x' + (vSeg.address + b).toString(16).toUpperCase() + ': expected 0x' + vSeg.data[b].toString(16).padStart(2, '0') + ', read 0x' + readbackBytes[b].toString(16).padStart(2, '0'));
+                                }
+                            }
+                        }
+                        log('[PASS] All sectors verified byte-for-byte! 100% Match (' + totalBytes + ' bytes).');
+                    }
+
+                    log('>>> Resuming core and resetting target...');
+                    await activeCortexM.softReset();
+                    await activeCortexM.resume();
+                }
+
+                const completedText = verify ? t('pass_text') : ({en:'Firmware written; readback verification skipped',zh:'固件已写入；未执行回读校验',ja:'書き込み完了・読み戻し検証は未実施',ko:'기록 완료; 읽기 검증 생략',de:'Firmware geschrieben; Rückleseprüfung übersprungen'}[currentLang]);
+                var totalElapsed = ((Date.now() - flashStartTime) / 1000).toFixed(2);
+                updateProgress(completedText, totalBytes, totalBytes, null);
+                progressPercent.textContent = '100%';
+                progressFill.style.width = '100%';
+
+                banner.className = 'verdict-banner pass';
+                document.getElementById('verdict-icon').textContent = '✔';
+                document.getElementById('verdict-text').textContent = completedText + ' (' + totalElapsed + 's)';
+                log('[PASS] ' + completedText + ' in ' + totalElapsed + 's!');
+            } catch (err) {
+                log('[FAIL] ' + err.message);
+                banner.className = 'verdict-banner fail';
+                document.getElementById('verdict-icon').textContent = '✕';
+                document.getElementById('verdict-text').textContent = t('fail_text');
+            } finally {
+                isFlashing = false;
+                spinner.style.display = 'none';
+                updateButtonState();
+            }
+        };
+
+        // Initialize default language
+        applyLanguage(currentLang);
+    </script>
+</body>
+</html>
